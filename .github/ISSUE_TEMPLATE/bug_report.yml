@@ -1,5 +1,5 @@
 name: 缺陷报告
-description: 报告节点 A 的 bot、搬图公共代码或合成测试问题。
+description: 报告节点 A 的 bot、搬图公共代码或合成测试问题；安全漏洞不要用公开 issue，请按 SECURITY.md 私下报告。
 title: "[Bug] "
 labels: ["bug"]
 body:
@@ -7,7 +7,7 @@ body:
     attributes:
       value: |
         只提交人工合成的最小复现。禁止上传真实图库、alias / 别名表、keys、token、secret、私钥、openid、AppID、内网地址、内部路径、私有 docs、配置、活库、会话或其他私有数据。
-        不附原始生产日志或截图，不启动 bot、不触碰生产。可利用漏洞或泄露材料请勿公开；改用维护者已公开的私下联系渠道。
+        不附原始生产日志或截图，不启动 bot、不触碰生产。可利用漏洞或泄露材料请勿公开；安全漏洞不要用公开 issue，请按 SECURITY.md（https://github.com/Binfufu/Megu-bot/blob/main/SECURITY.md）私下报告。
   - type: dropdown
     id: scope
     attributes:
