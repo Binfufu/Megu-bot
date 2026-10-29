@@ -50,6 +50,7 @@ import {
   roll2d6,
   stepsFor,
 } from '../src/play/index.js';
+import { CURRENCY } from '../src/stats.js';
 
 /**
  * 固定种子的伪随机(测"随机数消耗顺序"必须可复现)。
@@ -64,7 +65,7 @@ function seededRandom(seed = 1) {
 }
 
 /**
- * **按剧本发牌的随机数**(只用来把"城东的湖 / 芦苇丛边 / 三个指定鱼饵"钉住):
+ * **按剧本发牌的随机数**(只用来把"第 2 个钓点 / 三个指定鱼饵"钉住):
  * 第一个值选水域(0.4 → 第 2 个钓点),后 15 个是三次 Fisher-Yates 的交换下标。
  */
 function fixedRandom() {
@@ -92,12 +93,18 @@ function run(kind, state, action = {}, ctx = {}) {
 
 /**
  * **冻结文案表**:每一条都对应原来 `src\index.js` 里那一句(改文案 = 先改这里)。
+ *
+ * ⚠️ 内容相关部分(水域/钓点/鱼饵名/货币名)从**被测状态与内容常量**推导,不在测试里写死：
+ * 私有仓有 `content/local/*.json`、公仓没有(用代码内中性默认)，写死会变成"只有私库能过"。
+ * 这里冻结的是**格式与顺序**(整句逐字比较 + 分条 + 全角空格),内容选择由 startFishing 自己的用例钉。
  */
+const FROZEN_START = startFishing({ now: 1_000_000, random: fixedRandom() });
+const FROZEN_BAIT_LIST = FROZEN_START.baits.map((row, at) => `${at + 1}. ${row.label}`).join('　');
 const FROZEN = {
-  bait: '去城东的湖的芦苇丛边吧。\n鱼饵用哪种？1. 蚯蚓　2. 面包屑　3. 从和真那儿顺来的假饵（回个 1/2/3，或者直接说名字。）\n'
+  bait: `去${FROZEN_START.water}的${FROZEN_START.spot}吧。\n鱼饵用哪种？${FROZEN_BAIT_LIST}（回个 1/2/3，或者直接说名字。）\n`
     + '（在岸边找了个位置坐下，一边晃腿一边等你挑。）',
-  already: '（已经在钓了——在城东的湖的芦苇丛边，还没下饵。）',
-  cast: '下饵了——用蚯蚓。（把浮标甩出去，往后一靠，盯着水面。）大概 3 分钟有动静。',
+  already: `（已经在钓了——在${FROZEN_START.water}的${FROZEN_START.spot}，还没下饵。）`,
+  cast: `下饵了——用${FROZEN_START.baits[0].label}。（把浮标甩出去，往后一靠，盯着水面。）大概 3 分钟有动静。`,
   reelEmpty: '杆收上来了——今天什么也没钓着。',
   reelAutoEmpty: '（半天没动静，吾收杆回去了。）',
 };
@@ -105,8 +112,10 @@ const FROZEN = {
 /**
  * **旧版(1.64.0)收杆那一行的原文** —— 只作对照,不许再发出去。
  * 1.65.0 把它从 `（fish）`(档位 id)改成 `（普通的鱼）`(档位词),理由见 D105 第三节。
+ *
+ * 货币名从运行时内容常量取(私库/公仓默认值不同，但这一行的**其余部分**逐字冻结)。
  */
-const OLD_REEL_LINE = '鱼篓里：鳟鱼（fish）、湖底的秘宝（treasure），合起来大概值 50900 厄里斯。';
+const OLD_REEL_LINE = `鱼篓里：鳟鱼（fish）、湖底的秘宝（treasure），合起来大概值 50900 ${CURRENCY.name}。`;
 
 export function registerPlayTests({ test, assert }) {
   // -------------------------------------------------------------------------
@@ -136,11 +145,11 @@ export function registerPlayTests({ test, assert }) {
   });
 
   test('动作协议(D105):时间是注入的 —— 同一个动作、同一个 now,跑两次结果完全一样', () => {
-    const one = run('fishing.begin', null, {}, { random: fixedRandom(), now: 555_000, userName: '和真', userId: 'U1' });
-    const two = run('fishing.begin', null, {}, { random: fixedRandom(), now: 555_000, userName: '和真', userId: 'U1' });
+    const one = run('fishing.begin', null, {}, { random: fixedRandom(), now: 555_000, userName: '示例用户', userId: 'U1' });
+    const two = run('fishing.begin', null, {}, { random: fixedRandom(), now: 555_000, userName: '示例用户', userId: 'U1' });
     assert.deepEqual(one, two);
     assert.equal(one.state.startedAt, 555_000);
-    assert.equal(one.state.userName, '和真');
+    assert.equal(one.state.userName, '示例用户');
     assert.equal(one.state.userId, 'U1');
   });
 
@@ -148,7 +157,7 @@ export function registerPlayTests({ test, assert }) {
   // 开局 / 下饵 / 收杆 / 结算
   // -------------------------------------------------------------------------
   test('开局(D105):水域与钓点来自表、三个饵、马上给话;重复开局要有第二句', () => {
-    const { state, events, lines } = run('fishing.begin', null, {}, { random: fixedRandom(), userName: '和真' });
+    const { state, events, lines } = run('fishing.begin', null, {}, { random: fixedRandom(), userName: '示例用户' });
     assert.equal(state.phase, 'bait');
     assert.equal(state.dueAt, null, '"还没下饵"就不该有截止时刻');
     assert.equal(state.baits.length, 3);
@@ -213,7 +222,7 @@ export function registerPlayTests({ test, assert }) {
     // ⚠️ **这一条是 1.65.0 唯一一处有意的文案变更**(D105 第三节),不是"抽内核时不小心改的"
     //    —— 旧值是 `鳟鱼（fish）`:档位 id 直接印给了用户,而 D104 早就定了"前端只说档位词"。
     //    冻结旧值在这里,是为了**以后再有人动它**时当场红。
-    assert.equal(OLD_REEL_LINE, '鱼篓里：鳟鱼（fish）、湖底的秘宝（treasure），合起来大概值 50900 厄里斯。', '旧版原样(对照用)');
+    assert.equal(OLD_REEL_LINE, '鱼篓里：鳟鱼（fish）、湖底的秘宝（treasure），合起来大概值 50900 ' + CURRENCY.name + '。', '旧版原样(对照用;货币名取自运行时内容常量)');
     // 现在这一行与旧版**只差档位那两处**:其余文字(数值/选项/括号旁白)仍逐字相同
     const sameButTier = full.lines[0]
       .split('\n')[0]
@@ -266,7 +275,7 @@ export function registerPlayTests({ test, assert }) {
       water: '城东的湖',
       spot: '芦苇丛边',
       userId: 'U1',
-      userName: '和真',
+      userName: '示例用户',
     };
     const out = run('fishing.reel_in', state, { flavor: '（把竿收起来）今天够了。' }, { now: 1000 });
     assert.ok(!('reelFlavor' in out.state), '模型那段话只用来拼消息,不许写进状态(旧版没有这个字段)');
