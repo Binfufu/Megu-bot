@@ -1,6 +1,11 @@
 import { LOCAL_MOOD_BODY_CONTENT } from './local-mood-body-content.js';
 import fs from 'node:fs';
 import path from 'node:path';
+import { parseEnv } from 'node:util';
+import { resolveParams } from './params.js';
+import { CONFIG_DEFAULTS, CONFIG_DERIVED_DEFAULTS, CONFIG_KNOWN_ENV, createConfigParamDefinitions } from './config-params.js';
+import { packParamsForTheme } from './content-pack.js';
+import { validatePackParams } from './pack-params.js';
 import { DEFAULT_MEAL_WINDOWS, WARMUP_MODES, parseMealWindows, parseSleepWindow } from './warmup.js';
 import { parseMorningTime } from './morning.js';
 import { MOOD_THEME_NAMES } from './mood.js';
@@ -36,62 +41,41 @@ function parseKeywords(value) {
 /** Re-exported so config consumers do not need a second import. */
 export { parseSleepWindow } from './warmup.js';
 
-const DEFAULTS = {
-  apiBase: 'https://api.bot.qq.com',
-  intents: INTENT_GROUP_AND_C2C,
-  profile: 'qqbot',
-  command: 'dsh',
-  provider: 'deepseek-official',
-  model: 'deepseek-flash',
-  // QQ passive replies expire 5 minutes after the triggering message, so the
-  // default leaves a margin rather than sitting exactly on the boundary.
-  replyTimeoutMs: 240_000,
-  maxChars: 1500,
-  maxConcurrency: 2,
-  logLevel: 'info',
-};
+const DEFAULTS = CONFIG_DEFAULTS;
+// A synchronous build-local adapter; never write params/packParams into process.env.
+let activeParams = null;
+// Provenance for the existing index.js preload as well as repeated loadConfig calls.
+// Values stay private, never enter config diagnostics or serialized output.
+const dotenvOrigins = new Map();
+
+function typed(name, fallback) {
+  if (activeParams) return activeParams.values[name] ?? fallback;
+  const def = CONFIG_PARAM_DEFINITIONS.find((entry) => entry.id === name);
+  if (!def) throw new Error('配置参数未注册');
+  return resolveParams([def], { env: { [name]: process.env[name] } }).values[name] ?? fallback;
+}
 
 function raw(name) {
-  const value = process.env[name];
-  return value === undefined || value === '' ? undefined : value;
+  const value = activeParams ? activeParams.inputs[name] : process.env[name];
+  return value === undefined || value === '' ? undefined : String(value);
 }
 
 function asInt(name, fallback) {
-  const value = raw(name);
-  if (value === undefined) return fallback;
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-    throw new Error(`${name} 必须是正整数，收到 ${JSON.stringify(value)}`);
-  }
-  return parsed;
+  return typed(name, fallback);
 }
 
 function asBool(name, fallback) {
-  const value = raw(name);
-  if (value === undefined) return fallback;
-  return ['1', 'true', 'yes', 'on'].includes(value.toLowerCase());
+  return typed(name, fallback);
 }
 
 /** A ratio in `[0, 1]`, for probabilities. Zero is meaningful, so it is allowed. */
 function asRatio(name, fallback) {
-  const value = raw(name);
-  if (value === undefined) return fallback;
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
-    throw new Error(`${name} 必须是 0 到 1 之间的数（0.5 = 50%），收到 ${JSON.stringify(value)}`);
-  }
-  return parsed;
+  return typed(name, fallback);
 }
 
 /** Like `asInt`, but zero is allowed because it means "disabled". */
 function asNonNegativeInt(name, fallback) {
-  const value = raw(name);
-  if (value === undefined) return fallback;
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isSafeInteger(parsed) || parsed < 0) {
-    throw new Error(`${name} 必须是非负整数（0 = 关闭），收到 ${JSON.stringify(value)}`);
-  }
-  return parsed;
+  return typed(name, fallback);
 }
 
 /** 更新播报的模式:照念 / 用角色的语气说。拼错 fail closed。 */
@@ -291,10 +275,23 @@ export function resolveEnvFile(rootDir) {
  * Load a dotenv file into process.env if it exists. Uses Node's built-in parser
  * so the bridge stays dependency-free.
  */
+function loadEnvFileData(file) {
+  if (!fs.existsSync(file)) return { loaded: false, inputs: {} };
+  try {
+    const before = { ...process.env };
+    const inputs = parseEnv(fs.readFileSync(file, 'utf8'));
+    process.loadEnvFile(file);
+    for (const name of Object.keys(inputs)) {
+      if (!Object.hasOwn(before, name) && process.env[name] !== undefined) {
+        dotenvOrigins.set(name, { value: process.env[name] });
+      }
+    }
+    return { loaded: true, inputs };
+  } catch { throw new Error('配置环境文件读取失败'); }
+}
+
 export function loadEnvFile(file) {
-  if (!fs.existsSync(file)) return false;
-  process.loadEnvFile(file);
-  return true;
+  return loadEnvFileData(file).loaded;
 }
 
 /**
@@ -328,12 +325,7 @@ export function defaultWorkspaceFor(rootDir) {
  * 设置 `DSH_*` 变量的配置（`BOOTSTRAP_PREFIXES`），所以这些值当年必须走 `QQBOT_` 前缀。
  */
 export function buildDshConfig(defaultWorkspace, rootDir = null) {
-  const profile = raw('QQBOT_DSH_PROFILE') ?? DEFAULTS.profile;
-  // The profile name is interpolated into the Windows shell command line, so it
-  // must not be able to carry whitespace, quotes, or shell metacharacters.
-  if (!/^[A-Za-z0-9._-]+$/.test(profile)) {
-    throw new Error(`QQBOT_DSH_PROFILE 只能包含字母、数字、点、下划线和连字符，收到 ${JSON.stringify(profile)}`);
-  }
+  const profile = parseDshProfile(raw('QQBOT_DSH_PROFILE') ?? DEFAULTS.profile);
 
   return {
     // ⚠️ 这三个字段(`command` / `optional`)已**零消费者**(6B 去 DSH 化后桥不再起子进程):
@@ -423,15 +415,9 @@ export function buildEngineConfig() {
   //    一台**没配 QQBOT_ENGINE 的新部署**会看到「QQBOT_ENGINE=dsh 已退役」这条它从没配过的 warn
   //    （`src\index.js` 的装配段），而 schema 又在暗示 dsh 是个正常选项。
   //    "空 = 用唯一那个引擎"才是诚实的默认值；显式配了别的值仍然照旧大声 warn。
-  const mode = String(raw('QQBOT_ENGINE') ?? 'own').trim().toLowerCase();
-  if (!['dsh', 'own', 'shadow'].includes(mode)) {
-    throw new Error(`QQBOT_ENGINE 只能是 dsh / own / shadow,收到 ${JSON.stringify(mode)}`);
-  }
+  const mode = parseEngineMode(raw('QQBOT_ENGINE') ?? 'own');
   const limitRaw = raw('QQBOT_OWN_INPUT_TOKEN_LIMIT');
-  const inputTokenLimit = limitRaw == null ? null : Number(limitRaw);
-  if (limitRaw != null && (!/^[1-9]\d*$/.test(limitRaw) || !Number.isSafeInteger(inputTokenLimit))) {
-    throw new Error('QQBOT_OWN_INPUT_TOKEN_LIMIT 必须是正安全整数或留空（不设置上限）');
-  }
+  const inputTokenLimit = limitRaw == null ? null : parseInputTokenLimit(limitRaw);
   return {
     mode,
     inputTokenLimit,
@@ -445,14 +431,182 @@ export function buildEngineConfig() {
   };
 }
 
+const ENGINE_MODES = ['dsh', 'own', 'shadow'];
+const MEITU_SOURCES = ['auto', 'danbooru', 'safebooru'];
+
+function parseDshProfile(value) {
+  // The historical profile must not carry shell whitespace/metacharacters.
+  if (!/^[A-Za-z0-9._-]+$/.test(value)) {
+    throw new Error('QQBOT_DSH_PROFILE 只能包含字母、数字、点、下划线和连字符');
+  }
+  return value;
+}
+
+function parseEngineMode(value) {
+  const mode = String(value).trim().toLowerCase();
+  if (!ENGINE_MODES.includes(mode)) throw new Error('QQBOT_ENGINE 只能是 dsh / own / shadow');
+  return mode;
+}
+
+function parseInputTokenLimit(value) {
+  const parsed = Number(value);
+  if (!/^[1-9]\d*$/.test(String(value)) || !Number.isSafeInteger(parsed)) {
+    throw new Error('QQBOT_OWN_INPUT_TOKEN_LIMIT 必须是正安全整数或留空（不设置上限）');
+  }
+  return parsed;
+}
+
+function parseMeituSource(value) {
+  const source = String(value).trim().toLowerCase();
+  if (!MEITU_SOURCES.includes(source)) throw new Error('QQBOT_MEITU_SOURCE 只能是 auto / danbooru / safebooru');
+  return source;
+}
+
+function parseAccessMode(value) {
+  const mode = String(value).toLowerCase();
+  if (!ACCESS_MODES.includes(mode)) throw new Error('QQBOT_ACCESS_MODE 参数无效');
+  return mode;
+}
+
+export const CONFIG_PARAM_DEFINITIONS = createConfigParamDefinitions({
+  enums: {
+    QQBOT_ENGINE: ENGINE_MODES, QQBOT_MEITU_SOURCE: MEITU_SOURCES, QQBOT_ACCESS_MODE: ACCESS_MODES,
+    QQBOT_MOOD_THEME: MOOD_THEME_NAMES, QQBOT_BODY_THEME: BODY_THEME_NAMES, QQBOT_WARMUP_MODE: WARMUP_MODES,
+    QQBOT_ANNOUNCE_MODE: ANNOUNCE_MODES, QQBOT_ANNOUNCE_TARGETS: ANNOUNCE_TARGETS,
+    QQBOT_ANNOUNCE_TRIGGER: ANNOUNCE_TRIGGERS, QQBOT_GROWTH_ANNOUNCE: GROWTH_ANNOUNCE_CHANNELS,
+    QQBOT_SELFCARE_LIFE_TO: ['c2c', 'group'],
+  },
+  profile: parseDshProfile, engine: parseEngineMode, inputTokenLimit: parseInputTokenLimit,
+  meituSource: parseMeituSource, accessMode: parseAccessMode,
+  moodTheme: parseMoodTheme, bodyTheme: (value) => parseBodyTheme(value, String(value).trim().toLowerCase()),
+  warmupMode: parseWarmupMode, announceMode: parseAnnounceMode, announceTargets: parseAnnounceTargets,
+  announceTrigger: parseAnnounceTrigger, growthAnnounce: parseGrowthAnnounce,
+  groupMode: (value) => String(value).toLowerCase(),
+  reasoningEffort: (value) => buildEngineRequestOptions((name) => name === 'QQBOT_LLM_REASONING_EFFORT' ? value : undefined).reasoningEffort,
+  maxTokens: (value) => { validateLlmRequestOptions({ maxTokens: value }); return true; },
+  keywordJitter: (value) => parseJitterRange(value),
+  replyJitter: (value) => parseJitterRange(value, 'QQBOT_REPLY_JITTER_MS'),
+  // These existing parsers deliberately retain their legacy tolerant grammar.
+  sleep: parseSleepWindow, morning: parseMorningTime,
+  mealWindows: (value) => {
+    if (!Array.isArray(value)) return parseMealWindows(value);
+    for (const entry of value) {
+      if (!entry || typeof entry.label !== 'string'
+        || !Number.isInteger(entry.start) || !Number.isInteger(entry.end)
+        || parseMealWindows(`${entry.start}-${entry.end}`).length !== 1) throw new Error('invalid meal window');
+    }
+    return value;
+  },
+  keywords: (value) => {
+    if (!Array.isArray(value)) return parseKeywords(value);
+    if (value.some((entry) => typeof entry !== 'string')) throw new Error('invalid keywords');
+    return parseKeywords(value.join(','));
+  },
+});
+
 /**
  * Build the validated runtime configuration. Throws one aggregated error listing
  * every problem, so a misconfigured start fails loudly instead of half-working.
  */
-export function loadConfig({ rootDir }) {
-  const envFile = resolveEnvFile(rootDir);
-  const loadedEnvFile = loadEnvFile(envFile);
+export function loadConfig({ rootDir, params = {}, packParams } = {}) {
+  const previous = activeParams;
+  activeParams = null;
+  try {
+    const env = { ...process.env };
+    const inheritedFileInputs = {};
+    for (const [name, origin] of dotenvOrigins) {
+      if (Object.hasOwn(env, name) && env[name] === origin.value) {
+        inheritedFileInputs[name] = env[name];
+        delete env[name];
+      }
+    }
+    const envFile = resolveEnvFile(rootDir);
+    let fileInputs = {};
+    let loadedEnvFile;
+    try {
+      const loaded = loadEnvFileData(envFile);
+      fileInputs = loaded.inputs;
+      loadedEnvFile = loaded.loaded;
+    } catch { throw new Error('配置环境文件读取失败'); }
+    // Node dotenv never overwrites an existing process key, even an empty one.
+    // Still validate every file input before omitting keys masked by empty env.
+    resolveParams(CONFIG_PARAM_DEFINITIONS, { envFile: fileInputs });
+    const effectiveFileInputs = Object.fromEntries(Object.entries({ ...fileInputs, ...inheritedFileInputs })
+      .filter(([name]) => env[name] !== ''));
+    let jsonParams = {};
+    if (raw('QQBOT_PARAMS_FILE')) {
+      try { jsonParams = JSON.parse(fs.readFileSync(path.resolve(rootDir, raw('QQBOT_PARAMS_FILE')), 'utf8')); }
+      catch { throw new Error('QQBOT_PARAMS_FILE 配置数据读取失败'); }
+      resolveParams(CONFIG_PARAM_DEFINITIONS, { configFile: jsonParams });
+    }
+    // Validate before spreading: never invoke accessors in injected data.
+    resolveParams(CONFIG_PARAM_DEFINITIONS, { configFile: params });
+    const configFile = { ...jsonParams, ...params };
+    const layers = { configFile, envFile: effectiveFileInputs, env, knownEnv: CONFIG_KNOWN_ENV };
+    const withoutPack = resolveParams(CONFIG_PARAM_DEFINITIONS, layers);
+    const contentPack = packParams === undefined
+      ? packParamsForTheme(withoutPack.values.QQBOT_MOOD_THEME) : packParams;
+    validatePackParams(contentPack);
+    const resolved = resolveParams(CONFIG_PARAM_DEFINITIONS, { ...layers, contentPack });
+    activeParams = resolved;
+    let config;
+    try { config = buildRuntimeConfig({ rootDir, envFile, loadedEnvFile }); }
+    catch (error) {
+      // Legacy parsers include raw input and paths in errors. Never forward them.
+      // Missing credentials keep the historical two-line shape (tests and operators
+      // both recognise it), without the absolute env-file path.
+      const problems = [];
+      if (!raw('QQ_APP_ID')) problems.push('缺少 QQ_APP_ID（QQ 开放平台 -> 开发设置）');
+      if (!raw('QQ_CLIENT_SECRET')) problems.push('缺少 QQ_CLIENT_SECRET（QQ 开放平台 -> 开发设置）');
+      if (problems.length) throw new Error(`配置无效：\n  - ${problems.join('\n  - ')}`);
+      if (resolved.values.QQBOT_BODY_THEME !== undefined
+        && resolved.values.QQBOT_BODY_THEME !== resolved.values.QQBOT_MOOD_THEME) {
+        throw new Error('配置无效：QQBOT_BODY_THEME 与 QQBOT_MOOD_THEME 不一致');
+      }
+      throw new Error('配置无效：参数校验失败');
+    }
+    const registry = CONFIG_PARAM_DEFINITIONS.map((definition) => Object.freeze({
+      id: definition.id, type: definition.type, scope: definition.scope,
+      sensitive: definition.sensitive, env: definition.env,
+      min: definition.min, max: definition.max, values: definition.values,
+      nullable: definition.nullable, emptyAsUnset: definition.emptyAsUnset,
+      default: definition.sensitive ? undefined : definition.default,
+      ...(CONFIG_DERIVED_DEFAULTS[definition.id] ? { derivedDefault: CONFIG_DERIVED_DEFAULTS[definition.id] } : {}),
+    }));
+    for (const [id, derivedDefault] of Object.entries(CONFIG_DERIVED_DEFAULTS)) {
+      if (resolved.sources[id]?.source === 'default') resolved.sources[id].derivedDefault = derivedDefault;
+    }
+    const inheritSource = (id, upstream, applies) => {
+      if (!applies || resolved.sources[id].source !== 'default') return;
+      const origin = resolved.sources[upstream];
+      resolved.sources[id] = {
+        ...resolved.sources[id], source: origin.source,
+        chain: [...origin.chain.map((entry) => ({ ...entry })), { source: 'derived' }],
+        derivedFrom: upstream,
+      };
+    };
+    inheritSource('QQBOT_BODY_THEME', 'QQBOT_MOOD_THEME', raw('QQBOT_BODY_THEME') === undefined);
+    inheritSource('QQBOT_MEMORY_DB', 'QQBOT_MOOD_THEME', raw('QQBOT_MEMORY_DB') === undefined);
+    for (const suffix of ['BASEURL', 'KEY', 'MODEL', 'REASONING_EFFORT', 'MAX_TOKENS']) {
+      inheritSource(`QQBOT_LLM_${suffix}`, `QQBOT_LLM_DREAM_${suffix}`,
+        raw(`QQBOT_LLM_${suffix}`) === undefined && raw(`QQBOT_LLM_DREAM_${suffix}`) !== undefined);
+    }
+    inheritSource('QQBOT_SELFCARE_C2C', 'QQBOT_MORNING_C2C',
+      raw('QQBOT_SELFCARE_C2C') === undefined && raw('QQBOT_MORNING_C2C') !== undefined);
+    inheritSource('QQBOT_IDS', 'QQBOT_ALLOWLIST', raw('QQBOT_IDS') === undefined
+      && raw('QQBOT_ACCESS_MODE') === undefined && raw('QQBOT_ALLOWLIST') !== undefined);
+    inheritSource('QQBOT_MEITU_DB', 'QQBOT_STATE_DB',
+      raw('QQBOT_MEITU_DB') === undefined && raw('QQBOT_STATE_DB') !== undefined);
+    Object.defineProperties(config, {
+      paramSources: { value: resolved.sources },
+      paramWarnings: { value: resolved.warnings },
+      paramRegistry: { value: Object.freeze(registry) },
+    });
+    return config;
+  } finally { activeParams = previous; }
+}
 
+function buildRuntimeConfig({ rootDir, envFile, loadedEnvFile }) {
   const problems = [];
   const appId = raw('QQ_APP_ID');
   const clientSecret = raw('QQ_CLIENT_SECRET');
@@ -467,7 +621,8 @@ export function loadConfig({ rootDir }) {
   // 旧的 JSON 状态:默认自动导入一次。写成空值 = 不导入（第二只机器人用）。
   // 这里不能走 raw()：它把空串统一当成"没配"，而空串在本项里恰恰是有意义的
   // Local display content is separate from runtime policy.
-  const legacyStateEnv = process.env.QQBOT_LEGACY_STATE_FILE;
+  const legacyStateEnv = activeParams
+    ? activeParams.inputs.QQBOT_LEGACY_STATE_FILE : process.env.QQBOT_LEGACY_STATE_FILE;
   const legacyStateFile = legacyStateEnv === undefined
     ? path.join(rootDir, '.qqbot-state.json')
     : (legacyStateEnv.trim() ? path.resolve(rootDir, legacyStateEnv) : null);
@@ -493,10 +648,7 @@ export function loadConfig({ rootDir }) {
   // 默认 **fail closed**：没写 `QQBOT_ACCESS_MODE` 时按 allowlist 走，而空名单 = 谁都不回。
   // README 与 .env.example 一直是这么写的，代码原先却默认 `open`（谁都能跟她说话）——
   // 2026-10-08 开源前审计把这条不一致揪出来了，改成和文档一致。
-  const accessMode = (modeRaw ?? 'allowlist').toLowerCase();
-  if (!ACCESS_MODES.includes(accessMode)) {
-    problems.push(`QQBOT_ACCESS_MODE 只能是 ${ACCESS_MODES.join(' / ')}，收到 ${JSON.stringify(modeRaw)}`);
-  }
+  const accessMode = parseAccessMode(modeRaw ?? 'allowlist');
 
   const listRaw = idsRaw ?? (useLegacy ? legacyAllowlist : '');
   let accessIds = null;
@@ -557,10 +709,7 @@ export function loadConfig({ rootDir }) {
        * ⚠️ **数字全是【暂定】**(2026-10-23),主人可调;改 env 不改代码。
        */
       meitu: (() => {
-        const source = (raw('QQBOT_MEITU_SOURCE') ?? 'auto').trim().toLowerCase();
-        if (!['auto', 'danbooru', 'safebooru'].includes(source)) {
-          throw new Error(`QQBOT_MEITU_SOURCE 只能是 auto / danbooru / safebooru，收到 ${JSON.stringify(source)}`);
-        }
+        const source = parseMeituSource(raw('QQBOT_MEITU_SOURCE') ?? 'auto');
         return {
           enabled: asBool('QQBOT_MEITU', false),
           groups: (raw('QQBOT_MEITU_GROUPS') ?? '')
@@ -714,7 +863,7 @@ export function loadConfig({ rootDir }) {
           // restriction; unset keeps the defaults.
           mealWindows: raw('QQBOT_WARMUP_MEAL_HOURS') === undefined
             ? DEFAULT_MEAL_WINDOWS
-            : parseMealWindows(raw('QQBOT_WARMUP_MEAL_HOURS')),
+            : (activeParams ? activeParams.values.QQBOT_WARMUP_MEAL_HOURS : parseMealWindows(raw('QQBOT_WARMUP_MEAL_HOURS'))),
           // How often to check whether any group is due. Also the granularity of
           // a random plan, so a shorter tick makes the timing look less rounded.
           tickMs: asInt('QQBOT_WARMUP_TICK_MS', 30_000),

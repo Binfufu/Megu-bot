@@ -69,17 +69,29 @@ function atomicWriteJson(file, value) {
   try { fs.chmodSync(file, 0o600); } catch { /* 同上 */ }
 }
 
-function redact(message, secrets) {
-  let text = String(message ?? '');
-  for (const secret of secrets) {
-    if (secret) text = text.split(secret).join('***');
-  }
-  return text.slice(0, 300);
+function plainModelRecord(value) {
+  if (!value || typeof value !== 'object') return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function slotOf(value) {
   const text = String(value ?? '').trim();
   return MODEL_SLOTS.includes(text) ? text : null;
+}
+
+/** 失败视图仍有字段来源，但解封被阻止的 key 绝不谎称正使用 env key。 */
+function slotFallback(defaults, patch, keyBlocked = false) {
+  const config = { ...defaults, ...patch };
+  if (defaults.paramSources) {
+    const sources = { ...defaults.paramSources };
+    if (keyBlocked) sources.apiKey = Object.freeze({
+      source: 'unavailable-secret', sensitive: true,
+      chain: Object.freeze([...sources.apiKey.chain, Object.freeze({ source: 'unavailable-secret' })]),
+    });
+    Object.defineProperty(config, 'paramSources', { value: Object.freeze(sources), enumerable: false });
+  }
+  return config;
 }
 
 /**
@@ -95,6 +107,8 @@ export function createLlmSettings(options = {}) {
   const log = options.log ?? console;
   const now = options.now ?? Date.now;
   const clientOptions = { log, ...(options.clientOptions ?? {}) };
+  // 连接参数只由已校验的 slot/profile 决定；附加选项不得在来源解析后偷偷换连接。
+  for (const name of ['baseUrl', 'apiKey', 'model', 'reasoning']) delete clientOptions[name];
 
   let store = { version: 1, slots: {}, profiles: [] };
   let loadError = '';
@@ -130,7 +144,7 @@ export function createLlmSettings(options = {}) {
       try {
         apiKey = secretBox.unseal(raw.apiKeyEnc);
       } catch (err) {
-        return { ok: false, error: `unseal_failed:${redact(err?.message, [raw.apiKeyEnc])}` };
+        return { ok: false, error: 'unseal_failed' };
       }
     }
     const checked = validateSlotInput({
@@ -156,7 +170,7 @@ export function createLlmSettings(options = {}) {
         ...clientOptions,
       });
     } catch (err) {
-      return { ok: false, error: `client_failed:${redact(err?.message, [config.apiKey])}` };
+      return { ok: false, error: 'client_failed' };
     }
     return { ok: true, config, client, raw };
   }
@@ -207,7 +221,17 @@ export function createLlmSettings(options = {}) {
    * 不搞"部分 slot 生效"这种半吊子状态;但"本来就未配置"(如梦没 env、文件也没覆盖)不算坏。
    */
   function resolveSlot(slots, slot, { strict = false } = {}) {
-    const defaults = defaultsFromEnv(env)[slot];
+    let defaults;
+    try {
+      defaults = defaultsFromEnv(env)[slot];
+    } catch {
+      // 显式非法 env 不能从“校验失败”落回同一份未经校验的 env 再建 client。
+      return {
+        ok: false, error: 'invalid_env',
+        warn: `[模型] ${slot} 的环境参数无效,拒绝建立 client`,
+        fallback: slotFallback(defaultsFromEnv({})[slot], { source: 'env(配置无效)', configured: false }),
+      };
+    }
     const override = slots[slot];
     let over = null;
     if (override && typeof override === 'object') {
@@ -219,25 +243,36 @@ export function createLlmSettings(options = {}) {
             ok: false,
             error: 'secret_unavailable',
             warn: `[模型] ${slot} 的配置需要 DPAPI 解封,但当前环境不可用 —— 不回退环境变量`,
-            fallback: { ...defaults, apiKey: '', configured: false, source: 'panel(密钥无法解封)', keyError: true },
+            fallback: slotFallback(defaults, { apiKey: '', configured: false, source: 'panel(密钥无法解封)', keyError: true }, true),
           };
         }
         try {
           over.apiKey = secretBox.unseal(override.apiKeyEnc);
         } catch (err) {
-          const detail = redact(err?.message, [override.apiKeyEnc]);
           return {
             ok: false,
-            error: `unseal_failed:${detail}`,
-            warn: `[模型] ${slot} 的 key 解封失败(换用户/换机器?): ${detail}`,
-            fallback: { ...defaults, apiKey: '', configured: false, source: 'panel(密钥无法解封)', keyError: true },
+            error: 'unseal_failed',
+            warn: `[模型] ${slot} 的 key 解封失败(换用户/换机器?)`,
+            fallback: slotFallback(defaults, { apiKey: '', configured: false, source: 'panel(密钥无法解封)', keyError: true }, true),
           };
         }
       }
       delete over.apiKeyEnc;
     }
 
-    let merged = mergeSlot(defaults, over);
+    let merged;
+    try {
+      merged = mergeSlot(defaults, over);
+    } catch {
+      // 沿用面板输入的既有安全错误码；通用注册表不透传 raw/error/secret。
+      const checked = validateSlotInput({ ...defaults, ...over, slot });
+      const code = checked.ok ? 'bad_params' : checked.error;
+      return {
+        ok: false, error: `invalid:${code}`,
+        warn: `[模型] ${slot} 的配置无效(${code})`,
+        fallback: Object.assign(mergeSlot(defaults, null), { source: 'env(面板配置无效)' }),
+      };
+    }
     // 合并后的形状再校验一次;写坏的 JSON 不许把启动带下水 —— 启动路径回退环境变量并标出来。
     // ⚠️ `strict`(热加载)只把"**文件里真的写了覆盖**还是不合形状"判失败:
     //    梦境没 env、文件也没覆盖时 `empty_base_url` 是**正常的未配置**,不是坏文件。
@@ -258,17 +293,16 @@ export function createLlmSettings(options = {}) {
           warn: strict
             ? `[模型] ${slot} 的配置无效(${checked.error})`
             : `[模型] ${slot} 的面板配置无效(${checked.error}),回退环境变量`,
-          fallback: { ...defaults, source: 'env(面板配置无效)' },
+          fallback: Object.assign(mergeSlot(defaults, null), { source: 'env(面板配置无效)' }),
         };
       }
     } else {
-      merged = {
-        ...merged,
+      Object.assign(merged, {
         provider: checked.value.provider,
         baseUrl: checked.value.baseUrl,
         model: checked.value.model,
         reasoning: checked.value.reasoning,
-      };
+      });
     }
     merged.configured = Boolean(merged.apiKey && merged.baseUrl && merged.model);
     return { ok: true, config: merged };
@@ -299,8 +333,8 @@ export function createLlmSettings(options = {}) {
       delete problems[slot];
       return client;
     } catch (err) {
-      problems[slot] = `client_failed:${redact(err?.message, [config.apiKey])}`;
-      log.warn?.(`[模型] ${slot} 建 client 失败: ${redact(err?.message, [config.apiKey])}`);
+      problems[slot] = 'client_failed';
+      log.warn?.(`[模型] ${slot} 建 client 失败(client_failed)`);
       return null;
     }
   }
@@ -358,8 +392,9 @@ export function createLlmSettings(options = {}) {
       if (!read.ok) return reloadFailed(read.error);
       // 文件被外部删掉:保留旧配置 —— 不偷偷回退 env(理由同"失败不回退")。
       if (read.value === null) return reloadFailed('file_missing');
-      if (!read.value || typeof read.value !== 'object'
-        || !read.value.slots || typeof read.value.slots !== 'object' || Array.isArray(read.value.slots)) {
+      if (!plainModelRecord(read.value) || !plainModelRecord(read.value.slots)
+        || Object.values(read.value.slots).some((value) => value !== null && !plainModelRecord(value))
+        || (Object.hasOwn(read.value, 'profiles') && !Array.isArray(read.value.profiles))) {
         return reloadFailed('bad_shape');
       }
 
@@ -390,7 +425,7 @@ export function createLlmSettings(options = {}) {
             ...clientOptions,
           });
         } catch (err) {
-          return reloadFailed(`client_failed:${redact(err?.message, [resolved.config.apiKey])}`);
+          return reloadFailed('client_failed');
         }
       }
       const nextProfiles = buildProfileRegistry(nextStore.profiles, { strict: true });
@@ -413,7 +448,7 @@ export function createLlmSettings(options = {}) {
       return { ok: true, changed };
     } catch (err) {
       // 兜底:连 readJson 之外的东西炸了也不许把 watcher/进程带下去。
-      return reloadFailed(`reload_failed:${redact(err?.message, [])}`);
+      return reloadFailed('reload_failed');
     }
   }
 
@@ -488,11 +523,11 @@ export function createLlmSettings(options = {}) {
       });
     } catch (err) {
       watcher = null;
-      log.warn?.(`[模型] 热加载监听开不起来(${err?.code ?? err?.message ?? err}),改文件后需重启才生效: ${dir}`);
+      log.warn?.(`[模型] 热加载监听开不起来(watch_failed),改文件后需重启才生效: ${dir}`);
       return close;
     }
     watcher.on('error', (err) => {
-      log.warn?.(`[模型] 热加载监听出错(继续用当前配置): ${err?.message ?? err}`);
+      log.warn?.('[模型] 热加载监听出错(watch_failed,继续用当前配置)');
     });
     return close;
   }
@@ -571,7 +606,7 @@ export function createLlmSettings(options = {}) {
       ensureDir(file);
       fs.appendFileSync(`${file}.audit.log`, `${JSON.stringify(row)}\n`, { encoding: 'utf8', mode: 0o600 });
     } catch (err) {
-      log.warn?.(`[模型] 审计写入失败: ${err?.message ?? err}`);
+      log.warn?.('[模型] 审计写入失败(audit_failed)');
     }
   }
 
@@ -615,7 +650,7 @@ export function createLlmSettings(options = {}) {
         attempts: 1,
       });
     } catch (err) {
-      return { ok: false, error: redact(err?.message, [checked.apiKey]), slot };
+      return { ok: false, error: 'client_failed', slot };
     }
     const startedAt = now();
     try {
@@ -637,7 +672,7 @@ export function createLlmSettings(options = {}) {
         model: checked.model,
         latencyMs: Math.max(0, now() - startedAt),
         status: Number.isInteger(err?.status) ? err.status : null,
-        error: redact(err?.message, [checked.apiKey]),
+        error: 'request_failed',
       };
     }
   }
@@ -646,6 +681,7 @@ export function createLlmSettings(options = {}) {
     const key = slotOf(slot);
     if (key === null) return { ok: false, error: 'bad_slot' };
     const current = get(key);
+    try { defaultsFromEnv(env); } catch { return { ok: false, error: 'invalid_env' }; }
     const checked = validateSlotInput({
       slot: key,
       provider: candidate?.provider ?? current.provider,
@@ -694,7 +730,7 @@ export function createLlmSettings(options = {}) {
         return { ok: false, error: 'secret_roundtrip_failed' };
       }
     } catch (err) {
-      return { ok: false, error: redact(err?.message, [checked.value.apiKey]) };
+      return { ok: false, error: 'secret_failed' };
     }
 
     const duplicate = Object.values(profileEffective).find((one) => (
@@ -768,6 +804,7 @@ export function createLlmSettings(options = {}) {
     const key = slotOf(slot);
     if (key === null) return { ok: false, error: 'bad_slot' };
     const current = get(key);
+    try { defaultsFromEnv(env); } catch { return { ok: false, error: 'invalid_env' }; }
     const checked = validateSlotInput({
       slot: key,
       provider: input.provider ?? current.provider,
@@ -794,7 +831,7 @@ export function createLlmSettings(options = {}) {
         ...clientOptions,
       });
     } catch (err) {
-      return { ok: false, error: redact(err?.message, [checked.value.apiKey]) };
+      return { ok: false, error: 'client_failed' };
     }
 
     if (!secretBox?.available) {
@@ -806,7 +843,7 @@ export function createLlmSettings(options = {}) {
       const back = secretBox.unseal(apiKeyEnc);
       if (back !== checked.value.apiKey) return { ok: false, error: 'secret_roundtrip_failed' };
     } catch (err) {
-      return { ok: false, error: redact(err?.message, [checked.value.apiKey]) };
+      return { ok: false, error: 'secret_failed' };
     }
 
     const next = {
@@ -826,7 +863,7 @@ export function createLlmSettings(options = {}) {
     }
     store.slots = nextSlots;
     clients[key] = client;
-    effective[key] = { ...buildEffective(key), source: 'panel', updatedAt: next.updatedAt, updatedBy: next.updatedBy };
+    effective[key] = buildEffective(key);
     delete problems[key];
     appendAudit(auditRow('save', key, {
       by, provider: checked.value.provider, model: checked.value.model, key: checked.value.apiKey,

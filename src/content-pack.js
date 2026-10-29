@@ -12,6 +12,7 @@
  * - 包不是执行单元、不做合并层以外的策略覆盖；情绪/数值策略仍在 P 区代码。
  */
 import { readFileSync, readdirSync } from 'node:fs';
+import { validatePackParams } from './pack-params.js';
 
 const DEFAULT_DIR = new URL('../content/packs/', import.meta.url);
 const VALUE_KEYS = ['satiety', 'health', 'mood', 'stamina', 'mana'];
@@ -91,7 +92,10 @@ function validCharacterDays(days) {
 
 /** 校验一个已解析的包对象；返回错误码字符串或 null。 */
 export function validatePack(value) {
-  if (!exactKeys(value, ['schemaVersion', 'id', 'role', 'themes', 'mood', 'body', 'style', 'story', 'companion', 'characterDays'])) return 'schema';
+  if (!keysAre(value, ['schemaVersion', 'id', 'role', 'themes', 'mood', 'body', 'style', 'story', 'companion', 'characterDays'], ['params'])) return 'schema';
+  if (Object.hasOwn(value, 'params')) {
+    try { validatePackParams(value.params); } catch { return 'params'; }
+  }
   if (value.schemaVersion !== 1) return 'schema-version';
   if (!isText(value.id) || !/^[a-z0-9][a-z0-9_-]*$/.test(value.id)) return 'id';
   if (!exactKeys(value.role, ['label']) || !isText(value.role.label)) return 'role';
@@ -163,6 +167,21 @@ export function packById(id, packs = PACKS) {
   const pack = packs.packs[String(id)];
   if (!pack) throw new Error(`content pack: unknown-id "${String(id)}"`);
   return pack;
+}
+
+/**
+ * Optional tuning for the selected mood theme. Missing packs/params preserve
+ * the old defaults. Ambiguous themes with parameter blocks fail closed rather
+ * than choosing a pack by directory order.
+ */
+export function packParamsForTheme(theme, packs = PACKS) {
+  if (!packs) return {};
+  const matches = packs.ids.map((id) => packs.packs[id])
+    .filter((pack) => pack.themes.mood === theme && Object.hasOwn(pack, 'params'));
+  if (matches.length > 1) throw new Error('content pack: ambiguous-params-theme');
+  if (!matches.length) return {};
+  validatePackParams(matches[0].params);
+  return matches[0].params;
 }
 
 /** 包 → 既有 `LOCAL_MOOD_BODY_CONTENT.mood/.body` 形状（其余键由调用方与旧快照合并）。 */

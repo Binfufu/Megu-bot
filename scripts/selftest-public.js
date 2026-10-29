@@ -14,6 +14,9 @@ import { registerMeituLinesTests } from './selftest-meitu-lines.js';
 import { registerMeituServiceTests } from './selftest-meitu-service.js';
 import { registerPackTests } from './selftest-pack.js';
 import { registerPlayTests } from './selftest-play.js';
+import { registerParamsTests } from './selftest-params.js';
+import { registerConfigParamsTests } from './selftest-config-params.js';
+import { registerModelParamsTests } from './selftest-model-params.js';
 
 export async function runPublicSelftest() {
   const cases = [];
@@ -31,6 +34,9 @@ export async function runPublicSelftest() {
   register('meitu-service（发N张角色美图服务层：白名单/冷却/降档/结算）', registerMeituServiceTests);
   register('content-pack（内容包加载/校验/失败闭环/注入读取）', registerPackTests);
   register('play（玩法内核/模拟器：钓鱼、委托三段闭环、纯函数状态机）', registerPlayTests);
+  register('params（类型/覆盖/来源/安全错误/未知项）', ({ test, assert }) => registerParamsTests(test, assert));
+  register('config-params（主配置兼容接线/文件/包/env 来源）', registerConfigParamsTests);
+  register('model-params（模型字段来源/校验/热覆盖/秘密边界）', registerModelParamsTests);
 
   // 与原全量 runner 相同的名称子串显式跳过、计数及 --out 语义。
   const patterns = String(process.env.QQBOT_SELFTEST_SKIP ?? '')
