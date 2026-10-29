@@ -8,10 +8,17 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded runs for the same ref; job names and matrix stay unchanged because
+# they are the required-check contexts protected by the branch ruleset.
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
 jobs:
   public-selftest:
     name: Public self-test (${{ matrix.os }}, Node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
