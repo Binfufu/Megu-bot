@@ -93,7 +93,18 @@ export const INFRA_CONTENT = readLocalInfraContent();
 export function infraText(value) {
   return value.replace(/\{(primaryName|secondaryName)\}/gu, (_, key) => INFRA_CONTENT[key]);
 }
-// Names are literal data. Native RegExp.escape prevents content from changing the grammar.
-export const FISHING_NAME_PATTERN = new RegExp(`(一起|陪她|带她${INFRA_CONTENT.fishingNames.map((name) => `|带${RegExp.escape(name)}`).join('')})钓`);
-const healer = RegExp.escape(INFRA_CONTENT.healerName);
+/**
+ * 把一个字符串当**正则字面量**安全嵌入（Node 22 兼容）。
+ *
+ * ⚠️ `RegExp.escape()` 是 Node 24+/V8 13 才有的 API；本仓 README 与 CI 矩阵都是 Node 22/24，
+ * 在 Node 22 上直接调用会让整个模块 import 期崩（TypeError: RegExp.escape is not a function）。
+ * 这里只转义正则语法字符——本仓用法都是短的中文名/货币名字面量，不依赖 RegExp.escape 的
+ * 额外边界行为（如空串/数字开头），语义一致。
+ */
+export function escapeRegExpLiteral(value) {
+  return String(value ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+// Names are literal data. Escaping prevents content from changing the grammar.
+export const FISHING_NAME_PATTERN = new RegExp(`(一起|陪她|带她${INFRA_CONTENT.fishingNames.map((name) => `|带${escapeRegExpLiteral(name)}`).join('')})钓`);
+const healer = escapeRegExpLiteral(INFRA_CONTENT.healerName);
 export const HEALER_PATTERNS = [new RegExp(`求${healer}`), new RegExp(`找${healer}`), new RegExp(`让${healer}`), new RegExp(`${healer}(帮忙|治|救)`), new RegExp(`叫${healer}`)];

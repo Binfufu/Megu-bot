@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, loadEnvFile, resolveEnvFile } from './config.js';
-import { HEALER_PATTERNS, INFRA_CONTENT, infraText } from './local-infra-content.js';
+import { HEALER_PATTERNS, INFRA_CONTENT, escapeRegExpLiteral, infraText } from './local-infra-content.js';
 import { buildAnnounceDigest, latestRelease, listVersions } from './changelog.js';
 import {
   ANNOUNCE_USAGE,
@@ -3927,7 +3927,7 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       // "这一轮要不要把它讲出来":只有**在聊钱/工作**或**她自己主动开口**时才讲。
       const text = String(turn.text ?? '');
       const relevant = turn.proactive === true
-        || new RegExp(`(钱|${RegExp.escape(CURRENCY.name)}|委托|任务|接活|赚|攒|穷|借钱|还钱|工资|报酬)`).test(text);
+        || new RegExp(`(钱|${escapeRegExpLiteral(CURRENCY.name)}|委托|任务|接活|赚|攒|穷|借钱|还钱|工资|报酬)`).test(text);
       /** 落账后要不要进这一轮的话。 */
       const narrate = (entry) => {
         if (relevant) entries.push(entry);
