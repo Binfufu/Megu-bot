@@ -39,7 +39,7 @@ node --input-type=module -e "import('node:sqlite').then(() => console.log('sqlit
 node scripts/selftest-public.js
 ```
 
-公开测试主入口是 [selftest-public.js](<scripts/selftest-public.js>)：使用内联 fixture、假网络响应与临时目录，不读取你的 QQ/模型凭据，不启动 bot。覆盖范围与排除项以实际输出为准，**它不是完整私库回归，也不证明 QQ、模型或外部图源已经连通**。
+公开测试主入口是 [selftest-public.js](<scripts/selftest-public.js>)：使用内联 fixture、假网络响应与临时目录，不读取你的 QQ/模型凭据，不启动 bot。**公开 CI 覆盖清单（套件/例数/不覆盖项）写在 [CONTRIBUTING.md](CONTRIBUTING.md) 的「公开 CI 覆盖清单」小节，并与入口同步维护**；覆盖范围与排除项以实际输出为准，**它不是完整私库回归，也不证明 QQ、模型或外部图源已经连通**。
 
 也可通过总入口显式选择公开子集：
 
