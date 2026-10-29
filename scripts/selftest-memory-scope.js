@@ -68,7 +68,7 @@ export function registerMemoryScopeTests({ test, assert }) {
 
   test('反证:私有内容必须是"默认不给"，访问为空/未声明一律掉块掉洞察', () => {
     const blocks = [
-      { label: 'about-her', value: '她是爱丽丝。' },
+      { label: 'about-her', value: '她是协作角色。' },
       { label: 'about-owner', value: CANARY },
       { label: 'relation', value: `${CANARY}-relation` },
       { label: 'promises', value: `${CANARY}-promise` },
@@ -96,7 +96,7 @@ export function registerMemoryScopeTests({ test, assert }) {
     try {
       const db = openMemory(path.join(dir, 'memory.db'));
       try {
-        ensureBlockSchema(db, { aboutHerValue: '她是爱丽丝。' });
+        ensureBlockSchema(db, { aboutHerValue: '她是协作角色。' });
         applyBlockUpdates(db, [
           { label: 'about-owner', value: CANARY },
           { label: 'relation', value: '互称同伴。' },

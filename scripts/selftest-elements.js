@@ -44,7 +44,7 @@ const WIRING = {
   actionUses: { 'fishing.settle': 'eat', 'quest.accept': 'quest' },
   statSpecs: MEGUMIN_BODY.values,
   stats: STAT_KEYS,
-  money: '厄里斯',
+  money: '通用货币',
   persons: DECLARED_PEOPLE,
   questTiers: QUEST_TIERS,
   scenes: SCENES,
@@ -192,7 +192,7 @@ export function registerElementTests({ test, assert }) {
     assert.ok(hasEdge(graph, 'interaction:praise', 'stat:mood'), '被夸涨心情(效果表自己声明的)');
     assert.ok(hasEdge(graph, 'interaction:chat', 'stat:mana'), '被搭话回魔力');
     assert.ok(hasEdge(graph, 'interaction:chat', 'stat:stamina'), '说话耗体力');
-    assert.ok(hasEdge(graph, 'interaction:explosion', 'stat:mana'), '放爆裂魔法掉魔力');
+    assert.ok(hasEdge(graph, 'interaction:explosion', 'stat:mana'), '释放技能掉魔力');
     assert.ok(!hasEdge(graph, 'interaction:chat', 'stat:money'), '没声明的数值不许连(冷却与 label 也不是数值)');
   });
 
@@ -221,7 +221,7 @@ export function registerElementTests({ test, assert }) {
     const real = buildElementGraph({
       ...base,
       playerNodeId: 'player:7',
-      people: [{ id: 'player:7', label: '惠惠的队友', kind: 'acquaintance', source: 'account', linked: true }],
+      people: [{ id: 'player:7', label: '助手的队友', kind: 'acquaintance', source: 'account', linked: true }],
     });
     assert.equal(byId(real, 'player:self'), null, '真节点进来了,占位那个就该不在图上');
     const me = byId(real, 'player:7');

@@ -57,7 +57,7 @@ function fakeLlm(script = []) {
 }
 
 /** 临时现场:库 + 人设文件(用完删)。 */
-function tempFixture(persona = '你是惠惠,红族的爆裂魔法使。') {
+function tempFixture(persona = '你是甲号助手,中性设定。') {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'engine-'));
   const personaPath = path.join(dir, 'AGENTS.md');
   fs.writeFileSync(personaPath, persona, 'utf8');
@@ -907,7 +907,7 @@ export function registerEngineTests({ test, assert: rawAssert }) {
       a.equal(info.name, 'own-engine');
       a.equal(engine.sessionIdFor('qqbot-c2c-abc/路径'), 'qqbot-c2c-abc___', 'sessionIdFor 复用 sanitize 口径(/ 与每个非安全字符各换一个 _)');
       await engine.runTurn('k1', '你好');
-      a.ok(llm.calls[0].messages[0].content.includes('红族的爆裂魔法使'), '稳定块 = 人设文件正文');
+      a.ok(llm.calls[0].messages[0].content.includes('中性设定'), '稳定块 = 人设文件正文');
       a.equal(llm.calls[0].messages[0].role, 'system', '人设是最前的 system(稳定块前置)');
       a.equal(typeof engine.stop().then, 'function', 'stop 可 await');
     } finally {
@@ -1004,13 +1004,13 @@ export function registerEngineTests({ test, assert: rawAssert }) {
       const engine = createOwnEngine({ llm, store: fx.store, personaPath: fx.personaPath });
       await engine.initialize();
       await engine.runTurn('k', '1');
-      fs.writeFileSync(fx.personaPath, '你是天童爱丽丝,机械少女。', 'utf8');
+      fs.writeFileSync(fx.personaPath, '你是乙号助手,机械设定。', 'utf8');
       await engine.runTurn('k', '2');
-      a.ok(llm.calls[1].messages[0].content.includes('惠惠'), '不换代不重读(与 DSH 语义一致)');
+      a.ok(llm.calls[1].messages[0].content.includes('甲号助手'), '不换代不重读(与 DSH 语义一致)');
       engine.resetConversation('k');
       await engine.runTurn('k', '3');
-      a.ok(llm.calls[2].messages[0].content.includes('爱丽丝'), '换代重读人设(换卡不改代码)');
-      a.ok(!llm.calls[2].messages[0].content.includes('惠惠'), '新人设顶掉旧的');
+      a.ok(llm.calls[2].messages[0].content.includes('乙号助手'), '换代重读人设(换卡不改代码)');
+      a.ok(!llm.calls[2].messages[0].content.includes('甲号助手'), '新人设顶掉旧的');
     } finally {
       fx.store.close?.();
       fs.rmSync(fx.dir, { recursive: true, force: true });

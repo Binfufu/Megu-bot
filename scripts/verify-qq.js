@@ -6,7 +6,7 @@
  * intents are permitted, and the gateway is reachable.
  *
  * Usage: node scripts/verify-qq.js
- *        第二只机器人：先设 QQBOT_ENV_FILE=bots\aris\.env，验证的是爱丽丝那只的凭证。
+ *        第二只机器人：先设 QQBOT_ENV_FILE=bots\demo\.env，验证的是协作角色那只的凭证。
  */
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,7 +16,7 @@ import { log } from '../src/log.js';
 
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // 和 bridge 一样认 QQBOT_ENV_FILE —— 否则对第二只机器人来说这条命令是假的：
-// 它会去读惠惠的配置，然后把"惠惠一切正常"报成"爱丽丝连上了"。
+// 它会去读当前角色的配置，然后把"当前角色一切正常"报成"协作角色连上了"。
 const envFile = resolveEnvFile(ROOT_DIR);
 const loaded = loadEnvFile(envFile);
 log.setLevel(process.env.QQBOT_LOG_LEVEL ?? 'info');

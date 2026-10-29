@@ -8,8 +8,8 @@ bots/*/.env
 # ---------------------------------------------------------------------------
 # 运行期数据：**每只机器人一个目录**，全在 data\ 下
 #
-#   data\megumin\   惠惠      state.db / bot.lock / bridge.log
-#   data\aris\      爱丽丝    state.db / bot.lock / bridge.log
+#   data\megumin\   当前角色      state.db / bot.lock / bridge.log
+#   data\aris\      协作角色    state.db / bot.lock / bridge.log
 #   data\index\     待办索引（派生的，可删可重建）
 #
 # 整个 data\ 都不进版本库 —— 里面全是运行期产物。

@@ -178,14 +178,14 @@ if (arg('--capture')) {
       assert.ok(theme.interjections && Object.values(theme.interjections).every((pool) => pool.length === 0));
       assert.equal(theme.kaomoji.length, 0);
       assert.ok(theme.topicOverrides.every((topic) => topic.keywords.length === 0));
-      assert.ok(!/惠惠|爱丽丝|和真|爆裂|红魔|阿库|蔚蓝|厄里斯|邦邦/.test(serialize(theme)), 'no private text through style/theme assembly');
+      assert.ok(!/合成私有标记甲|合成私有标记乙/.test(serialize(theme)), 'no private text through style/theme assembly (合成标记 canary)');
     }
     assert.equal(body.MEGUMIN_BODY.label, '中性身体状态');
     assert.equal(mood.MEGUMIN_THEME.label, '中性交流主题');
     assert.deepEqual(config.DEFAULT_GROUP_KEYWORDS, ['示例助手', 'demo']);
     assert.equal(configSample(undefined).reportTargetName, '示例助手');
     for (const text of [mood.MEGUMIN_THEME.label, mood.ARIS_THEME.label, serialize(mood.MOODS), serialize(mood.ARIS_MOODS), serialize(body.MEGUMIN_BODY), serialize(body.ARIS_BODY), serialize(config.DEFAULT_GROUP_KEYWORDS), rules.BIOLOGICAL_RULES.label, rules.MECHANICAL_RULES.label]) {
-      assert.ok(!/惠惠|爱丽丝|和真|爆裂|红魔|阿库|蔚蓝|厄里斯|邦邦/.test(text), 'neutral display content must not carry private persona text');
+      assert.ok(!/合成私有标记甲|合成私有标记乙/.test(text), 'neutral display content must not carry private persona text (合成标记 canary)');
     }
   }
   console.log(`mood/body ${neutral ? 'neutral ENOENT' : 'private/default'}: aliases, error contract and consumers passed`);
