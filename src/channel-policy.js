@@ -2,7 +2,7 @@
  * **通道策略表**(2026-10-10,`1.106.7` / D179)—— 每条通道写清"**满了怎么办 / 迟了怎么办**"。
  *
  * ## 为什么有它
- * 跨游戏模组调研(`项目\调研-跨游戏模组与UniversalModder-2026-10-10.md` 第 3.1 节)的第二条工程做法:
+ * 跨游戏模组调研(第 3.1 节)的第二条工程做法:
  * 两个系统接起来时,**每条通道都要有"溢出"与"过期"的成文对策** —— 不许在那一刻**临时截断**。
  *
  * 我们踩过的坑正好是这一条的反面:
@@ -118,17 +118,6 @@ export const CHANNEL_ROWS = Object.freeze([
       { file: 'src/index.js', must: ['outbound'] },
     ],
   },
-  {
-    id: 'panel',
-    channel: '面板动作(网页上按按钮)',
-    cap: '动作词表**由服务端给**(`PANEL_ACTION_KINDS`),前端不许再列一份',
-    late: '非零 `nonce` 防重放;闸门拧上时游客的按钮**就地变灰**(不是点了才吃 403)',
-    note: '⚠️ 前端那份是"投影",真相永远在 `src\\panel-actions.js`(D159)',
-    anchors: [
-      { file: 'src/panel-actions.js', must: ['export const PANEL_ACTION_KINDS'] },
-      { file: 'src/panel.js', must: ['requireAccountForActions'] },
-    ],
-  },
 ]);
 
 /** 每行必须有这几样。 */
@@ -144,13 +133,12 @@ export function renderChannelPage(rows = CHANNEL_ROWS) {
   const lines = [];
   lines.push('# 17 · 通道策略表 —— 每条通道:满了怎么办 / 迟了怎么办');
   lines.push('');
-  lines.push('> ⚠️ **本页由 `node scripts\\channels.js --write` 生成,别手改**(数据在 `src\\channel-policy.js`;');
-  lines.push('> 改数据 → 重新生成 → `node scripts\\channels.js --check`;页与数据不同步时 `selftest` 会变红)。');
+  lines.push('> ⚠️ **本页由 `src\\channel-policy.js` 的数据渲染生成,别手改**(数据只此一份;');
+  lines.push('> 改数据 → 重新生成 → 页与数据不同步时,维护侧的检查会变红)。');
   lines.push('>');
   lines.push('> **用途**:任何一条"塞不下 / 来不及"的现场(被截断、过期、没轮到),先在表里找到那条通道,');
   lines.push('> 对"满了/迟了"两列 —— **对不上就是 bug,对得上就是设计**。');
-  lines.push('> 来源:跨游戏模组调研第 3.1 节(见 `项目\\调研-跨游戏模组与UniversalModder-2026-10-10.md`)。');
-  lines.push('> 姊妹页:`docs\\16-边界契约.md`(答"谁拥有 / 怎么交回")。');
+  lines.push('> 来源:跨游戏模组调研第 3.1 节 —— 每条通道都要有"溢出"与"过期"的成文对策。');
   lines.push('');
   lines.push(...renderTable(
     ['通道', '满了怎么办', '迟了怎么办'],
@@ -178,7 +166,7 @@ export function renderChannelPage(rows = CHANNEL_ROWS) {
   lines.push('');
   lines.push('## 这一页**不**管什么');
   lines.push('');
-  lines.push('- 不写"发什么内容"(那是提示词与 `docs\\03` 的事);它只写**容量与时间**这两条边界。');
+  lines.push('- 不写"发什么内容"(那是提示词与本地角色内容的事);它只写**容量与时间**这两条边界。');
   lines.push('- 数字多数是**暂定**:`gapMs` 45 分钟、TTL 30 分钟、摘要 3 小时/12 轮/400 字 —— 改之前先看这里写没写"暂定"。');
   return `${lines.join('\n')}\n`;
 }
