@@ -731,7 +731,7 @@ export function loadConfig({ rootDir }) {
         // 「她自己的生活在转」(D99 阶段 2,用户 2026-10-02 要的):
         // 静默够久 + 饿了 → 去吃饭(真花钱、真涨饱食)**并报备**;不饿时偶尔冒个泡。
         // ⚠️ 它和暖群**共用那套主动消息配额** —— 用户选的是"由它接替暖群"
-        //    (`bots\megumin\.env` 里把 `QQBOT_WARMUP` 关掉),回退就把暖群开回来。
+        //    (`bots\demo\.env` 里把 `QQBOT_WARMUP` 关掉),回退就把暖群开回来。
         selfcare: {
           // ⚠️ **默认改成 false**(2026-10-03):原来默认 `true`,于是**没写这一行的机器人**
   // Local display content is separate from runtime policy.

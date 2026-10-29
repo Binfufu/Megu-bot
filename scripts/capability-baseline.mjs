@@ -3,7 +3,7 @@
  *
  * ## 为什么需要它
  *
- * 用户体感是"爱丽丝不如惠惠强"。可是"弱"至少有四种来源,混在一起就永远查不清:
+ * 用户体感是"协作角色不如当前角色强"。可是"弱"至少有四种来源,混在一起就永远查不清:
  *
  *   A. **部署不同**:版本 / 角色卡 / 模型 / 协议不同;
  *   B. **模型不同**:视觉、工具、推理档位的能力真不一样;
@@ -22,8 +22,8 @@
  *
  * ## 用法(白云生产机,不在这台开发机)
  *
- *   node scripts\capability-baseline.mjs --env-file bots\aris\.env --persona ..\qqbot-workspace-aris\AGENTS.md --out data\index\capability-aris.json
- *   node scripts\capability-baseline.mjs --env-file bots\megumin\.env --persona ..\qqbot-workspace\AGENTS.md --out data\index\capability-megumin.json
+ *   node scripts\capability-baseline.mjs --env-file bots\demo\.env --persona ..\<你的工作区>\AGENTS.md --out data\index\capability-example.json
+ *   node scripts\capability-baseline.mjs --env-file bots\demo\.env --persona ..\<你的工作区>\AGENTS.md --out data\index\capability-example.json
  *
  * 然后对比两份 JSON 的 `env` / `persona` / `model` 三节:
  * 差异出现在 `env` 或 `persona` ⇒ 是配置/角色卡;出现在 `model` ⇒ 是模型选型;

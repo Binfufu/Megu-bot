@@ -171,7 +171,7 @@ export const SILENT_TOKEN = '[跳过]';
 /**
  * Find the first configured keyword present in a message.
  *
- * A direct reference to the character ("惠惠", "爆裂魔法") is a much stronger
+ * A direct reference to the character ("当前角色", "技能") is a much stronger
  * signal of intent than raw chatter volume, so it is allowed to skip the
  * message-count gate that a quiet group would otherwise never clear.
  *

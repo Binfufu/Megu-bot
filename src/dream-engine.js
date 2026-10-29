@@ -17,7 +17,7 @@
  *
  * ## 身份隔离(docs\21 §十四点之 2/4,切分的理由本身)
  *
- * 梦里的"惠惠"是**卡**,不是世界档那只 bot —— 本模块只认 `characters` 参数里给进来的卡,
+ * 梦里的"当前角色"是**卡**,不是世界档那只 bot —— 本模块只认 `characters` 参数里给进来的卡,
  * 从头到尾**不 import** 世界档的任何人设/记忆。记忆串台的防线在存储分表(刀二后半),
  * 而这一层的防线是:世界档的东西根本进不了这里的输入。
  */
@@ -105,7 +105,7 @@ function containsKey(haystack, key, entry) {
  * 这一轮谁说话:
  *  · 用户这句里**点名的角色独占**(名字出现在句里;同时点多个 = 句中先出现的那个);
  *  · 没点名 → 交给 `fallback`(默认旁白)。
- * `members` 形状:[{id, name}];名字匹配按「更长的名字优先」(「惠惠」vs「惠惠喵」不歧义)。
+ * `members` 形状:[{id, name}];名字匹配按「更长的名字优先」(「当前角色」vs「角色名的变体写法」不歧义)。
  * @returns {{speaker: {id, name}|null, reason: 'named'|'fallback'}}
  */
 export function lockSpeaker(userText, members, { fallback = null } = {}) {

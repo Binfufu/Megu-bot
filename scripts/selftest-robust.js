@@ -128,7 +128,7 @@ export function registerRobustTests({ test, assert }) {
         qq: { appId: 'APP' },
       },
       log: () => {},
-      snapshot: () => ({ panel: 3, generatedAt: Date.now(), readOnly: true, character: {}, values: [], conditions: {}, scenes: [], affinity: [], homeItems: [], questBoard: null, money: 0, currency: '厄里斯' }),
+      snapshot: () => ({ panel: 3, generatedAt: Date.now(), readOnly: true, character: {}, values: [], conditions: {}, scenes: [], affinity: [], homeItems: [], questBoard: null, money: 0, currency: '通用货币' }),
     });
     const base = `http://127.0.0.1:${port}`;
     try {

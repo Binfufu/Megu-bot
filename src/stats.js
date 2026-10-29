@@ -1,5 +1,5 @@
 /**
- * 惠惠的身体状态:饱食度 / 健康值 / 心情值。
+ * 当前角色的身体状态:饱食度 / 健康值 / 心情值。
  *
  * 为什么要这三个数:在此之前"饿"是模型**当场编**的 —— 说十次饿也没有后果,
  * 喂她也没有反馈,互动没有闭环。有了数值之后:
@@ -32,21 +32,21 @@ const DAY_MS = 86_400_000;
 export const STAT_KEYS = ['satiety', 'health', 'mood', 'stamina', 'mana'];
 
 /**
- * **货币**(D99,2026-10-02):跟世界观统一 —— 原作的**厄里斯**。
+ * **货币**(D99,2026-10-02):跟世界观统一 —— 原作的**通用货币**。
  *
  * 用户给的口径锚点(照抄):「科技水平类似 12 世纪神圣罗马帝国时期的意大利。
- * **货币厄里斯与现代日元等值**。30 万厄里斯相当于 2 万人民币……
+ * **货币通用货币与现代日元等值**。30 万通用货币相当于 2 万人民币……
  * **个人做一次任务相当于美国建筑工人 10 天的薪酬**……按这样的话,**物价就可以参考现代日本了**。」
  *
- * 于是本文件里所有钱的刻度都按 **1 厄里斯 ≈ 1 日元** 重标(旧刻度 ×100)。
+ * 于是本文件里所有钱的刻度都按 **1 通用货币 ≈ 1 日元** 重标(旧刻度 ×100)。
  * ⚠️ 单位名只在这里写一次:`describe*` / 横幅 / `/钱包` / 报表都从这里取。
  */
 export const CURRENCY = GAMEPLAY_CONTENT.currency;
 
-/** 全新一份状态的起点。`stamina`/`mana` 是 2026-10-01 加的(D83);`money` 按厄里斯重标(D99)。 */
+/** 全新一份状态的起点。`stamina`/`mana` 是 2026-10-01 加的(D83);`money` 按通用货币重标(D99)。 */
 export const STAT_DEFAULTS = BIOLOGICAL_RULES.defaults;
 
-/** 初始值:不饿不撑、身体尚可、心情平常、兜里有 **2,000 厄里斯**(≈ 两顿定食)。 */
+/** 初始值:不饿不撑、身体尚可、心情平常、兜里有 **2,000 通用货币**(≈ 两顿定食)。 */
 export const STAT_MIN = 0;
 export const STAT_MAX = 100;
 
@@ -54,13 +54,13 @@ export const STAT_MAX = 100;
  * 钱 —— **第四个数值**,但不在 0–100 的"感觉"刻度上(D42)。
  *
  * 为什么单独一套上下限:钱要**能攒**。攒不起来的数值撑不起"接委托赚钱"这条玩法,
- * 而且"吾有 3,200 厄里斯"比"吾有 37%"像人话。
- * ⚠️ D99 起上限从 **999 → 9,999,999**:厄里斯口径下,一次 hard 委托就是 8~20 万,
+ * 而且"吾有 3,200 通用货币"比"吾有 37%"像人话。
+ * ⚠️ D99 起上限从 **999 → 9,999,999**:通用货币口径下,一次 hard 委托就是 8~20 万,
  * 999 连一次委托都装不下。
  */
 export const MONEY_MIN = 0;
 export const MONEY_MAX = 9_999_999;
-/** 低于这个数才算"真穷" —— **只有这时才允许她提穷**(D42 的核心机制)。1,500 厄里斯 ≈ 一顿定食。 */
+/** 低于这个数才算"真穷" —— **只有这时才允许她提穷**(D42 的核心机制)。1,500 通用货币 ≈ 一顿定食。 */
 export const MONEY_POOR = 1_500;
 
 /**
@@ -69,18 +69,18 @@ export const MONEY_POOR = 1_500;
  * 照饱食度那套(读的时候按经过时间补算),理由相同:定时器会在重启/休眠/时钟跳变时
  * 丢账,而**读的时候补算**不会。
  *
- * 口径(D99 按厄里斯/现代日本重标):**清醒 150/小时(住宿·杂用·魔杖保养油),睡觉 80/小时**
- * —— 一天约 **2,970 厄里斯**,和"两顿定食 + 一点杂用"同一个量级。
+ * 口径(D99 按通用货币/现代日本重标):**清醒 150/小时(住宿·杂用·魔杖保养油),睡觉 80/小时**
+ * —— 一天约 **2,970 通用货币**,和"两顿定食 + 一点杂用"同一个量级。
  */
 export const MONEY_DECAY = BIOLOGICAL_RULES.moneyDecay;
 
 /**
- * 吃一顿**要花钱**(D99 起按厄里斯重标):`ceil(kcal × 1.5)`。
+ * 吃一顿**要花钱**(D99 起按通用货币重标):`ceil(kcal × 1.5)`。
  *
  * 为什么是这个系数:锚点说物价照**现代日本**,而日本一顿**定食(600 kcal 上下)≈ 900 日元** ——
  * 于是"热量 × 1.5" 同时满足了两件事:① 一条公式(和"热量 ÷ 25 = 饱食度"那种做法同族,D42);
  * ② 定食/快餐/零食的相对贵贱**天然有序**(热量是价钱的第一近似)。
- * ⚠️ 偏差照实说:**泡面**(450 kcal)会被算成 675 厄里斯,而实际便利店只要 250 上下 ——
+ * ⚠️ 偏差照实说:**泡面**(450 kcal)会被算成 675 通用货币,而实际便利店只要 250 上下 ——
  * 想要准就得给 `FOOD_TABLE` 加第二套价,先不做(见 D99 第八节"否掉的方案")。
  */
 export const ERIS_PER_KCAL = BIOLOGICAL_RULES.meal.erisPerKcal;
@@ -118,12 +118,12 @@ const clampMoney = (value) => Math.max(MONEY_MIN, Math.min(MONEY_MAX, value));
  *
  * ⚠️ 2026-10-01(D83)起,**体力与魔力也在这张表里** —— 用户原话:
  * 「体力和魔力的数值也要加上(这两个数值也要能被互动和亲密互动影响)」。
- * 于是"被搭话""亲密互动""放了爆裂魔法"都是这张表里的普通一行,数值规则**不写进提示词**。
+ * 于是"被搭话""亲密互动""放了技能"都是这张表里的普通一行,数值规则**不写进提示词**。
  */
 export const INTERACTIONS = {
   // ⚠️ **2026-10-02(D96)改过一版**:原来这一行是 `{ mood: 5, money: 3, mana: 2 }` ——
   //    用户的现场感受是「被夸等等场景加**奇奇怪怪的数值**」。被夸给钱、给魔力在两处都不自洽:
-  //    钱是"有人对她好"的回报(`fed` 那一笔已经承担了),魔力是**放爆裂魔法的资源**
+  //    钱是"有人对她好"的回报(`fed` 那一笔已经承担了),魔力是**放技能的资源**
   //    (要回魔得靠亲密互动/药剂/时间),夸两句就涨魔力等于把资源闸门拆了。
   //    现在**只涨心情** —— 只留下"被夸会开心"这一件说得通的事。
   praise: { mood: 5, cooldownMs: 5 * 60_000, label: GAMEPLAY_CONTENT.interactionLabels.praise },
@@ -166,7 +166,7 @@ export function isIntimate(text) {
  * 所以"喝一瓶回多少"不会每次不一样。钱不够照喝(账会记负),和吃饭一致。
  */
 export const POTIONS = {
-  // 价钱按厄里斯重标(D99):现代日本口径下,消耗品的药剂大致是几千日元这一档。
+  // 价钱按通用货币重标(D99):现代日本口径下,消耗品的药剂大致是几千日元这一档。
   mana: { label: GAMEPLAY_CONTENT.potionDisplay.mana.label, mana: 45, stamina: 5, cost: 1_800, tag: GAMEPLAY_CONTENT.potionDisplay.mana.tag },
   stamina: { label: GAMEPLAY_CONTENT.potionDisplay.stamina.label, stamina: 40, mana: 0, cost: 1_200, tag: GAMEPLAY_CONTENT.potionDisplay.stamina.tag },
 };
@@ -281,7 +281,7 @@ export function advanceStats(stats, fromTs, toTs, { sleep = null, rules = null }
       (Number(current.stamina) || 0)
       + ((asleep ? decay.staminaPerHourAsleep : -decay.staminaPerHourAwake)) * hours,
     );
-    // 魔力:自然回复 —— 这是"爆裂魔法不能连发"的根源(放一发 −55,回 5/小时)。
+    // 魔力:自然回复 —— 这是"技能不能连发"的根源(放一发 −55,回 5/小时)。
     current.mana = clamp((Number(current.mana) || 0) + decay.manaPerHour * hours);
 
     const drift = decay.moodPerHourToBaseline * hours;
@@ -446,7 +446,7 @@ export function applyStory(stats, effect = {}, now, detail = {}) {
   return { stats: next, event };
 }
 
-/** 一顿饭要花多少**厄里斯**。0 热量 = 0(不算吃饭的那一轮不该扣钱)。 */
+/** 一顿饭要花多少**通用货币**。0 热量 = 0(不算吃饭的那一轮不该扣钱)。 */
 export function mealCost(kcal, rules = BIOLOGICAL_RULES) {
   const value = Number(kcal);
   if (!Number.isFinite(value) || value <= 0) return 0;
@@ -456,7 +456,7 @@ export function mealCost(kcal, rules = BIOLOGICAL_RULES) {
 /**
  * 一次互动(被夸 / 被戳 / 被冷落 / 被投喂)。
  *
- * 带冷却:夸她两句能让她高兴,但**刷不动** —— 否则"和真你真厉害"喊十遍就满了。
+ * 带冷却:夸她两句能让她高兴,但**刷不动** —— 否则同一句夸奖喊十遍就满了。
  * 钱同样受冷却约束(被夸 +3 有 5 分钟冷却),所以它也不是刷钱的入口。
  */
 export function applyInteraction(stats, kind, now) {
@@ -538,8 +538,8 @@ export function applyMoney(stats, delta, now, detail = {}) {
 // 描述:给模型看的、给人看的
 // ---------------------------------------------------------------------------
 
-// 措辞从 `body-theme.js` 取:同一套数值机制,惠惠说"饱食度",爱丽丝说"电量"。
-// 三个 `describe*` 保留原签名(不传主题 = 惠惠那套),所以老调用与老测试一行不用改。
+// 措辞从 `body-theme.js` 取:同一套数值机制,当前角色说"饱食度",协作角色说"电量"。
+// 三个 `describe*` 保留原签名(不传主题 = 当前角色那套),所以老调用与老测试一行不用改。
 
 /** 饱食度/电量的一句话解读 —— 她会照着这个说话。 */
 export function describeSatiety(value, theme = MEGUMIN_BODY) {
@@ -556,7 +556,7 @@ export function describeMood(value, theme = MEGUMIN_BODY) {
 
 /**
  * 钱的一句话解读。**只有真穷才允许她说穷**(D42)—— 这是那段话术的唯一依据。
- * ⚠️ 刻度按厄里斯重标(D99):门槛是"还能不能吃上一顿"(1,500 ≈ 一顿定食)。
+ * ⚠️ 刻度按通用货币重标(D99):门槛是"还能不能吃上一顿"(1,500 ≈ 一顿定食)。
  */
 export function describeMoney(value) {
   const number = Number(value) || 0;
@@ -573,7 +573,7 @@ export function canAfford(stats, kcal) {
   return (Number(stats?.money) || 0) >= mealCost(kcal);
 }
 
-/** 放一发爆裂魔法要多少魔力(与 `INTERACTIONS.explosion.mana` 的绝对值一致)。 */
+/** 放一发技能要多少魔力(与 `INTERACTIONS.explosion.mana` 的绝对值一致)。 */
 export const EXPLOSION_MANA_COST = 55;
 
 /**
@@ -603,11 +603,11 @@ export function describeForPrompt(stats, theme = MEGUMIN_BODY, {
     `${longLabelFor('satiety', theme)} ${round(stats.satiety)}/100（${describeSatiety(stats.satiety, theme)}）`,
     conditionLine,
     // 体力 / 魔力(用户 2026-10-01 要的)。魔力那一项挂一句**行为约束**:
-    // 不够就放不出爆裂魔法 —— 否则她会对着"魔力 8/100"照样喊 Explosion。
+    // 不够就放不出技能 —— 否则她会对着"魔力 8/100"照样喊 Explosion。
     `${longLabelFor('stamina', theme)} ${round(stats.stamina ?? STAT_DEFAULTS.stamina)}/100` +
     `（${describeValue('stamina', stats.stamina ?? STAT_DEFAULTS.stamina, theme)}）`,
-    // ⚠️ 2026-10-28(P4):爆裂那条**只给开这个玩法的实例**——机械体没有爆裂魔法,
-    //    以前无条件写"魔力不够放爆裂魔法了",爱丽丝会照着说(串味)。
+    // ⚠️ 2026-10-28(P4):爆裂那条**只给开这个玩法的实例**——机械体没有技能,
+    //    以前无条件写"魔力不够放技能了",协作角色会照着说(串味)。
     //    关掉时只报资源值本身(仍然知道"能源多少"),不加任何爆裂约束。
     `${longLabelFor('mana', theme)} ${round(stats.mana ?? STAT_DEFAULTS.mana)}/100` +
     `（${describeValue('mana', stats.mana ?? STAT_DEFAULTS.mana, theme)}）` +
@@ -640,7 +640,7 @@ export function describeForUser(stats, { lastMealAt = null, lastFood = null, the
   // ⚠️ **前端不再显示数值**(D103,用户 2026-10-02:「数值前端显示可以全部砍了,全部隐藏,
   //    保留后端计算数字的同时,五个数值的显示**全部用十个档位的形容词代替**」)。
   //    所以这里只说词 —— 数字照旧在库里算,`/状态` 不再是报表。
-  // ⚠️ **口径跟着主题走**:爱丽丝是**日志机器人**,报数字是她的本职工作 ——
+  // ⚠️ **口径跟着主题走**:协作角色是**日志机器人**,报数字是她的本职工作 ——
   //    所以"前端只用形容词"这条**只管有血肉的那只**(megumin);机械口径照旧报数。
   const show = (key, value) => (theme?.id && theme.id !== 'megumin'
     ? `${Math.round(Number(value) || 0)}/100`
@@ -682,7 +682,7 @@ export const STAT_DELTA_ORDER = ['satiety', 'health', 'mood', 'stamina', 'mana',
  * 几条口径:
  *   · **只打有变化的**(全是 0 就返回空串 —— 不许每轮挂一个空 `[]` 刷屏);
  *   · 同一轮里多笔变化**合并求和**(被搭话 +2 与喝药 +45 会写成 `魔力+47`);
- *   · 涨跌都打(`+`/`-`):爆裂魔法那种 −55 也要看得见,不然只有好事才报数;
+ *   · 涨跌都打(`+`/`-`):技能那种 −55 也要看得见,不然只有好事才报数;
  *   · **这行由代码拼** —— 数值不许交给模型自己编。
  *
  * @param {Array<object>} deltas 每笔变化(`{satiety, health, mood, stamina, mana, money}`)
@@ -826,11 +826,11 @@ export function estimateFromText(text) {
 
 /**
  * **为什么需要这一块** —— 用户 2026-10-02 的现场感受:
- * > 「惠惠现在在会话里遇到被用户投喂/请吃饭的情景时**经常不加饱食度**等数值,
- * >   反而在被夸等等场景加**奇奇怪怪的数值**。惠惠应该在被图片/文本投喂互动之后
+ * > 「当前角色现在在会话里遇到被用户投喂/请吃饭的情景时**经常不加饱食度**等数值,
+ * >   反而在被夸等等场景加**奇奇怪怪的数值**。当前角色应该在被图片/文本投喂互动之后
  * >   回应并 **100% 加/减数值**,否则互动感大打折扣。」
  *
- * 量出来的证据(惠惠 2026-10-02 的 `data\megumin\bridge.log`):
+ * 量出来的证据(当前角色 2026-10-02 的 `data\megumin\bridge.log`):
  * **79 个带图回合里只有 8 个(10.1%)真的结算了数值** —— 也就是说"给她发吃的"这件事,
  * 十次里有九次**什么反馈都没有**。
  *
@@ -855,7 +855,7 @@ export function estimateFromText(text) {
 /**
  * 「有人在投喂她」的**说法**表(纯文字那一半)。
  *
- * ⚠️ **这批词是照真实聊天记录捞出来的**(惠惠 `data\megumin\memory.db` 里 `user_text`),
+ * ⚠️ **这批词是照真实聊天记录捞出来的**(当前角色 `data\megumin\memory.db` 里 `user_text`),
  * 不是拍脑袋想的一串近义词 —— 群里真正出现过的形状有:
  *
  * | 现场原话 | 靠哪条命中 |
@@ -913,7 +913,7 @@ export const FEED_DEFAULT = { food: '投喂', kcal: 300, health: 0, mood: 5 };
  */
 export const FEEDING_FLOOR_KCAL = 150;
 
-/** 兜底那一顿按口径改名(惠惠是"投喂",爱丽丝是"充电")。 */
+/** 兜底那一顿按口径改名(当前角色是"投喂",协作角色是"充电")。 */
 function feedDefault(theme = MEGUMIN_BODY) {
   const food = theme?.id === 'aris' ? '充电' : FEED_DEFAULT.food;
   return { ...FEED_DEFAULT, food };
@@ -952,16 +952,16 @@ export function extractFeedItem(text) {
  * **投喂的"给与"标记**(纯函数)。食物名词**必须**跟它同时出现才算投喂 ——
  * D102(2026-10-02)加的这条,是一个**真 bug** 换来的:
  *
- * 现场:群里有人说「带惠惠去**钓**鱼」→ `FOOD_TABLE` 的 `/鱼|肉|牛排|烤肉/` 命中「鱼」→
+ * 现场:群里有人说「带当前角色去**钓**鱼」→ `FOOD_TABLE` 的 `/鱼|肉|牛排|烤肉/` 命中「鱼」→
  * 于是记成"**她自己付钱吃了一份肉**":饱食 +22、体力 +11、**钱 −825**。
  * 用户的原话:「**现在数值加得太随便了**,你看群聊里刚叫去钓鱼就加了饱食度和体力、扣钱,完全不合理」。
  *
  * 判据从"有没有食物名词"改成"**有没有人在给她东西**":
  *   · 「给**你**带了炸鸡」✓(给你)   · 「我请**你们**吃」✓   · 「**投喂**零食」✓
- *   · 「带惠惠去钓鱼」✗(那边是"带 **惠惠**",不是在给)   · 「去钓鱼」✗   · 「我吃了泡面」✗(那是他自己吃)
+ *   · 「带当前角色去钓鱼」✗(那边是"带 **当前角色**",不是在给)   · 「去钓鱼」✗   · 「我吃了泡面」✗(那是他自己吃)
  *
  * ⚠️ 代词必须跟着"给/请/送/投喂"出现 —— 单说"带"是不行的:
- * 第一版就写成 `/给|请|带|送|喂/`,而「带惠惠去钓鱼」里**有"带"**,又踩一遍同一个坑。
+ * 第一版就写成 `/给|请|带|送|喂/`,而「带当前角色去钓鱼」里**有"带"**,又踩一遍同一个坑。
  */
 export function hasFeedGift(text) {
   const source = String(text ?? '');
@@ -1005,7 +1005,7 @@ export function detectFeeding(text, { hasImage = false, theme = MEGUMIN_BODY } =
 /**
  * **被投喂时该跟她说什么**(D98,纯函数)—— 修的是"尴尬"那一半。
  *
- * 现场(用户 2026-10-02 原话):「有个群聊里发图+@ 惠惠吃,**回应图不能吃**,这个必须改,太尴尬了」。
+ * 现场(用户 2026-10-02 原话):「有个群聊里发图+@ 当前角色吃,**回应图不能吃**,这个必须改,太尴尬了」。
  * 这不是偶发:`memory.db` 里她说过「**图又不能当饭吃**,来点真东西」「饿归饿,**这种图可填不饱肚子**」
  * 「那张图**能吃吗**」「这图,凡人看看就好」—— 系统性的。
  *

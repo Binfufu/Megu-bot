@@ -48,7 +48,7 @@ function makeFakeWorld({ meta = {}, statsOk = true } = {}) {
   };
 }
 
-const MESSAGE = { scene: 'group', targetId: 'G1', senderId: 'U1', senderName: '和真', content: '', messageId: 'm1' };
+const MESSAGE = { scene: 'group', targetId: 'G1', senderId: 'U1', senderName: '示例用户', content: '', messageId: 'm1' };
 
 /** 一个"鱼篓里有货、正等她选处置"的钓位。 */
 const CHOOSING_STATE = {
@@ -61,7 +61,7 @@ const CHOOSING_STATE = {
     { tier: 'treasure', kind: 'treasure', name: '湖底的秘宝', money: 50_000 },
   ],
   userId: 'U1',
-  userName: '和真',
+  userName: '示例用户',
   startedAt: 1000,
   lastTouchAt: 2000,
 };
@@ -79,7 +79,7 @@ function makeAdapter(world, extra = {}) {
     store: world.store,
     send: world.send,
     flavor: world.flavor,
-    config: { appId: 'APP', currency: '厄里斯', sleep: null, ...extra },
+    config: { appId: 'APP', currency: '通用货币', sleep: null, ...extra },
     log: { info: () => {}, warn: () => {} },
   });
 }
@@ -215,7 +215,7 @@ export function registerFishingAdapterTests({ test, assert }) {
     const adapter = makeAdapter(world);
     await adapter.tick();
     assert.equal(world.sent.length, 2, `上钩一条 + 接着钓一条(用户点名要的)：${world.sent.join(' | ')}`);
-    assert.ok(world.sent[0].startsWith('和真，'), '要叫名字(群消息里 @ 做不到,只能正文点名)');
+    assert.ok(world.sent[0].startsWith('示例用户，'), '要叫名字(群消息里 @ 做不到,只能正文点名)');
     assert.ok(world.sent[0].includes('《catch》'), '第一条是模型写的上钩过程');
     assert.ok(world.sent[1].startsWith('《continue》'), '第二条是"接着钓"');
     assert.ok(world.sent[1].includes('说"收杆"'), '后面挂一句操作提示');
@@ -297,13 +297,13 @@ export function registerFishingAdapterTests({ test, assert }) {
     const world = makeFakeWorld({ meta: {} });
     const adapter = makeAdapter(world);
     assert.equal(await adapter.handleMessage({ ...MESSAGE, content: '今天吃什么' }), false);
-    assert.equal(await adapter.handleMessage({ ...MESSAGE, content: '带惠惠去钓鱼吧' }), true);
+    assert.equal(await adapter.handleMessage({ ...MESSAGE, content: '带助手去钓鱼吧' }), true);
     assert.equal(world.sent.length, 1);
     assert.ok(world.sent[0].includes('鱼饵用哪种？'), world.sent[0]);
     const started = JSON.parse(world.lastMeta['fishing:group:G1:U1']);
     assert.equal(started.phase, 'bait');
     assert.equal(started.userId, 'U1', '谁开的局记在谁头上');
-    assert.equal(started.userName, '和真');
+    assert.equal(started.userName, '示例用户');
   });
 
   test('适配器(D108):"分档处置"一句话好几类要听得懂;听不懂就反问', async () => {
@@ -351,7 +351,7 @@ export function registerFishingAdapterTests({ test, assert }) {
         store,
         send: async (message, text) => { sent.push(text); },
         flavor: async (kind) => `《${kind}》`,
-        config: { appId: 'APP', currency: '厄里斯', sleep: null },
+        config: { appId: 'APP', currency: '通用货币', sleep: null },
         log: { info: () => {}, warn: () => {} },
       });
 

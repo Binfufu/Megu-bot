@@ -39,7 +39,7 @@ if (!fs.existsSync(envFile)) {
   bail(`找不到配置文件 ${envFile}`, [
     `请先复制模板：copy .env.example bots\\${PRIMARY_BOT}\\.env`,
     '然后用记事本打开它，填入 QQ_APP_ID 与 QQ_CLIENT_SECRET。',
-    '（多实例：用 QQBOT_ENV_FILE 指定别的配置文件，例如 bots\\aris\\.env。）',
+    '（多实例：用 QQBOT_ENV_FILE 指定别的配置文件，例如 bots\\demo\\.env。）',
   ]);
 }
 

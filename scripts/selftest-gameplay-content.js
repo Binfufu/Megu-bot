@@ -14,7 +14,9 @@ const excluded = new Set(manifest.overrides.filter((row) => row.noPublish).map((
 let passed = 0;
 let failed = 0;
 const GOLDEN = {
-  stats: '9adb338df17057d3451e2c525c7a5139525d664219ff1c5f2f1f202405334546',
+  // 2026-10-29：stats 指纹随公开集「角色名→中性词」注释清理更新（只改函数体内注释；函数体与数值投影未变，
+  // 「无 C 数值投影与有 C 一致」对照仍绿）。其余哈希与 aa795d1 freeze 一致。
+  stats: '3d163161935acce72416ddfc7bcdab9b0b783f490b80e8cfa83355732ab8d276',
   economy: 'c118bb4749a93434145fea8ff7c6e0da622e1259502a54b4a549226aec71e124',
   condition: '79401ddfbce419eeeadd443b2dd394c6f167d929fd25a2673ab14fd6943dd330',
   selfcare: '0b598d12c38de372a2a90d8e5f2346f4bbd8da990e9c5ff5fd3870455d3e6cd9',
@@ -192,7 +194,7 @@ const publicAssertions = `
   assert.match(narrationPrompt, /虚构/);
   assert.match(narrationPrompt, /不描述真实地点受损或真实人员伤亡/);
   assert.doesNotMatch(narrationPrompt, /\\{(?:caster|identity|finisher|examples)\\}/);
-  assert.doesNotMatch(JSON.stringify(out), /惠惠|爱丽丝|厄里斯|阿库娅|阿库西斯教|和真|阿克塞尔|红魔族|莘村|めぐみん|逗之助|悠悠/);
+  assert.doesNotMatch(JSON.stringify(out), /合成私有标记甲/); // 私有展示文本守卫：用合成标记做 canary（真实角色名不得进入公开集）
   const { GAMEPLAY_CONTENT } = await import(new URL('./src/local-gameplay-content.js', import.meta.url));
   assert.equal(n.NARRATION_EXAMPLES, GAMEPLAY_CONTENT.narration.examples, '消费真实加载产物');
 `;
@@ -236,7 +238,7 @@ try {
     const source = fs.readFileSync(file, 'utf8');
     assert.ok(source.includes("casterDefault: '施术者'"));
     try {
-      fs.writeFileSync(file, source.replace("casterDefault: '施术者'", "casterDefault: '惠惠'"));
+      fs.writeFileSync(file, source.replace("casterDefault: '施术者'", "casterDefault: '合成私有标记甲'"));
       const result = rawRun(publicFixture, probe.replace('console.log(JSON.stringify(out));', publicAssertions));
       assert.notEqual(result.status, 0);
       assert.match(result.stderr, /AssertionError/);

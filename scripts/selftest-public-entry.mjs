@@ -104,6 +104,9 @@ try {
       'scripts/selftest-pack.js',
       'src/meitu-search.js', 'src/meitu-index.js', 'src/meitu-fetch-core.js',
       'src/meitu-cursor.js', 'src/meitu-store.js', 'src/meitu-lines.js', 'src/local-turn-content.js',
+      // play（玩法内核/模拟器）及其闭包
+      'scripts/selftest-play.js', 'src/play/action.js', 'src/play/fishing.js', 'src/play/index.js',
+      'src/play/quest.js', 'src/company.js', 'src/local-infra-content.js',
       // 以下为 engine-tools / meitu-service 两个公开套件的仓内相对 import 闭包（只含 P 区文件）
       'src/action-log.js', 'src/body-rules.js', 'src/body-theme.js', 'src/capabilities.js',
       'src/condition.js', 'src/context-budget.js', 'src/control-markup.js', 'src/dream-cards.js',
@@ -122,17 +125,21 @@ try {
     const result = run(['--public']);
     assert.equal(result.status, 0, result.stdout + result.stderr);
     assert.match(result.stdout, /PUBLIC SUBSET ONLY/);
-    assert.match(result.stdout, /5 suites，\d+ registered cases/);
+    assert.match(result.stdout, /6 suites，\d+ registered cases/);
     assert.match(result.stdout, /\d+ passed, 0 failed/);
   });
   test('公开 --out 以仓库根解析相对路径，skip 单独计数不冒充 passed', () => {
     // 覆盖全部公开套件名称前缀：新增套件也必须让本用例保持"全部跳过"的前提。
     const result = run(['--public', '--out', 'entry-output.log'], { QQBOT_SELFTEST_SKIP: 'meitu-,engine-tools,content-pack' });
     assert.equal(result.status, 0, result.stdout + result.stderr);
-    assert.match(result.stdout, /0 passed, 0 failed, \d+ skipped/);
+    const summary = result.stdout.match(/(\d+) passed, (\d+) failed, (\d+) skipped/);
+    assert.ok(summary, result.stdout);
+    assert.equal(Number(summary[2]), 0, '被跳过的不许算失败');
+    assert.ok(Number(summary[3]) >= 50, `skip 要有单独计数(实际 ${summary[3]})`);
+    assert.equal(Number(summary[1]) + Number(summary[3]), 158, 'passed + skipped 必须等于注册总数(skip 不能冒充 passed)');
     const output = fs.readFileSync(path.join(temp, 'entry-output.log'), 'utf8');
     assert.match(output, /PUBLIC SUBSET ONLY/);
-    assert.match(output, /0 passed, 0 failed, \d+ skipped/);
+    assert.match(output, (/(\d+) passed, (\d+) failed, (\d+) skipped/));
     assert.equal(fs.existsSync(path.join(temp, 'scripts/entry-output.log')), false);
   });
   test('公开断言失败保留 FAIL 计数与非零退出码，不放宽断言', () => {

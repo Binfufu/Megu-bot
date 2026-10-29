@@ -1,7 +1,7 @@
 /**
  * 出站 / 记忆入库的「模型协议标记泄漏」回归（2026-10-20 / 1.167.4 / D273）。
  *
- * 现场：2026-10-20 14:01:32，惠惠在群里发了 42 个字的一串乱码：
+ * 现场：2026-10-20 14:01:32，当前角色在群里发了 42 个字的一串乱码：
  *   `<｜｜DSML｜｜ calls="intake"></｜｜DSML｜｜ calls>`
  * 它是 deepseek-flash 的原生文本工具协议（DSML），模型在没声明 tools 的请求里
  * 偶尔把"想调用的工具"写进正文；桥里没人解析、也没人剥，分条器又按换行硬切，
@@ -67,7 +67,7 @@ export function registerOutboundMarkupTests({ test, assert }) {
     // 出站咽喉（sendChunked 里的 sanitizeOutgoingText）—— 名字前缀也照旧剥
     assert.equal(sanitizeOutgoingText(LEAK), '',
       '出站侧：整条只有标记 → 空串 → sendChunked 的「为空」分支跳过发送');
-    assert.equal(sanitizeOutgoingText('【惠惠】' + REAL_LINE + '\n\n' + LEAK, { names: ['惠惠'] }), REAL_LINE,
+    assert.equal(sanitizeOutgoingText('【示例助手】' + REAL_LINE + '\n\n' + LEAK, { names: ['示例助手'] }), REAL_LINE,
       '出站侧：名字前缀 + 泄漏标记一起剥掉，正文原样');
     assert.ok(!sanitizeOutgoingText(REAL_LINE + '\n\n' + LEAK).includes('｜'),
       '出站文本里不许再出现全角竖线');

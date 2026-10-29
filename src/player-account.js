@@ -798,7 +798,7 @@ export function createAccountService({ store, openRegistration = false, staff = 
      *
      * ⚠️ **只入库,绝不自动通过**(调研里 Slack 那条:申请 → 人工批准)——
      *    面板挂在公网,"自动通过"等于自动把内部权限发给陌生人。
-     *    站长在后台处理 + 惠惠在 QQ 里提醒(见 TODO 的第三件)。
+     *    站长在后台处理 + 当前角色在 QQ 里提醒(见 TODO 的第三件)。
      *
      * **2026-10-18 / D250 语义改为「信息反馈」**(用户拍板:/request 申请入口退役):
      *    note(想说的话)**必填** ≤500 字【暂定】;contact 降为可选 ≤64(反馈可以匿名,
@@ -822,7 +822,7 @@ export function createAccountService({ store, openRegistration = false, staff = 
       log(`账号：收到一条反馈（#${row.id}，联系方式 ${touch || '(没留)'}）`);
       return { ok: true, id: row.id, request: row };
     },
-    /** **站长的收件箱**(第三件会用:面板后台 + 惠惠在 QQ 里提醒)。 */
+    /** **站长的收件箱**(第三件会用:面板后台 + 当前角色在 QQ 里提醒)。 */
     listRequests: (opts) => repo.listAccessRequests(opts),
     countPendingRequests: () => repo.countPendingRequests(),
     setRequestStatus: (id, status, by = null) => repo.setAccessRequestStatus(id, status, by),
