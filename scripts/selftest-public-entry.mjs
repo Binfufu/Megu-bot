@@ -119,24 +119,32 @@ try {
       'src/index.js', 'src/config.js', 'src/llm-settings.js',
       // 阶段 2：本地内容读取器现在依赖内容包加载器（无 content/packs 目录时走旧回退）
       'src/content-pack.js',
+      // 阶段 3：参数系统三个套件及其闭包（纯注册表 / 主配置接线 / 模型槽）
+      'scripts/selftest-params.js', 'scripts/selftest-config-params.js', 'scripts/selftest-model-params.js',
+      'src/params.js', 'src/pack-params.js', 'src/config-params.js', 'src/model-slots.js',
+      'src/burst.js', 'src/meitu-gallery.js', 'src/meitu-search.js', 'src/mood.js',
+      'src/morning.js', 'src/social.js', 'src/style.js', 'src/warmup.js',
     ]) copy(relative);
     assert.equal(fs.existsSync(path.join(temp, 'resources')), false);
     assert.equal(fs.existsSync(path.join(temp, 'data')), false);
     const result = run(['--public']);
     assert.equal(result.status, 0, result.stdout + result.stderr);
     assert.match(result.stdout, /PUBLIC SUBSET ONLY/);
-    assert.match(result.stdout, /6 suites，\d+ registered cases/);
+    assert.match(result.stdout, /9 suites，\d+ registered cases/);
     assert.match(result.stdout, /\d+ passed, 0 failed/);
   });
   test('公开 --out 以仓库根解析相对路径，skip 单独计数不冒充 passed', () => {
     // 覆盖全部公开套件名称前缀：新增套件也必须让本用例保持"全部跳过"的前提。
-    const result = run(['--public', '--out', 'entry-output.log'], { QQBOT_SELFTEST_SKIP: 'meitu-,engine-tools,content-pack' });
+    const result = run(['--public', '--out', 'entry-output.log'], { QQBOT_SELFTEST_SKIP: 'meitu-,engine-tools,content-pack,params:,config params:,模型参数:' });
     assert.equal(result.status, 0, result.stdout + result.stderr);
     const summary = result.stdout.match(/(\d+) passed, (\d+) failed, (\d+) skipped/);
     assert.ok(summary, result.stdout);
     assert.equal(Number(summary[2]), 0, '被跳过的不许算失败');
     assert.ok(Number(summary[3]) >= 50, `skip 要有单独计数(实际 ${summary[3]})`);
-    assert.equal(Number(summary[1]) + Number(summary[3]), 158, 'passed + skipped 必须等于注册总数(skip 不能冒充 passed)');
+    const registered = result.stdout.match(/公开覆盖：(\d+) suites，(\d+) registered cases/);
+    assert.ok(registered, result.stdout);
+    assert.equal(Number(registered[1]), 9, '公开套件数必须与登记一致');
+    assert.equal(Number(summary[1]) + Number(summary[3]), Number(registered[2]), 'passed + skipped 必须等于注册总数(skip 不能冒充 passed)');
     const output = fs.readFileSync(path.join(temp, 'entry-output.log'), 'utf8');
     assert.match(output, /PUBLIC SUBSET ONLY/);
     assert.match(output, (/(\d+) passed, (\d+) failed, (\d+) skipped/));

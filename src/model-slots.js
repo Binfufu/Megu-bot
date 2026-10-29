@@ -15,6 +15,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { ParamError, defineParam, resolveParamLayers } from './params.js';
 
 /** 固定两个 slot;顺序就是面板上的顺序。 */
 export const MODEL_SLOTS = Object.freeze(['bot', 'dream']);
@@ -228,9 +229,138 @@ export function keyFingerprint(key) {
   return createHash('sha256').update(text).digest('hex').slice(0, 8);
 }
 
-function envText(env, name) {
-  const value = env?.[name];
-  return value === undefined || value === null ? '' : String(value).trim();
+/** 五字段注册表。空连接字段是合法的“未配置”，不是可启动的 client。 */
+const MODEL_PARAM_FIELDS = Object.freeze(['provider', 'baseUrl', 'model', 'apiKey', 'reasoning']);
+const trustedParamSources = new WeakMap();
+
+/** 单次 data-descriptor 快照，不执行 getter/继承属性/自定义 String，也不透传 Proxy 异常。 */
+function modelDataSnapshot(raw, source, { optional = false, environment = false } = {}) {
+  if (optional && (raw === undefined || raw === null)) return Object.create(null);
+  try {
+    if (!raw || typeof raw !== 'object') throw new Error();
+    const prototype = Object.getPrototypeOf(raw);
+    if (prototype !== Object.prototype && prototype !== null && !(environment && raw === process.env)) throw new Error();
+    const snapshot = Object.create(null);
+    for (const key of Reflect.ownKeys(raw)) {
+      if (typeof key !== 'string' || ['__proto__', 'prototype', 'constructor'].includes(key)) throw new Error();
+      const descriptor = Object.getOwnPropertyDescriptor(raw, key);
+      if (!descriptor || !Object.hasOwn(descriptor, 'value')) throw new Error();
+      // 只允许本模块自己生成的非枚举旁路元数据；外部非枚举输入仍拒绝。
+      if (key === 'paramSources' && trustedParamSources.has(raw) && !descriptor.enumerable) continue;
+      if (!descriptor.enumerable) throw new Error();
+      snapshot[key] = descriptor.value;
+    }
+    return snapshot;
+  } catch {
+    throw new ParamError('PARAM_UNSAFE', undefined, source);
+  }
+}
+
+function modelText(value, source, id) {
+  if (value === undefined || value === null) return '';
+  if (!['string', 'number', 'boolean', 'bigint'].includes(typeof value)) {
+    throw new ParamError('PARAM_TYPE', id, source);
+  }
+  return String(value).trim();
+}
+
+function normalizedParam(normalize, { allowEmpty = false } = {}) {
+  return (raw) => {
+    const text = String(raw ?? '').trim();
+    if (allowEmpty && text === '') return '';
+    const result = normalize(text);
+    if (!result.ok) throw new Error('invalid_model_param');
+    return result.value;
+  };
+}
+
+const modelParamSpecs = {
+  provider: { default: 'custom', parse: (raw) => {
+    const value = normalizeProvider(raw);
+    if (value === null) throw new Error('invalid_model_param');
+    return value;
+  } },
+  baseUrl: { default: '', parse: normalizedParam(normalizeBaseUrl, { allowEmpty: true }) },
+  model: { default: '', parse: normalizedParam(normalizeModel, { allowEmpty: true }) },
+  apiKey: { default: '', parse: normalizedParam(normalizeApiKey), sensitive: true },
+  reasoning: { type: 'enum', values: REASONING_LEVELS, default: 'auto', parse: normalizedParam(normalizeReasoning) },
+};
+
+export const MODEL_PARAM_DEFS = Object.freeze(MODEL_PARAM_FIELDS.map((id) => defineParam({
+  id, type: 'string', emptyAsUnset: false, scope: 'deployment', ...modelParamSpecs[id],
+})));
+
+export const MODEL_SLOT_PARAM_DEFS = Object.freeze(Object.fromEntries(MODEL_SLOTS.map((slot) => {
+  const dream = slot === 'dream';
+  const aliases = (suffix) => dream
+    ? [`QQBOT_LLM_DREAM_${suffix}`]
+    : [`QQBOT_LLM_${suffix}`, `QQBOT_LLM_DREAM_${suffix}`];
+  const envNames = { baseUrl: aliases('BASEURL'), model: aliases('MODEL'), apiKey: aliases('KEY') };
+  return [slot, Object.freeze(MODEL_PARAM_FIELDS.map((id) => defineParam({
+    id, type: 'string', scope: 'deployment', ...modelParamSpecs[id],
+    ...(id === 'baseUrl' && !dream ? { default: 'https://api.deepseek.com/v1' } : {}),
+    ...(id === 'model' && !dream ? { default: 'deepseek-chat' } : {}),
+    ...(envNames[id] ? { env: envNames[id] } : {}),
+    emptyAsUnset: true,
+  })))];
+})));
+
+/** 诊断只保留来源，永远不保留 inputs/values（尤其不保留 key/DPAPI blob）。 */
+function attachParamSources(target, sources) {
+  const safe = Object.fromEntries(MODEL_PARAM_FIELDS.map((id) => {
+    const one = sources[id];
+    const chain = Object.freeze((one?.chain ?? []).map((step) => Object.freeze({
+      source: step.source,
+      ...(step.env ? { env: step.env } : {}),
+    })));
+    return [id, Object.freeze({ source: one?.source ?? 'default', chain,
+      sensitive: id === 'apiKey', ...(one?.derivedFrom ? { derivedFrom: one.derivedFrom } : {}),
+    })];
+  }));
+  const metadata = Object.freeze(safe);
+  Object.defineProperty(target, 'paramSources', { value: metadata, enumerable: false });
+  trustedParamSources.set(target, metadata);
+  return target;
+}
+
+/** 仅指配置/client 默认来源；本次请求的 callOptions.model/reasoningEffort 是另一层边界。 */
+export function modelParamSources(config) {
+  // 诊断也不执行调用方自带的同名 getter。
+  try {
+    const descriptor = config && Object.getOwnPropertyDescriptor(config, 'paramSources');
+    return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : null;
+  } catch { return null; }
+}
+
+/** 纯解析/诊断入口：env 默认永远低于 saved-file；只挑本模块五字段，兼容 UI 附属字段。 */
+export function resolveModelSlotParams(defaults = {}, override = null) {
+  const inherited = trustedParamSources.get(defaults);
+  const base = modelDataSnapshot(defaults, 'slot-defaults');
+  const over = pickOverride(modelDataSnapshot(override, 'saved-file', { optional: true }));
+  return resolveModelSlotSnapshot(base, over, inherited);
+}
+
+function resolveModelSlotSnapshot(defaults, over, inheritedSources) {
+  const values = Object.fromEntries(MODEL_PARAM_FIELDS.filter((id) => defaults[id] !== undefined)
+    .map((id) => {
+      modelText(defaults[id], 'slot-defaults', id); // 拒绝有自定义转换行为的对象。
+      return [id, defaults[id]];
+    }));
+  const result = resolveParamLayers(MODEL_PARAM_DEFS, [
+    { source: 'slot-defaults', kind: 'params', values },
+    { source: 'saved-file', kind: 'params', values: over },
+  ]);
+  const sources = Object.fromEntries(MODEL_PARAM_FIELDS.map((id) => {
+    const inherited = inheritedSources?.[id];
+    const saved = result.sources[id].chain.filter((step) => step.source === 'saved-file');
+    return [id, inherited ? {
+      ...inherited,
+      source: saved.length ? 'saved-file' : inherited.source,
+      chain: [...inherited.chain, ...saved],
+      ...(saved.length ? { derivedFrom: undefined } : {}),
+    } : result.sources[id]];
+  }));
+  return { values: result.values, sources };
 }
 
 /**
@@ -243,23 +373,32 @@ function envText(env, name) {
  * 梦境**不**从 bot 回退:用户拍板“梦境没配就 503,不偷偷花 bot 的钱”。
  */
 export function defaultsFromEnv(env = {}) {
-  const botKeyOwn = envText(env, 'QQBOT_LLM_KEY');
-  const botKey = botKeyOwn || envText(env, 'QQBOT_LLM_DREAM_KEY');
-  const botBase = envText(env, 'QQBOT_LLM_BASEURL')
-    || envText(env, 'QQBOT_LLM_DREAM_BASEURL')
+  const snapshot = modelDataSnapshot(env, 'env', { environment: true });
+  // 环境入口原有 String+trim/空为未设语义保持；取数后只使用同一快照。
+  const envValues = Object.fromEntries(['QQBOT_LLM_KEY', 'QQBOT_LLM_BASEURL', 'QQBOT_LLM_MODEL',
+    'QQBOT_LLM_DREAM_KEY', 'QQBOT_LLM_DREAM_BASEURL', 'QQBOT_LLM_DREAM_MODEL',
+  ].map((name) => [name, modelText(snapshot[name], 'env', undefined)]));
+  // 所有别名层均校验；自己的合法 env 不得掩盖非法 dream 回退层。
+  const resolved = Object.fromEntries(MODEL_SLOTS.map((slot) => [slot,
+    resolveParamLayers(MODEL_SLOT_PARAM_DEFS[slot], [{ source: 'env', kind: 'env', values: envValues }]),
+  ]));
+  const botKeyOwn = envValues.QQBOT_LLM_KEY;
+  const botKey = botKeyOwn || envValues.QQBOT_LLM_DREAM_KEY;
+  const botBase = envValues.QQBOT_LLM_BASEURL
+    || envValues.QQBOT_LLM_DREAM_BASEURL
     || 'https://api.deepseek.com/v1';
-  const botModel = envText(env, 'QQBOT_LLM_MODEL')
-    || envText(env, 'QQBOT_LLM_DREAM_MODEL')
+  const botModel = envValues.QQBOT_LLM_MODEL
+    || envValues.QQBOT_LLM_DREAM_MODEL
     || 'deepseek-chat';
   const botSource = botKeyOwn
     ? 'env:QQBOT_LLM_KEY'
     : (botKey ? 'env:QQBOT_LLM_DREAM_KEY(回退)' : 'none');
 
-  const dreamKey = envText(env, 'QQBOT_LLM_DREAM_KEY');
-  const dreamBase = envText(env, 'QQBOT_LLM_DREAM_BASEURL');
-  const dreamModel = envText(env, 'QQBOT_LLM_DREAM_MODEL');
+  const dreamKey = envValues.QQBOT_LLM_DREAM_KEY;
+  const dreamBase = envValues.QQBOT_LLM_DREAM_BASEURL;
+  const dreamModel = envValues.QQBOT_LLM_DREAM_MODEL;
 
-  return {
+  const result = {
     bot: {
       slot: 'bot',
       provider: providerForBaseUrl(botBase),
@@ -281,15 +420,19 @@ export function defaultsFromEnv(env = {}) {
       configured: Boolean(dreamKey && dreamBase && dreamModel),
     },
   };
+  for (const slot of MODEL_SLOTS) {
+    const sources = { ...resolved[slot].sources };
+    sources.provider = { ...sources.baseUrl, derivedFrom: 'baseUrl', sensitive: false };
+    attachParamSources(result[slot], sources);
+  }
+  return result;
 }
 
-function pickOverride(override) {
-  if (!override || typeof override !== 'object') return {};
+function pickOverride(snapshot) {
   const out = {};
-  for (const key of ['provider', 'baseUrl', 'model', 'apiKey', 'reasoning']) {
-    if (override[key] !== undefined && override[key] !== null && String(override[key]).trim() !== '') {
-      out[key] = String(override[key]).trim();
-    }
+  for (const key of MODEL_PARAM_FIELDS) {
+    const text = modelText(snapshot[key], 'saved-file', key);
+    if (text !== '') out[key] = text;
   }
   return out;
 }
@@ -299,22 +442,27 @@ function pickOverride(override) {
  * 这就是“留空 = 不换 key”的唯一实现处。
  */
 export function mergeSlot(defaults, override) {
-  const over = pickOverride(override);
+  const inherited = trustedParamSources.get(defaults);
+  const base = modelDataSnapshot(defaults, 'slot-defaults');
+  const saved = modelDataSnapshot(override, 'saved-file', { optional: true });
+  const over = pickOverride(saved);
+  const resolved = resolveModelSlotSnapshot(base, over, inherited);
   const hasOverride = Object.keys(over).length > 0;
-  const apiKey = Object.prototype.hasOwnProperty.call(over, 'apiKey') ? over.apiKey : defaults.apiKey;
+  const apiKey = Object.hasOwn(over, 'apiKey') ? over.apiKey : base.apiKey;
+  modelText(saved.updatedAt, 'saved-file', undefined);
   const merged = {
-    slot: defaults.slot,
-    provider: over.provider ?? defaults.provider ?? 'custom',
-    baseUrl: over.baseUrl ?? defaults.baseUrl ?? '',
-    model: over.model ?? defaults.model ?? '',
+    slot: base.slot,
+    provider: over.provider ?? base.provider ?? 'custom',
+    baseUrl: over.baseUrl ?? base.baseUrl ?? '',
+    model: over.model ?? base.model ?? '',
     apiKey,
-    reasoning: over.reasoning ?? defaults.reasoning ?? 'auto',
-    source: hasOverride ? 'panel' : (defaults.source ?? 'none'),
-    updatedAt: Number(override?.updatedAt) || 0,
-    updatedBy: typeof override?.updatedBy === 'string' ? override.updatedBy : null,
+    reasoning: over.reasoning ?? base.reasoning ?? 'auto',
+    source: hasOverride ? 'panel' : (base.source ?? 'none'),
+    updatedAt: Number(saved.updatedAt) || 0,
+    updatedBy: typeof saved.updatedBy === 'string' ? saved.updatedBy : null,
   };
   merged.configured = Boolean(merged.apiKey && merged.baseUrl && merged.model);
-  return merged;
+  return attachParamSources(merged, resolved.sources);
 }
 
 /** 出网/出页面的视图:永远不带 apiKey。 */

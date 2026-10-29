@@ -30,6 +30,7 @@ import { fileURLToPath } from 'node:url';
 import {
   PACKS,
   packById,
+  packParamsForTheme,
   packsAsMoodBodyContent,
   packsAsStoryRoleSections,
   packsAsStyleNudges,
@@ -331,6 +332,61 @@ test('content-pack:只经注入 read/readdir 取数，不触碰真实 content/�
     '读取目标必须是注入的合成根，不能落到真实盘路径',
   );
   assert.equal(packs.packs.example.id, 'example');
+});
+
+test('content-pack:可选参数段合法绿，每个白名单类型/边界非法红', () => {
+  const good = {
+    QQBOT_MOOD_TTL_MS: 1, QQBOT_MOOD_KAOMOJI_CHANCE: 0,
+    QQBOT_STYLE_NUDGES: 0, QQBOT_SPOKEN_MAX_CHARS: 0,
+    QQBOT_SPOKEN_EMOJI_CHANCE: 1, QQBOT_POKE_REPLY_CHANCE: 1,
+    QQBOT_FACE_REPLY_CHANCE: 0,
+  };
+  const pack = packFixture({ params: good });
+  assert.equal(validatePack(pack), null);
+  const loaded = readContentPacks(fakeContentDir({ example: pack }));
+  assert.deepEqual(packParamsForTheme('example', loaded), good);
+  for (const key of Object.keys(good)) {
+    for (const invalid of [true, null, {}, [], 'not-a-number', Infinity, -1]) {
+      assert.equal(validatePack(packFixture({ params: { [key]: invalid } })), 'params', key);
+    }
+  }
+  assert.equal(validatePack(packFixture({ params: { QQBOT_MOOD_TTL_MS: 0 } })), 'params');
+  assert.equal(validatePack(packFixture({ params: { QQBOT_STYLE_NUDGES: 1.5 } })), 'params');
+  assert.equal(validatePack(packFixture({ params: { QQBOT_POKE_REPLY_CHANCE: 1.01 } })), 'params');
+});
+
+test('content-pack:未知/敏感/部署参数禁止进入包，错误不回显秘密值', () => {
+  for (const key of ['QQBOT_LLM_KEY', 'QQ_CLIENT_SECRET', 'QQBOT_STATE_DB', 'QQBOT_TOOLS', 'QQBOT_SEARCH_DAILY_LIMIT_CNY', 'QQBOT_MOOD_TLL_MS']) {
+    const pack = packFixture({ params: { [key]: 'synthetic-hidden-secret' } });
+    assert.equal(validatePack(pack), 'params');
+    const error = capture(() => readContentPacks(fakeContentDir({ example: pack })));
+    assert.match(error.message, /: params$/);
+    assert.doesNotMatch(error.message, /synthetic-hidden-secret|QQBOT_|QQ_CLIENT/);
+  }
+  for (const value of [null, [], 1, 'text']) assert.equal(validatePack(packFixture({ params: value })), 'params');
+  const polluted = JSON.parse('{"__proto__":{"polluted":true}}');
+  assert.equal(validatePack(packFixture({ params: polluted })), 'params');
+  assert.equal({}.polluted, undefined);
+});
+
+test('content-pack:无参数段/无匹配/无目录保持空来源，不改变原聚合', () => {
+  const pack = packFixture();
+  const loaded = readContentPacks(fakeContentDir({ example: pack }));
+  assert.deepEqual(packParamsForTheme('example', loaded), {});
+  assert.deepEqual(packParamsForTheme('missing', loaded), {});
+  assert.deepEqual(packParamsForTheme('example', null), {});
+  const tuned = readContentPacks(fakeContentDir({ example: packFixture({ params: { QQBOT_STYLE_NUDGES: 2 } }) }));
+  assert.deepEqual(packsAsMoodBodyContent(tuned), packsAsMoodBodyContent(loaded));
+  assert.deepEqual(packsAsStyleNudges(tuned), packsAsStyleNudges(loaded));
+  assert.deepEqual(packsAsStoryRoleSections(tuned), packsAsStoryRoleSections(loaded));
+});
+
+test('content-pack:多个参数包命中同一主题必须红，不按目录顺序静默选一个', () => {
+  const a = packFixture({ id: 'a', params: { QQBOT_STYLE_NUDGES: 1 } });
+  const b = packFixture({ id: 'b', params: { QQBOT_STYLE_NUDGES: 2 } });
+  const loaded = readContentPacks(fakeContentDir({ a, b }));
+  assert.throws(() => packParamsForTheme('example', loaded), /ambiguous-params-theme/);
+  assert.deepEqual(packParamsForTheme('example', readContentPacks(fakeContentDir({ a }))), a.params);
 });
 
 export function registerPackTests(register) {

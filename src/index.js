@@ -507,6 +507,11 @@ export async function main() {
     else log.warn(`日志文件无法写入，仅输出到 stderr：${config.logFile}`);
   }
 
+  // 参数诊断只报告存在未知项，不回显变量名/值或配置文件路径。
+  if (config.paramWarnings?.length) {
+    log.warn('[参数] PARAM_UNKNOWN_ENV：存在未登记的 QQBOT_ 环境项，请核对参数清单。');
+  }
+
   // ⚠️ 崩溃钩子(2026-10-16,1.150.81):own 进程曾静默死亡一次且零痕迹 ——
   //    uncaughtException / unhandledRejection 的默认死法**一个字都不说**。
   //    这两只钩子把完整栈写进桥日志再 exit(1)(语义与默认一致,守护负责拉回);
