@@ -96,13 +96,30 @@ export function providerById(id) {
   return PROVIDERS.find((one) => one.id === String(id ?? '').trim()) ?? null;
 }
 
-/** 从 Base URL 认一个预置供应商(认不出就是 custom,不猜)。 */
+/**
+ * 从 Base URL 认一个预置供应商(认不出就是 custom,不猜)。
+ *
+ * ⚠️ 按 **URL 解析出来的 host / pathname** 判定,不用 `includes('api.deepseek.com')`
+ * 这种做法(1.204.9 安全加固):子串判定会被 `https://evil.example/api.deepseek.com`
+ * 骗成 deepseek(CodeQL js/incomplete-url-substring-sanitization)。解析失败就当 custom。
+ */
 export function providerForBaseUrl(baseUrl) {
-  const text = String(baseUrl ?? '').toLowerCase();
-  if (text.includes('api.deepseek.com')) return 'deepseek';
-  if (text.includes('api.x.ai')) return 'xai';
-  if (text.includes('/api/plan/v3')) return 'volcengine-agent-plan';
-  if (text.includes('openrouter.ai')) return 'custom';
+  const text = String(baseUrl ?? '').trim();
+  if (!text) return 'custom';
+  let host;
+  let pathname;
+  try {
+    const url = new URL(text);
+    host = url.hostname.toLowerCase();
+    pathname = url.pathname.toLowerCase();
+  } catch {
+    return 'custom';
+  }
+  const hostIs = (suffix) => host === suffix || host.endsWith(`.${suffix}`);
+  if (hostIs('api.deepseek.com')) return 'deepseek';
+  if (hostIs('api.x.ai')) return 'xai';
+  if (pathname.includes('/api/plan/v3')) return 'volcengine-agent-plan';
+  if (hostIs('openrouter.ai')) return 'custom';
   return 'custom';
 }
 

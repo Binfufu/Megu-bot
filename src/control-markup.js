@@ -58,8 +58,21 @@ const LEAK_TEST = /<\/?[｜|]{1,2}DSML[｜|]{1,2}[^<>]*>|<\/?[｜|][^<>]{0,80}[�
  * ⚠️ 两条误伤护栏(有单测钉着):`<` 后必须紧跟**字母**(所以 `<3`、`>_<`、`A<B` 都安全);
  * 整行除标记外**不许有别的字符**(所以「看 <b>加粗</b> 吧」这种正文夹标记的行不动 ——
  * 那是她的话,不是泄漏)。
+ *
+ * ⚠️ 判定用手写扫描,不用正则(1.204.9 安全加固):旧正则
+ * `/^(?:<\/?[a-zA-Z][a-zA-Z0-9-]*(?:[^\n<>]*)?\/?>[ \t\u3000]*)+$/` 在长串 `/><A` 上
+ * 会让正则引擎回溯爆炸(CodeQL js/redos,CWE-1333),而输入正是模型正文 —— 可被诱导
+ * 的 ReDoS 面。这个判定本质是"从左到右确定性扫描",本来就不需要回溯。
  */
-const MARKUP_LINE_TEST = /^(?:<\/?[a-zA-Z][a-zA-Z0-9-]*(?:[^\n<>]*)?\/?>[ \t\u3000]*)+$/;
+const TAG_WHITESPACE = new Set([' ', '\t', '\u3000']);
+
+function isAsciiLetter(ch) {
+  return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
+}
+
+function isTagNameChar(ch) {
+  return isAsciiLetter(ch) || (ch >= '0' && ch <= '9') || ch === '-';
+}
 
 /** 单行判定(导出给测试):这一行是不是"只剩标记"。 */
 export function isMarkupOnlyLine(line) {
@@ -69,7 +82,29 @@ export function isMarkupOnlyLine(line) {
   //    它长得确实像 HTML 自闭标签,但它是结构化数据;行里出现它就整行当正文留
   //    (宁可漏剥,不可错剥自己的标记;D273 交付时同一条边界)。
   if (/<\/?intake\b/i.test(trimmed)) return false;
-  return MARKUP_LINE_TEST.test(trimmed);
+
+  let i = 0;
+  const n = trimmed.length;
+  while (i < n) {
+    while (i < n && TAG_WHITESPACE.has(trimmed[i])) i += 1;
+    if (i >= n) break;
+    if (trimmed[i] !== '<') return false;
+    i += 1;
+    if (trimmed[i] === '/') i += 1; // 闭合标签
+    if (i >= n || !isAsciiLetter(trimmed[i])) return false;
+    i += 1;
+    while (i < n && isTagNameChar(trimmed[i])) i += 1;
+    // 标签体:一直读到 `>`,途中不许再出现 `<`(属性值里带 `<` 的算正文,按旧口径不动)。
+    let closed = false;
+    while (i < n) {
+      const ch = trimmed[i];
+      i += 1;
+      if (ch === '<') return false;
+      if (ch === '>') { closed = true; break; }
+    }
+    if (!closed) return false;
+  }
+  return true;
 }
 
 function hasMarkupOnlyLine(source) {
