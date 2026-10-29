@@ -1,0 +1,12 @@
+# Runtime has zero npm dependencies; only the GitHub Actions ecosystem is tracked.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    labels:
+      - "maintenance"
+    commit-message:
+      prefix: "chore(deps)"
