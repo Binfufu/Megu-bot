@@ -1,0 +1,13 @@
+# 让 git **不要碰行尾**。
+#
+# 为什么整仓都关掉文本转换（`* -text`）：
+#   * `bots\*\run.cmd` 与 `scripts\restart.cmd` 必须是 **CRLF**，而且这一点**有测试盯着**
+#     （D45：`.cmd` 行尾变 LF 会让 `cmd.exe` 找不到标签，窗口行为诡异）；
+#   * 少数文件是"字节即事实"的（例如编码事故的现场记录），git 一转换就毁证据。
+#     （曾经的 `selftest.js.before-structure-fix` / `scripts\patch-*.txt` 属于这一类，
+#      它们在开源前被删掉了；这条规矩留着，因为同类文件随时可能再出现。）
+#   * Windows 上 `core.autocrlf` 的默认值会把这些文件在检出时改掉 —— 那是静默的数据损坏。
+#
+# 代价：仓库里存的就是文件此刻的字节；跨平台协作时要自己注意行尾。
+# 对这个项目（单机、无 CI checkout、`.cmd` 必须 CRLF）这是正确取舍。
+* -text

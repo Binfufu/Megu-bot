@@ -1,0 +1,14 @@
+{
+  "name": "dsh-qqbot-bridge",
+  "version": "1.204.8",
+  "private": true,
+  "type": "module",
+  "description": "QQ bot bridge with a self-contained model engine, code-driven image fetching and an offline public test entry.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node scripts/launch.js",
+    "selftest:public": "node scripts/selftest-public.js"
+  }
+}

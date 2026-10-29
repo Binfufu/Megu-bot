@@ -1,0 +1,57 @@
+name: 功能建议
+description: 提出节点 A 的 bot、搬图公共能力或公共测试建议。
+title: "[Feature] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        节点 A 仅覆盖 bot 与搬图的公共代码、合成测试和协作元文件，不涉及生产运维或真实数据接入。
+        禁止附真实图库、alias / 别名表、keys、token、secret、私钥、openid、AppID、内网地址、内部路径、私有 docs 或任何私有数据。请用人工合成示例，不链接内部材料。
+  - type: dropdown
+    id: scope
+    attributes:
+      label: 节点 A 范围
+      options:
+        - bot 通用框架
+        - 搬图公共逻辑
+        - bot 与搬图公共接缝
+        - 公共隔离测试或协作元文件
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题
+      description: 描述公共使用场景和当前限制，不包含真实用户对话、账号或生产资料。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案与边界
+      description: 说明行为变化、替代方案及明确不做什么；保持零第三方依赖，不要求安装工具、启动 bot 或操作生产。
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 可隔离验证的验收条件
+      description: 用人工合成输入和预期输出说明如何验证，并考虑 Ubuntu / Windows、Node 22 最新 patch / 24。公共入口为 node scripts/selftest-public.js，尚未集成时标“待集成”，不要声称 CI 已绿。
+    validations:
+      required: true
+  - type: textarea
+    id: risks
+    attributes:
+      label: 风险、兼容性与未验证项
+      description: 列出可能受影响的公共行为，不引入私有数据或完整回归的隐含要求。
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 公开提交前确认
+      options:
+        - label: 内容只含人工合成示例，不包含真实图库、alias、凭据、openid、AppID、内网或私有材料，也不链接私有 docs。
+          required: true
+        - label: 建议遵守零依赖与隔离测试边界，不把生产操作或 bot 启动作为公开协作前提。
+          required: true

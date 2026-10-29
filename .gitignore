@@ -1,0 +1,49 @@
+# 凭证：绝不要提交
+# 每只机器人一份，都在自己的目录里（`bots\<bot>\.env`，见 docs\03 D37）
+bots/*/.env
+# 旧布局（迁移前的位置，留着以免漏掉）
+.env
+.env.aris
+
+# ---------------------------------------------------------------------------
+# 运行期数据：**每只机器人一个目录**，全在 data\ 下
+#
+#   data\megumin\   惠惠      state.db / bot.lock / bridge.log
+#   data\aris\      爱丽丝    state.db / bot.lock / bridge.log
+#   data\index\     待办索引（派生的，可删可重建）
+#
+# 整个 data\ 都不进版本库 —— 里面全是运行期产物。
+# ---------------------------------------------------------------------------
+data/
+
+# 旧布局（单实例时代，平铺在仓库根目录）
+.qqbot.db
+.qqbot.db-wal
+.qqbot.db-shm
+.qqbot.db.corrupt-*
+.qqbot-state.json
+.qqbot.lock
+logs/
+
+# 第二只机器人的旧布局
+.qqbot-aris.db
+.qqbot-aris.db-wal
+.qqbot-aris.db-shm
+.qqbot-aris.db.corrupt-*
+.qqbot-aris.lock
+
+node_modules/
+
+# 2026-09-27 迁移时的数据备份（`docs\04` §13）：里面是 state.db 的 WAL 与当时的日志，
+# 都是**运行期数据**，不是源码。留着是为了万一还要翻证据，但绝不进版本库。
+backup-before-move/
+
+# 临时脚本（取证/一次性实验用，scripts\ 里的正式工具不叫这个名字）
+/tmp-*
+/scripts/tmp-*
+
+# 提交信息临时文件（写中文提交信息用 `git commit -F`，别把文件本身提交进去）
+/.git-commit-msg*.txt
+# Python 缓存(scripts 下的工具脚本会生成)
+__pycache__/
+*.pyc

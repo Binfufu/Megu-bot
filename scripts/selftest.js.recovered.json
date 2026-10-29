@@ -1,0 +1,149 @@
+[
+ {
+  "offset": 60649,
+  "source": "docs\\03-设计决策日志.md",
+  "lost": "吗,",
+  "prefix": "会累和饿是正常的",
+  "suffix": "他不是机器人吗"
+ },
+ {
+  "offset": 86800,
+  "source": "src\\sqlite-store.js",
+  "lost": "的 ",
+  "prefix": "单原来只活在内存",
+  "suffix": "GroupCon"
+ },
+ {
+  "offset": 86857,
+  "source": "src\\index.js",
+  "lost": "报\"",
+  "prefix": "列表` 空的、播",
+  "suffix": "没有任何可用目标"
+ },
+ {
+  "offset": 91648,
+  "source": "scripts\\announce-preview.js",
+  "lost": "→ ",
+  "prefix": "NV_FILE ",
+  "suffix": "旧布局 .env"
+ },
+ {
+  "offset": 94469,
+  "source": "src\\todo-index.js",
+  "lost": "成 ",
+  "prefix": "ern 原来都写",
+  "suffix": "`^\\s*-\\s"
+ },
+ {
+  "offset": 99339,
+  "source": "src\\style.js",
+  "lost": "。'",
+  "prefix": "抱怨一下饿或者穷",
+  "suffix": ","
+ },
+ {
+  "offset": 102299,
+  "source": "src\\memory-archive.js",
+  "lost": "息(",
+  "prefix": "没有配对的用户消",
+  "suffix": "例如卡片改动后的"
+ },
+ {
+  "offset": 103940,
+  "source": "docs\\03-设计决策日志.md",
+  "lost": "的 ",
+  "prefix": "erbatim ",
+  "suffix": "`【更新播报】`"
+ },
+ {
+  "offset": 105189,
+  "source": "src\\memory-archive.js",
+  "lost": "当\"",
+  "prefix": "ull(调用方就",
+  "suffix": "没有记忆\")"
+ },
+ {
+  "offset": 112121,
+  "source": "src\\growth.js",
+  "lost": "率。",
+  "prefix": "的概率不会变成概",
+  "suffix": "*"
+ },
+ {
+  "offset": 114495,
+  "source": "src\\growth.js",
+  "lost": "… ",
+  "prefix": "10/20/30",
+  "suffix": ""
+ },
+ {
+  "offset": 116374,
+  "source": "docs\\03-设计决策日志.md",
+  "lost": "**",
+  "prefix": "到 Lv.10,",
+  "suffix": "Lv.6"
+ },
+ {
+  "offset": 131008,
+  "source": "scripts\\handoff.js",
+  "lost": "丝'",
+  "prefix": "e: '天童爱丽",
+  "suffix": ","
+ },
+ {
+  "offset": 139449,
+  "source": "src\\mood.js",
+  "lost": "穷\"",
+  "prefix": "这是\"不再一直说",
+  "suffix": "的机"
+ },
+ {
+  "offset": 139510,
+  "source": "self",
+  "lost": "饿的",
+  "prefix": "oodie, '",
+  "suffix": ""
+ },
+ {
+  "offset": 144282,
+  "source": "src\\sqlite-store.js",
+  "lost": "个群",
+  "prefix": "armup 3 ",
+  "suffix": ""
+ },
+ {
+  "offset": 150028,
+  "source": "src\\index.js",
+  "lost": "样，",
+  "prefix": "「不要像机器人一",
+  "suffix": "只要说自己有多少"
+ },
+ {
+  "offset": 150040,
+  "source": "src\\index.js",
+  "lost": "行，",
+  "prefix": "说自己有多少钱就",
+  "suffix": "报详细数值的工作"
+ },
+ {
+  "offset": 152626,
+  "source": "src\\lock.js",
+  "lost": "启\"",
+  "prefix": "每次启动都自动重",
+  "suffix": "的开"
+ },
+ {
+  "offset": 154380,
+  "source": "src\\commands.js",
+  "lost": "令'",
+  "prefix": "「爱丽丝加一个指",
+  "suffix": "/help',用"
+ },
+ {
+  "offset": 155755,
+  "source": "docs\\03-设计决策日志.md",
+  "lost": "按 ",
+  "prefix": "cmd.exe ",
+  "suffix": "OEM 码页解析"
+ }
+]

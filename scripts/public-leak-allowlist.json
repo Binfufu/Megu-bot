@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "note": "命中逐条人工判定：以下仅为人工确认的合成 fixture（明文字面量不是真实凭据/ID/内网资产）。放行按 (path,id) 精确匹配，不豁免同文件其他模式。",
+  "entries": [
+    {
+      "path": "scripts/selftest-body-rules.js",
+      "id": "internal-ip",
+      "reason": "私网判定测试用例枚举保留地址段（RFC1918/回环/链路本地），不是真实内网资产"
+    },
+    {
+      "path": "scripts/selftest-meitu-fetch.js",
+      "id": "openid-hex",
+      "reason": "去重/账本测试用的 32 位十六进制明文序列（ABCDEF…/FEDCBA…），非真实 openid"
+    },
+    {
+      "path": "scripts/selftest-residue.js",
+      "id": "openid-hex",
+      "reason": "合成占位 id（全 0 + 1），非真实 openid"
+    }
+  ]
+}

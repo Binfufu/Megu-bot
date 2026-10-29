@@ -1,0 +1,59 @@
+name: 缺陷报告
+description: 报告节点 A 的 bot、搬图公共代码或合成测试问题。
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        只提交人工合成的最小复现。禁止上传真实图库、alias / 别名表、keys、token、secret、私钥、openid、AppID、内网地址、内部路径、私有 docs、配置、活库、会话或其他私有数据。
+        不附原始生产日志或截图，不启动 bot、不触碰生产。可利用漏洞或泄露材料请勿公开；改用维护者已公开的私下联系渠道。
+  - type: dropdown
+    id: scope
+    attributes:
+      label: 节点 A 范围
+      options:
+        - bot 通用框架
+        - 搬图公共逻辑
+        - bot 与搬图公共接缝
+        - 公共隔离测试或协作元文件
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 运行环境
+      description: 填写操作系统、Node 完整版本和代码提交号；不要填写真实账号、内部路径或网络信息。
+      placeholder: "Ubuntu / Windows；Node 22.x 或 24.x 的完整版本；公开提交号"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 合成最小复现
+      description: 提供不依赖外部服务、真实图片或私有数据的步骤与合成输入。
+    validations:
+      required: true
+  - type: textarea
+    id: expected_actual
+    attributes:
+      label: 期望与实际行为
+      description: 分别描述期望和实际结果；错误信息仅保留人工重写的最小非敏感内容。
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: 已执行的检查与未验证项
+      description: 记录准确命令、退出码、通过 / 失败 / 跳过数量。公共入口缺失请写“待集成”；未运行完整回归请明确说明，不要求运行全量。
+      placeholder: "node scripts/selftest-public.js；退出码；通过 / 失败 / 跳过数量；或：待集成 / 未运行及原因"
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 公开提交前确认
+      options:
+        - label: 复现仅含人工合成数据，不包含真实图库、alias、凭据、openid、AppID、内网或私有材料，也不链接私有 docs。
+          required: true
+        - label: 没有为本报告启动 bot 或操作生产，也没有把未运行的测试称为通过。
+          required: true
