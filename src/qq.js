@@ -678,7 +678,14 @@ export class QqGateway extends EventEmitter {
   }
 
   async #onHello({ heartbeat_interval: intervalMs }) {
-    const interval = Number(intervalMs) || 45_000;
+    // hello 里的周期来自对端。1.204.9 安全加固(CodeQL js/resource-exhaustion):
+    // 夹在 1s~5min,异常值(0/负数/超大/NaN)既不会把心跳打成忙等,也不会让连接假活。
+    const HEARTBEAT_MIN_MS = 1_000;
+    const HEARTBEAT_MAX_MS = 300_000;
+    const requested = Number(intervalMs);
+    const interval = Number.isFinite(requested) && requested > 0
+      ? Math.min(Math.max(requested, HEARTBEAT_MIN_MS), HEARTBEAT_MAX_MS)
+      : 45_000;
 
     this.#heartbeatTimer = setInterval(() => this.#heartbeat(), interval);
 

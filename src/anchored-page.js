@@ -74,9 +74,9 @@ export function checkAnchors(rows, io, { requiredFields = ['id'] } = {}) {
   return { ok: problems.length === 0, problems };
 }
 
-/** markdown 表格(单元格里的 `|` 会被转义,免得表格散架)。 */
+/** markdown 表格(单元格里的 `|` 会被转义,免得表格散架;反斜杠也先转义,否则 `\|` 会被吃掉)。 */
 export function renderTable(headers, rows) {
-  const cell = (value) => String(value ?? '').replace(/\|/g, '\\|');
+  const cell = (value) => String(value ?? '').replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
   const lines = [`| ${headers.join(' | ')} |`, `|${headers.map(() => '---').join('|')}|`];
   for (const row of rows) lines.push(`| ${row.map(cell).join(' | ')} |`);
   return lines;
