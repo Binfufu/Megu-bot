@@ -1,0 +1,66 @@
+name: Require linked issue
+
+# A5-6 / 只读检查：PR 正文必须含关联 issue 的关闭关键字。
+# 设计约束：不 checkout、不调 GitHub API、不引入第三方 action、不读写 secrets。
+# job 名就是 ruleset 必需检查的 context —— 改名等于改对外契约，别动。
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+# 正文未改但连推多个 commit 时只保留最新一次判定；edited 会重新触发。
+concurrency:
+  group: "require-linked-issue-${{ github.event.pull_request.number }}"
+  cancel-in-progress: true
+
+jobs:
+  linked-issue:
+    name: Require linked issue
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check PR body for a linked issue
+        # 事件负载由 runner 以文件形式提供（GITHUB_EVENT_PATH），脚本只读它。
+        # 不用 shell 插值 body，避免正文里的引号/反引号被当成命令。
+        run: |
+          node --input-type=module -e '
+          import fs from "node:fs";
+
+          const fail = (message) => {
+            console.error("::error::" + message);
+            process.exit(1);
+          };
+
+          const eventPath = process.env.GITHUB_EVENT_PATH;
+          if (!eventPath) fail("GITHUB_EVENT_PATH 未设置：本检查只支持 pull_request 事件。");
+
+          let event;
+          try {
+            event = JSON.parse(fs.readFileSync(eventPath, "utf8"));
+          } catch (error) {
+            fail("读不出事件负载：" + String(error && error.message ? error.message : error));
+          }
+
+          const pr = event.pull_request;
+          if (!pr) fail("事件负载里没有 pull_request：请确认本 workflow 只由 pull_request 触发。");
+
+          const login = (pr.user && pr.user.login) || "";
+          if (login === "dependabot[bot]") {
+            console.log("::notice::dependabot[bot] 的 PR 不要求关联 issue，跳过检查。");
+            process.exit(0);
+          }
+
+          const body = typeof pr.body === "string" ? pr.body : "";
+          const LINKED_ISSUE = /^[ \t>]*(?:[-*+][ \t]+)?(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)[ \t]*:?[ \t]*#[1-9][0-9]*\b/im;
+          const match = LINKED_ISSUE.exec(body);
+
+          if (match) {
+            console.log("关联 issue 检查通过：" + match[0].trim());
+            process.exit(0);
+          }
+
+          fail("PR 正文缺少关联 issue：请加一行 Closes #<issue 编号>（Fixes / Resolves 同义写法也认），保存后本检查会自动重跑。模板里的占位 Closes # 不算关联。");
+          '
