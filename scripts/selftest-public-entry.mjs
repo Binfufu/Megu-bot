@@ -100,19 +100,34 @@ try {
   test('隔离最小公开树运行真实既有 suite，不带 resources/data/私模块/工具', () => {
     for (const relative of [
       'scripts/selftest-public.js', 'scripts/selftest-meitu-fetch.js', 'scripts/selftest-meitu-lines.js',
+      'scripts/selftest-engine-tools.js', 'scripts/selftest-meitu-service.js',
+      'scripts/selftest-pack.js',
       'src/meitu-search.js', 'src/meitu-index.js', 'src/meitu-fetch-core.js',
       'src/meitu-cursor.js', 'src/meitu-store.js', 'src/meitu-lines.js', 'src/local-turn-content.js',
+      // 以下为 engine-tools / meitu-service 两个公开套件的仓内相对 import 闭包（只含 P 区文件）
+      'src/action-log.js', 'src/body-rules.js', 'src/body-theme.js', 'src/capabilities.js',
+      'src/condition.js', 'src/context-budget.js', 'src/control-markup.js', 'src/dream-cards.js',
+      'src/engine.js', 'src/group-context.js', 'src/growth.js', 'src/inject-mark.js', 'src/llm.js',
+      'src/local-gameplay-content.js', 'src/local-mood-body-content.js', 'src/log.js',
+      'src/meitu-alias.js', 'src/meitu-command.js', 'src/meitu-interpret.js', 'src/meitu-service.js',
+      'src/qq.js', 'src/runner-contract.js', 'src/sqlite-store.js', 'src/stat-binding.js',
+      'src/stats.js', 'src/tool-loop.js',
+      // 源码扫描判据要读这些文件（只作为文本比对，不在夹具里 import）
+      'src/index.js', 'src/config.js', 'src/llm-settings.js',
+      // 阶段 2：本地内容读取器现在依赖内容包加载器（无 content/packs 目录时走旧回退）
+      'src/content-pack.js',
     ]) copy(relative);
     assert.equal(fs.existsSync(path.join(temp, 'resources')), false);
     assert.equal(fs.existsSync(path.join(temp, 'data')), false);
     const result = run(['--public']);
     assert.equal(result.status, 0, result.stdout + result.stderr);
     assert.match(result.stdout, /PUBLIC SUBSET ONLY/);
-    assert.match(result.stdout, /2 suites，\d+ registered cases/);
+    assert.match(result.stdout, /5 suites，\d+ registered cases/);
     assert.match(result.stdout, /\d+ passed, 0 failed/);
   });
   test('公开 --out 以仓库根解析相对路径，skip 单独计数不冒充 passed', () => {
-    const result = run(['--public', '--out', 'entry-output.log'], { QQBOT_SELFTEST_SKIP: 'meitu-' });
+    // 覆盖全部公开套件名称前缀：新增套件也必须让本用例保持"全部跳过"的前提。
+    const result = run(['--public', '--out', 'entry-output.log'], { QQBOT_SELFTEST_SKIP: 'meitu-,engine-tools,content-pack' });
     assert.equal(result.status, 0, result.stdout + result.stderr);
     assert.match(result.stdout, /0 passed, 0 failed, \d+ skipped/);
     const output = fs.readFileSync(path.join(temp, 'entry-output.log'), 'utf8');
