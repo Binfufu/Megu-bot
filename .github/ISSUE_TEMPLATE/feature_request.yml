@@ -1,5 +1,5 @@
 name: 功能建议
-description: 提出节点 A 的 bot、搬图公共能力或公共测试建议。
+description: 提出节点 A 的 bot、搬图公共能力或公共测试建议；安全漏洞不要用公开 issue，请按 SECURITY.md 私下报告。
 title: "[Feature] "
 labels: ["enhancement"]
 body:
@@ -8,6 +8,7 @@ body:
       value: |
         节点 A 仅覆盖 bot 与搬图的公共代码、合成测试和协作元文件，不涉及生产运维或真实数据接入。
         禁止附真实图库、alias / 别名表、keys、token、secret、私钥、openid、AppID、内网地址、内部路径、私有 docs 或任何私有数据。请用人工合成示例，不链接内部材料。
+        安全漏洞不要用公开 issue，请按 SECURITY.md（https://github.com/Binfufu/Megu-bot/blob/main/SECURITY.md）私下报告。
   - type: dropdown
     id: scope
     attributes:
