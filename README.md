@@ -166,3 +166,5 @@ QQBOT_MEITU_SOURCE=auto
 离线公开验证、你本地的真实联网验证、完整私库回归、GitHub CI 与正式发布是不同证据；只报告实际跑过的那一层。
 
 参与 bot/搬图代码协作请先读 [贡献指南](<CONTRIBUTING.md>)；Issue 与 PR 只提交合成复现，不提供真实图库、别名资料或凭据。
+
+<!-- linked-issue check negative test; this branch is discarded, never merged -->
