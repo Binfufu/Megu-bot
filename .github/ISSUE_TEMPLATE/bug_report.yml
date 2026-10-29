@@ -1,6 +1,7 @@
 name: 缺陷报告
 description: 报告节点 A 的 bot、搬图公共代码或合成测试问题。
 title: "[Bug] "
+labels: ["bug"]
 body:
   - type: markdown
     attributes:

@@ -1,0 +1,62 @@
+name: 维护/自改记录
+description: 维护者自改、文档/元文件小修、依赖或流程调整等非功能类改动的记录。功能变化请用「功能建议」，缺陷请用「缺陷报告」。
+title: "[Maintenance] "
+labels: ["maintenance"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        本模板用于**维护者自改**和**非功能类改动**（文档、元文件、CI、流程、清理）。它存在的意义是让公开历史能回答"为什么改"，所以请把动机和验收写清楚，不要只写"小改一下"。
+        仍须遵守数据边界：不得粘贴真实图库、alias / 别名表、keys、token、secret、私钥、openid、AppID、内网地址、私有路径或任何私有材料。
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 改动类型
+      options:
+        - 维护者自改（self-change）
+        - 文档 / 元文件
+        - CI / 流程
+        - 清理 / 重构（不改行为）
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: 现状与动机
+      description: 现在是什么样、为什么必须改；不写"看起来更整齐"这类没有判据的理由。
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: 打算怎么改 / 明确不做什么
+      description: 列出将改动的文件或模块，以及这次明确不碰的范围（防止顺手扩大）。
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收判据与证据
+      description: 用什么命令/检查证明改对了；涉及公共入口时写清覆盖的子集与未覆盖项。
+      placeholder: "例：node scripts/selftest-public.js → 60 passed / 0 failed；CI 四组合通过；未覆盖：真实 QQ 链路"
+    validations:
+      required: true
+  - type: textarea
+    id: risk
+    attributes:
+      label: 风险、回退与未验证项
+      description: 列出兼容性影响、回退方式（仅代码步骤）与仍未验证的内容。
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 不含真实图库、alias、凭据、openid、AppID、内网地址、私有路径或原始生产日志。
+          required: true
+        - label: 已经/将会关联对应 PR，并在 PR 中填写真实验证结果（不预写通过）。
+          required: true
+        - label: 本改动不包含生产操作、bot 启动或自动部署。
+          required: true
