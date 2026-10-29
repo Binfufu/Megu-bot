@@ -1,11 +1,16 @@
 /**
- * Optional local overrides for exactly three sentence tables, not a content-pack loader.
+ * 固定旧快照里的共享句表 + 角色风格表的回退读取。
+ *
+ * 阶段 2（角色包化）起：`styleNudges` 优先来自内容包（见 `src/content-pack.js`）；
+ * `warmupTopics` / `meituLines` 是世界级共享句表，仍读本固定文件。
+ *
  * Uses Node 24 fs.readFileSync + JSON.parse (asOf 2026-10-29):
  * https://nodejs.org/docs/latest-v24.x/api/fs.html#fsreadfilesyncpath-options
  * Synchronous once at module initialization so legacy imports see the same tables.
  * No executable content, discovery, merge layers, network, or random draws.
  */
 import { readFileSync } from 'node:fs';
+import { PACKS, packsAsStyleNudges } from './content-pack.js';
 
 const LOCAL_URL = new URL('../content/local/turn-lines.json', import.meta.url);
 const LINE_KEYS = ['groupDisabled', 'cooldown', 'unregistered', 'interpretFailed', 'noResult',
@@ -43,4 +48,15 @@ export function readLocalTurnContent(read = readFileSync) {
   return value;
 }
 
-export const LOCAL_TURN_CONTENT = readLocalTurnContent();
+function mergeKeyed(base, overrides) {
+  const out = { ...(base ?? {}) };
+  for (const [key, value] of Object.entries(overrides ?? {})) out[key] = value;
+  return out;
+}
+
+/** 角色包优先、旧快照回退（阶段 2）：只有 `styleNudges` 按主题来自包。 */
+const legacyContent = readLocalTurnContent();
+const packSections = packsAsStyleNudges(PACKS);
+export const LOCAL_TURN_CONTENT = legacyContent && packSections
+  ? { ...legacyContent, styleNudges: mergeKeyed(legacyContent.styleNudges, packSections.styleNudges) }
+  : legacyContent;

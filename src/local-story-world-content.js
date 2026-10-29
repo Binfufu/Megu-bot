@@ -1,5 +1,6 @@
 /** One optional fixed-schema local content document; no runtime data or package discovery. */
 import fs from 'node:fs';
+import { PACKS, packsAsStoryRoleSections } from './content-pack.js';
 
 const fields = [
   'schemaVersion', 'storyEvents', 'storyPacks', 'storyClosingWords', 'storyClosingExamples',
@@ -80,4 +81,33 @@ function load() {
   return value;
 }
 
-export const LOCAL_STORY_WORLD = load();
+function mergeKeyed(base, overrides) {
+  const out = { ...(base ?? {}) };
+  for (const [key, value] of Object.entries(overrides ?? {})) out[key] = value;
+  return out;
+}
+
+/**
+ * 角色包优先、旧快照回退（阶段 2）：只覆盖角色段（storyPacks / companions /
+ * characterDays / arisPhrases），世界级段原样保留。合并**保持旧键顺序**：
+ * 既有键原位替换、新角色追加，避免因包目录排序改变展示顺序。
+ */
+function mergeRoleSections(legacyContent) {
+  const sections = packsAsStoryRoleSections(PACKS);
+  if (!legacyContent || !sections) return legacyContent;
+  const storyPacks = mergeKeyed(legacyContent.storyPacks, sections.storyPacks);
+  const characterDays = mergeKeyed(legacyContent.characterDays, sections.characterDays);
+  const companions = Array.isArray(legacyContent.companions) ? [...legacyContent.companions] : [];
+  for (let index = 0; index < companions.length; index += 1) {
+    const override = sections.companionsById[companions[index].id];
+    if (override) companions[index] = override;
+  }
+  for (const [id, override] of Object.entries(sections.companionsById)) {
+    if (!companions.some((one) => one.id === id)) companions.push(override);
+  }
+  const phrases = Object.values(sections.phrasesByRole).flat();
+  const arisPhrases = phrases.length ? phrases : legacyContent.arisPhrases;
+  return { ...legacyContent, storyPacks, companions, characterDays, arisPhrases };
+}
+
+export const LOCAL_STORY_WORLD = mergeRoleSections(load());

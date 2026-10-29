@@ -1,9 +1,15 @@
 /**
- * Fixed local display content only; no package discovery, executable data or policy overrides.
- * Node 24 fs.readFileSync + JSON.parse, asOf 2026-10-29:
+ * 本地展示内容读取（旧快照回退）。
+ *
+ * 阶段 2（角色包化）起：角色内容优先来自 `content/packs/<id>/pack.json`（见
+ * `src/content-pack.js`）；本文件只在没有内容包时读固定旧快照，并继续提供世界级
+ * `config` / `ruleLabels`。固定路径、固定 schema、无目录发现、无代码执行。
+ *
+ * Node 24 fs.readFileSync + JSON.parse，asOf 2026-10-29:
  * https://nodejs.org/docs/latest-v24.x/api/fs.html#fsreadfilesyncpath-options
  */
 import { readFileSync } from 'node:fs';
+import { PACKS, packsAsMoodBodyContent } from './content-pack.js';
 
 const CONTENT_URL = new URL('../content/local/mood-body.json', import.meta.url);
 const MOOD_IDS = {
@@ -42,8 +48,7 @@ function validBody(value) {
     && textFields(value.growth, ['knownAs', 'conceptAs', 'personRecorded', 'conceptRecorded']);
 }
 /** Injectable read boundary for isolated tests; runtime path and schema are fixed. */
-export function readLocalMoodBodyContent(read = readFileSync) {
-  let source;
+export function readLocalMoodBodyContent(read = readFileSync) {  let source;
   try { source = read(CONTENT_URL, 'utf8'); }
   catch (error) {
     if (error?.code === 'ENOENT') return null;
@@ -61,4 +66,18 @@ export function readLocalMoodBodyContent(read = readFileSync) {
     || !textFields(value.ruleLabels, ['biological', 'mechanical'])) throw new Error('local mood/body content: invalid fixed schema');
   return value;
 }
-export const LOCAL_MOOD_BODY_CONTENT = readLocalMoodBodyContent();
+function mergeKeyed(base, overrides) {
+  const out = { ...(base ?? {}) };
+  for (const [key, value] of Object.entries(overrides ?? {})) out[key] = value;
+  return out;
+}
+
+/**
+ * 角色包优先、旧快照回退（阶段 2）。旧快照同时提供世界级 config/ruleLabels；
+ * 包只覆盖 `mood` / `body` 两个按主题组织的映射，其余键原样保留（行为不变）。
+ */
+const legacyContent = readLocalMoodBodyContent();
+const packSections = packsAsMoodBodyContent(PACKS);
+export const LOCAL_MOOD_BODY_CONTENT = legacyContent && packSections
+  ? { ...legacyContent, mood: mergeKeyed(legacyContent.mood, packSections.mood), body: mergeKeyed(legacyContent.body, packSections.body) }
+  : legacyContent;
