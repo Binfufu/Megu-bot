@@ -1,5 +1,5 @@
 /**
- * A1 保守公开子集：只注册既有、依赖自包含的搬图检索/落盘与句库套件。
+ * 保守公开子集：注册既有、依赖自包含的搬图检索/落盘、句库、own 引擎工具循环与搬图服务层套件。
  * 保留断言语义，使用中性夹具；公开必需 suite 用静态 import，缺失必须报错。
  * 不读取 resources、真实别名或外部 D 盘资料，不 spawn noPublish 工具，不联网。
  * 这不是完整私库的全量替代品；覆盖与排除边界随每次运行输出。
@@ -8,8 +8,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { registerEngineToolTests } from './selftest-engine-tools.js';
 import { registerMeituFetchTests } from './selftest-meitu-fetch.js';
 import { registerMeituLinesTests } from './selftest-meitu-lines.js';
+import { registerMeituServiceTests } from './selftest-meitu-service.js';
 
 export async function runPublicSelftest() {
   const cases = [];
@@ -23,6 +25,8 @@ export async function runPublicSelftest() {
   };
   register('meitu-fetch（检索/去重/游标/临时落盘）', registerMeituFetchTests);
   register('meitu-lines（默认句库/临时覆盖/注入读取）', registerMeituLinesTests);
+  register('engine-tools（own 引擎工具循环：两步闭环/预算/坏参数/快照）', registerEngineToolTests);
+  register('meitu-service（发N张角色美图服务层：白名单/冷却/降档/结算）', registerMeituServiceTests);
 
   // 与原全量 runner 相同的名称子串显式跳过、计数及 --out 语义。
   const patterns = String(process.env.QQBOT_SELFTEST_SKIP ?? '')
@@ -39,7 +43,7 @@ export async function runPublicSelftest() {
   say(`公开覆盖：${suites.length} suites，${cases.length} registered cases`);
   for (const { name, count } of suites) say(`  suite ${name}: ${count}`);
   say('刻意排除：meitu-command/alias（真实 data/meitu-alias.json 判据）；meitu-interpret（resources/D 资料）；alias-merge（noPublish 工具）');
-  say('刻意排除：service/gallery（源码接线及回填工具闭包待下一块核准）；api/面板/酒馆/后台及其余未审计私有套件');
+  say('刻意排除：gallery（回填工具闭包）；play（冻结文案漂移待修）；api/面板/酒馆/后台及其余未审计私有套件');
   say('边界：只用中性内联夹具、注入假 fetch 与临时目录；其余套件未接入前不计入通过数。');
   for (const [name, fn] of cases) {
     if (patterns.some((pat) => name.includes(pat))) {
