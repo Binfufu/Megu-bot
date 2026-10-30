@@ -2,10 +2,10 @@ import { LOCAL_MOOD_BODY_CONTENT } from './local-mood-body-content.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { parseEnv } from 'node:util';
-import { resolveParams } from './params.js';
+import { ParamError, resolveParams } from './params.js';
 import { CONFIG_DEFAULTS, CONFIG_DERIVED_DEFAULTS, CONFIG_KNOWN_ENV, createConfigParamDefinitions } from './config-params.js';
 import { packParamsForTheme } from './content-pack.js';
-import { validatePackParams } from './pack-params.js';
+import { PACK_PARAM_SPECS, validatePackParams } from './pack-params.js';
 // The optional world pack is a content-owned tuning layer below the character pack.
 // Importing the loader is a single module-singleton read; loadConfig adds no per-call IO.
 import { activeWorldParams } from './world-pack.js';
@@ -19,6 +19,11 @@ import { DEFAULT_STRAND_GAP_MS } from './social.js';
 import { validateLlmRequestOptions } from './llm.js';
 // 美图库的路径派生只有一份(`state.db` 同级 = `meitu.db`,见展览处刀 1 / D306)。
 import { meituDbPathFromStateDb } from './meitu-gallery.js';
+// **风格包**(S1,2026-10-30):实例级媒介表现参数 `QQBOT_STYLE_PACK` 只在这里解析/校验。
+// 这里是加载器唯一的 config 接线点;内容包/world 包的参数白名单里**没有**这个键
+// (内容数据永远不能选择或授权实例风格/功能)。
+import { STYLE_PACKS, styleAsPolicy, stylePackById } from './style-pack.js';
+import { DEMO_STYLE_NUDGES, SPOKEN_STANDING_NOTES } from './style.js';
 
 /** QQ intent bit for group-@ and direct (C2C) messages. */
 export const INTENT_GROUP_AND_C2C = 1 << 25;
@@ -471,6 +476,53 @@ function parseAccessMode(value) {
   return mode;
 }
 
+// ---------------------------------------------------------------------------
+// **风格包 → 实例表现策略**(S1 接线,2026-10-30)
+//
+// 三轴分离:角色轴(卡/角色包)、功能轴(实例配置/授权)、**媒介表现轴**(风格包)。
+// 风格包只描述"怎么发":固定表达要求、mood 长度缩放、标点保留、拆条策略、emoji 上限、
+// nudges。它**不能**表达功能/授权/工具/预算/账号 —— 加载器本身就不收这些字段。
+// ---------------------------------------------------------------------------
+
+/** 合法风格包 id:来自 `content/styles/*` 目录发现;没有目录的旧安装只认内置 legacy。 */
+export const STYLE_PACK_IDS = Object.freeze([...(STYLE_PACKS?.ids ?? ['legacy-online'])]);
+
+/**
+ * 没有 `content/styles/` 的旧安装:**内置 legacy 策略 = 风格包引入前的现行默认**。
+ * 这不是运行时开关,只是"目录不存在时行为不变"的固定回退(S1 加载器返回 null 时同口径)。
+ */
+const BUILTIN_LEGACY_STYLE_POLICY = Object.freeze({
+  id: 'legacy-online',
+  label: '旧在线口语（内置默认：无风格包目录时的现行行为）',
+  standingNotes: Object.freeze([...SPOKEN_STANDING_NOTES]),
+  nudges: Object.freeze([...DEMO_STYLE_NUDGES]),
+  moodLength: Object.freeze({ maxCharsFactor: 1, maxSentences: null }),
+  punctuation: Object.freeze({ preserve: false }),
+  split: Object.freeze({ enabled: true, maxLinesPerTurn: 5 }),
+  emoji: Object.freeze({ enabled: true, chanceMax: 0.12 }),
+});
+
+/** 参数层校验(枚举):未知 id 在解析阶段就 PARAM_VALUE,不等到运行。 */
+function parseStylePackId(value) {
+  const id = String(value).trim();
+  if (!STYLE_PACK_IDS.includes(id)) throw new Error('QQBOT_STYLE_PACK 参数无效');
+  return id;
+}
+
+/**
+ * 解析**实例**选择的风格包 → 消费端策略(只表现数据)。
+ * 没有 `content/styles/` → 内置 legacy(现行行为不变);未知 id 抛错(fail closed)。
+ */
+function resolveStylePolicy(rawValue) {
+  const requested = rawValue === undefined ? 'legacy-online' : String(rawValue).trim();
+  if (!STYLE_PACKS) {
+    // `parseStylePackId` 已把非 legacy 的显式选择挡在参数层;这里再兜一次 fail closed。
+    if (requested !== BUILTIN_LEGACY_STYLE_POLICY.id) throw new Error('QQBOT_STYLE_PACK 参数无效');
+    return BUILTIN_LEGACY_STYLE_POLICY;
+  }
+  return styleAsPolicy(stylePackById(requested));
+}
+
 export const CONFIG_PARAM_DEFINITIONS = createConfigParamDefinitions({
   enums: {
     QQBOT_ENGINE: ENGINE_MODES, QQBOT_MEITU_SOURCE: MEITU_SOURCES, QQBOT_ACCESS_MODE: ACCESS_MODES,
@@ -478,10 +530,12 @@ export const CONFIG_PARAM_DEFINITIONS = createConfigParamDefinitions({
     QQBOT_ANNOUNCE_MODE: ANNOUNCE_MODES, QQBOT_ANNOUNCE_TARGETS: ANNOUNCE_TARGETS,
     QQBOT_ANNOUNCE_TRIGGER: ANNOUNCE_TRIGGERS, QQBOT_GROWTH_ANNOUNCE: GROWTH_ANNOUNCE_CHANNELS,
     QQBOT_SELFCARE_LIFE_TO: ['c2c', 'group'],
+    QQBOT_STYLE_PACK: STYLE_PACK_IDS,
   },
   profile: parseDshProfile, engine: parseEngineMode, inputTokenLimit: parseInputTokenLimit,
   meituSource: parseMeituSource, accessMode: parseAccessMode,
   moodTheme: parseMoodTheme, bodyTheme: (value) => parseBodyTheme(value, String(value).trim().toLowerCase()),
+  stylePack: parseStylePackId,
   warmupMode: parseWarmupMode, announceMode: parseAnnounceMode, announceTargets: parseAnnounceTargets,
   announceTrigger: parseAnnounceTrigger, growthAnnounce: parseGrowthAnnounce,
   groupMode: (value) => String(value).toLowerCase(),
@@ -549,6 +603,15 @@ export function loadConfig({ rootDir, params = {}, packParams, worldParams } = {
     // Without an active world pack this is {}, so the phase-3 layering is unchanged.
     const worldContent = worldParams === undefined ? activeWorldParams() : worldParams;
     resolveParams(CONFIG_PARAM_DEFINITIONS, { worldPack: worldContent });
+    // **实例表现参数不许从 world-pack 层来**(S1 风格包接线):真实世界包在加载器里
+    // 已经过 `validatePackParams` 白名单;这里只补**显式注入** worldParams 的同一道闸 ——
+    // 否则调用方可以拿世界包层给实例选风格(越权),而错误仍标 world-pack 层。
+    if (worldParams !== undefined && worldContent && typeof worldContent === 'object'
+      && !Array.isArray(worldContent)) {
+      for (const key of Object.keys(worldContent)) {
+        if (!Object.hasOwn(PACK_PARAM_SPECS, key)) throw new ParamError('PARAM_UNKNOWN', key, 'world-pack');
+      }
+    }
     const configFile = { ...jsonParams, ...params };
     const layers = { configFile, envFile: effectiveFileInputs, env, knownEnv: CONFIG_KNOWN_ENV };
     const withoutPack = resolveParams(CONFIG_PARAM_DEFINITIONS, layers);
@@ -672,6 +735,9 @@ function buildRuntimeConfig({ rootDir, envFile, loadedEnvFile }) {
   // 两只机器人的"身份"从这里定:情绪谱 + 身体口径(必须同一只,见 parseBodyTheme)。
   const moodTheme = parseMoodTheme(raw('QQBOT_MOOD_THEME'));
   const bodyTheme = parseBodyTheme(raw('QQBOT_BODY_THEME'), moodTheme);
+  // **实例媒介表现**(S1 风格包):这里是它的唯一 config 接线点 —— 只选表现策略,
+  // 不碰角色/功能/授权/工具/预算。未知 id 在参数层已被拒;这里再按加载器取一次(fail closed)。
+  const stylePolicy = resolveStylePolicy(raw('QQBOT_STYLE_PACK'));
   try {
     config = {
       // Local display content is separate from runtime policy.
@@ -1222,8 +1288,14 @@ function buildRuntimeConfig({ rootDir, envFile, loadedEnvFile }) {
             budgetChars: asNonNegativeInt('QQBOT_MEMORY_KB_BUDGET_CHARS', 600),
             // 一轮最多端几条(与长期层 limit=2 同档【暂定】)。
             maxChunks: asNonNegativeInt('QQBOT_MEMORY_KB_MAX_CHUNKS', 2),
-            // 百科模式(D297):「细说/为什么/是什么」类问题命中知识库时,块内附约 100 字
-            // 说明的措辞要求(不走聊天短句)。套在 kb.enabled 总闸里,这里给独立回滚开关。
+            // **百科说明授权**(精确语义,F2 2026-10-30 定死):
+            //   · 只有 `knowledge` 口径成立**且**命中了 KB 时,才会在 kb 事实块尾部追加
+            //     「约 100 字说明 / 先给结论」那一段措辞(D297);
+            //   · 关掉它 = **只关这段措辞**:knowledge 授权照旧(不变成 chat)、现实常识照旧、
+            //     角色 KB 事实照旧注入、显式 task 不因这个开关变 chat;
+            //   · 它**不是**"知识库总闸"(总闸是上面的 `QQBOT_MEMORY_KB`);
+            //   · 它是**实例功能授权**,只能放在 .env / config / 环境里,绝不许由
+            //     content pack / world pack / style 包提供(那些包的参数白名单里没有它)。
             ency: asBool('QQBOT_MEMORY_KB_ENCY', true),
           },
           // **衰减治理两旋钮**(W1,2026-10-22;诊断见 .archify\检索衰减诊断报告-20261022.md):
@@ -1237,6 +1309,9 @@ function buildRuntimeConfig({ rootDir, envFile, loadedEnvFile }) {
           },
         },
         style: {
+          // **实例风格包**(S1,2026-10-30):默认 legacy-online = 与引入前逐字等价。
+          // 只含媒介表现数据;消费点在 index.js 的 nextNudges / moodFor / planSpokenLines。
+          pack: stylePolicy,
           // Extra names to strip as a leading `【…】` label, on top of the bot's
           // own nickname, which the gateway learns from READY.
           nameLabels: (raw('QQBOT_STRIP_NAME_LABELS') ?? '')

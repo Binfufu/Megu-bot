@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "id": "chat-style-natural-v1",
+  "scope": "S1 句前模板去机械化后 buildMoodNote 的固定样例（合成输入，不借用任何角色语料）。旧 scripts/fixtures/chat-style-legacy-v1.json 保持逐字节不变；它的 mood-note 一项因主人 2026-10-30 拍板取消强制语气词而成为有意兼容例外，新预期记录在 legacyCompat 里，不重录旧 golden。",
+  "cases": [
+    {
+      "id": "plain-no-interjection",
+      "why": "普通回应不提语气词：抽中「嗯」也完全不写进提示，允许直接成句。",
+      "decision": {
+        "mood": "plain",
+        "label": "平淡正常",
+        "maxSentences": 2,
+        "maxChars": 50,
+        "interjection": "嗯",
+        "interjectionScoped": false,
+        "kaomoji": null
+      },
+      "note": "本轮情绪：平淡正常；2 句以内、不超过 50 字"
+    },
+    {
+      "id": "scoped-topic-interjection",
+      "why": "主题专属语气词（出场闸命中的场景用语）保留为可选提示，不强制。",
+      "decision": {
+        "mood": "fanfare",
+        "label": "庆典登场",
+        "maxSentences": 2,
+        "maxChars": 25,
+        "interjection": "邦邦咔邦！",
+        "interjectionScoped": true,
+        "kaomoji": null
+      },
+      "note": "本轮情绪：庆典登场；2 句以内、不超过 25 字；这个场面可以自然用「邦邦咔邦！」，不强求"
+    },
+    {
+      "id": "scoped-with-kaomoji",
+      "why": "可选语气词与既有颜文字提示、长度约束共存，顺序不变。",
+      "decision": {
+        "mood": "fanfare",
+        "label": "庆典登场",
+        "maxSentences": 2,
+        "maxChars": 25,
+        "interjection": "邦邦咔邦——！",
+        "interjectionScoped": true,
+        "kaomoji": "(・∀・)"
+      },
+      "note": "本轮情绪：庆典登场；2 句以内、不超过 25 字；这个场面可以自然用「邦邦咔邦——！」，不强求；句尾可以带 (・∀・)"
+    },
+    {
+      "id": "not-scoped-flag-wins",
+      "why": "即使 decision 里有语气词，只要 interjectionScoped 不为 true 就完全不提（标记是唯一开关）。",
+      "decision": {
+        "mood": "genki",
+        "label": "元气出击",
+        "maxSentences": 2,
+        "maxChars": 30,
+        "interjection": "好耶",
+        "interjectionScoped": false,
+        "kaomoji": null
+      },
+      "note": "本轮情绪：元气出击；2 句以内、不超过 30 字"
+    },
+    {
+      "id": "kaomoji-only",
+      "why": "长度与颜文字提示保留，语气词缺失时不留下空槽。",
+      "decision": {
+        "mood": "plain",
+        "label": "合成平静",
+        "maxSentences": 2,
+        "maxChars": 38,
+        "interjection": null,
+        "kaomoji": "(・_・)"
+      },
+      "note": "本轮情绪：合成平静；2 句以内、不超过 38 字；句尾可以带 (・_・)"
+    }
+  ],
+  "legacyCompat": [
+    {
+      "id": "legacy-mood-note",
+      "why": "旧 chat-style-legacy-v1.json 的 mood-note 固定样例；去机械化后这个旧预期必须不再复现（有意兼容例外），旧文件本身不改。",
+      "decision": {
+        "mood": "plain",
+        "label": "合成平静",
+        "maxSentences": 2,
+        "maxChars": 38,
+        "interjection": "唔",
+        "kaomoji": "(・_・)"
+      },
+      "oldNote": "本轮情绪：合成平静；2 句以内、不超过 38 字；语气词用「唔」；句尾可以带 (・_・)",
+      "newNote": "本轮情绪：合成平静；2 句以内、不超过 38 字；句尾可以带 (・_・)"
+    }
+  ]
+}

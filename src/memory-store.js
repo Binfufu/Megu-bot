@@ -26,8 +26,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { FTS_SCHEMA, HANDOFF_RECENT, KNOWN_SESSION_VERSIONS, MEMORY_SCHEMA, MEMORY_VERSION, NON_MEMORY_KINDS, RESIDUE_KIND, SESSION_FILE_NAMES, SUMMARY_REFRESH_TURNS, SUMMARY_TARGET_CHARS, SUMMARY_VERSION, buildHandoffText, buildHandoffWithSummary, cleanMemoryText, describeUnknownSessions, extractTurns, isHumanTurn, isInjectedBlock, isToolConversation, sessionDirName, sessionFileVersion, shortTime, unknownSessionVersions, whatSheSaid, whatWasSaid, workspaceKeyOf } from './memory-archive.js';
+import { FTS_SCHEMA, HANDOFF_RECENT, KNOWN_SESSION_VERSIONS, MEMORY_SCHEMA, MEMORY_VERSION, NON_MEMORY_KINDS, RESIDUE_KIND, SESSION_FILE_NAMES, SUMMARY_REFRESH_TURNS, SUMMARY_TARGET_CHARS, SUMMARY_VERSION, buildHandoffText, buildHandoffWithSummary, classifyKind, cleanMemoryText, describeUnknownSessions, extractTurns, isHumanTurn, isInjectedBlock, isToolConversation, sessionDirName, sessionFileVersion, shortTime, unknownSessionVersions, whatSheSaid, whatWasSaid, workspaceKeyOf } from './memory-archive.js';
 import { noteClaims, scoreTurn } from './memory-notes.js';
+import { CHAT_INPUT_PROJECTION_VERSION, projectChatInput } from './chat-input-projection.js';
 import { CHUNK_MAX, chunkKnowledge, renderKnowledge } from './kb.js';
 import { bigramTokens, cosineSimilarity, ftsMatchExpression, normalizeTags, recallDecision, renderRecall, tagsFor } from './memory-tags.js';
 import { log } from './log.js';
@@ -46,6 +47,41 @@ export function openMemory(file) {
 export function openMemoryReadOnly(file) {
   const db = new DatabaseSync(file, { readOnly: true });
   return db;
+}
+
+/**
+ * own 派生行是否已按**当前投影规则**迁移完成(`own-memory-archive` 成功提交时写 watermark)。
+ *
+ * ⚠️ 为什么读侧也要判(F1 反证抓到的缺口):启动归档失败(源档读失败/库忙/坏 provenance)时
+ *    归档 tick **不拦**已经打开的 memoryDb(`memory-archive-tick` 的既有语义),于是未迁移的
+ *    旧 turn/FTS 仍会被交接与长期层消费 —— 旧裸 notes 就又一次随"记忆"进提示词。
+ *    迁移没完成 ⇒ 不信任派生正文,按统一投影在**读侧**再算一遍(源码档不删、note 不删)。
+ */
+export function ownDerivedProjectionReady(db) {
+  try {
+    const value = db.prepare("SELECT value FROM meta WHERE key = 'own_archive_projection_version'").get()?.value;
+    return Number(value) >= CHAT_INPUT_PROJECTION_VERSION;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 读侧统一清洁:只有「own 源 + 迁移未完成」的旧派生行才做旧格式兼容投影;
+ * 已迁移/非 own 行原样返回(干净行零变化,重复读幂等)。
+ *
+ * ⚠️ **正文与 kind 一起现算**(F1 审查抓到):归档没成功时旧 kind 可能是被污染的
+ * (例如临时 notes 让 `warmup` 命中),`isHumanTurn` 会因此把整轮从交接/长期层丢掉 ——
+ * 只修正文不修 kind = 事实仍然消失。这里按同一投影现算 kind,原档不动。
+ */
+export function projectDerivedRead(row, ready) {
+  const text = String(row?.user_text ?? '');
+  if (ready || !String(row?.session_file ?? '').startsWith('own-state:')) return text;
+  const projected = projectChatInput(text, { source: 'own-engine', role: 'user' });
+  if (row && typeof row.kind === 'string') {
+    row.kind = isToolConversation(row.conversation ?? row.session_id) ? 'tool' : classifyKind(projected);
+  }
+  return projected;
 }
 
 /**
@@ -475,6 +511,8 @@ export function conversationMemory(db, conversation, limit = 120, { excludeKinds
     ? ` AND kind NOT IN (${excludeKinds.map(() => '?').join(',')})`
     : '';
   const args = excludeKinds.length > 0 ? [conversation, ...excludeKinds] : [conversation];
+  // F1 读闸:own 迁移未完成时,派生正文按统一投影现算再消费(见 ownDerivedProjectionReady)。
+  const ready = ownDerivedProjectionReady(db);
 
   const aggregate = db.prepare(
     `SELECT COUNT(*) AS turns, MIN(t.at) AS first_at, MAX(t.at) AS last_at
@@ -488,12 +526,14 @@ export function conversationMemory(db, conversation, limit = 120, { excludeKinds
   for (let offset = 0; rows.length < limit; offset += pageSize) {
     const page = db.prepare(
       `SELECT t.session_id AS session_id, t.seq AS seq, t.at AS at, t.kind AS kind, t.mood AS mood,
-              t.user_text AS user_text, t.reply_text AS reply_text, t.silent AS silent
+              t.user_text AS user_text, t.reply_text AS reply_text, t.silent AS silent,
+              s.file AS session_file
          FROM turn t JOIN session s ON s.id = t.session_id
         WHERE s.conversation = ?${skip} ORDER BY t.at DESC LIMIT ? OFFSET ?`,
     ).all(...args, pageSize, offset);
     if (page.length === 0) break;
     for (const row of page) {
+      row.user_text = projectDerivedRead(row, ready);
       if (isInjectedBlock(row.user_text)) continue;
       // ⚠️ 注入残文(2026-10-22)同样不进这份取样口 —— 摘要与交接共用它(见上)。
       //    判 kind 就够(归档写路径已标),不用再跑一遍规则;`aggregate` 照旧不过滤
@@ -756,12 +796,16 @@ export function consolidate(db, {
   const since = now - windowMs;
   const slots = NON_MEMORY_KINDS.map(() => '?').join(',');
   const rows = db.prepare(
-    `SELECT t.session_id, t.seq, t.at, t.kind, t.user_text, s.conversation, s.scene
+    `SELECT t.session_id, t.seq, t.at, t.kind, t.user_text, s.conversation, s.scene,
+            s.file AS session_file
        FROM turn t JOIN session s ON s.id = t.session_id
       WHERE t.at > ? AND t.kind NOT IN (${slots}) AND length(t.user_text) > 0
         AND NOT EXISTS (SELECT 1 FROM note n WHERE n.source = t.session_id || '#' || t.seq)
       ORDER BY t.at DESC LIMIT ?`,
   ).all(since, ...NON_MEMORY_KINDS, Math.max(1, Math.min(2000, max)));
+  // F1 读闸:迁移未完成的 own 行先按统一投影现算,再进打分/固化(原档与 note 不动)。
+  const projectionReady = ownDerivedProjectionReady(db);
+  for (const row of rows) row.user_text = projectDerivedRead(row, projectionReady);
   // ⚠️ **工具会话(摘要/自检/评测)的"用户消息"是提示词,不是人说的话**(2026-10-06,D135)。
   //    新行现在会被归档层标成 `kind='tool'`(已在 NON_MEMORY_KINDS 里),但**旧库里的行**
   //    还是 `mention` —— 不能靠重导来治(源文件可能已被保留策略删掉,见 D77),
@@ -1747,6 +1791,7 @@ export function candidatesFor(db, {
   const tagArgs = wanted.length > 0 ? wanted : [];
   const rows = db.prepare(
     `SELECT t.session_id, t.seq, t.at, t.kind, t.user_text, s.conversation AS conversation,
+            s.file AS session_file,
             group_concat(g.tag) AS tags${acc.select}${vec.select}
        FROM turn t
        JOIN session s ON s.id = t.session_id
@@ -1756,11 +1801,12 @@ export function candidatesFor(db, {
       ORDER BY t.at DESC
       LIMIT ?`,
   ).all(...scopeArgs, ...tagArgs, ...excludeKinds, ...ageArgs, Math.max(1, Math.min(2000, max)));
+  const ready = ownDerivedProjectionReady(db);
 
   return rows.map((row) => ({
     id: `${row.session_id}#${row.seq}`,
     at: row.at,
-    text: String(row.user_text ?? ''),
+    text: projectDerivedRead(row, ready),
     kind: row.kind,
     // 会话 key 也带上:访问账(D89)要按会话记,`/忘了 记忆` 也是按会话删的。
     conversation: row.conversation ?? null,
@@ -1856,6 +1902,7 @@ export function searchTurnsByFts(db, {
     //    ⇒ 标签改用相关子查询取，别 JOIN + GROUP BY（第一版这么写，查询被 catch 吞成"没有关键词命中"）。
     rows = db.prepare(
       `SELECT t.session_id, t.seq, t.at, t.user_text, s.conversation AS conversation,
+              s.file AS session_file,
               (SELECT group_concat(m.tag) FROM memory_tag m
                 WHERE m.session_id = t.session_id AND m.seq = t.seq) AS tags,
               bm25(turn_fts) AS bm
@@ -1871,10 +1918,12 @@ export function searchTurnsByFts(db, {
     // MATCH 语法/虚表异常 → 当成"这一轮没有关键词通道"(与记忆层其他 best-effort 同族)。
     return [];
   }
+  // F1 读闸:旧 FTS 索引要到归档迁移后才可信;迁移未完成时按统一投影现算正文。
+  const ready = ownDerivedProjectionReady(db);
   return rows.map((row, rank) => ({
     id: `${row.session_id}#${row.seq}`,
     at: row.at,
-    text: String(row.user_text ?? ''),
+    text: projectDerivedRead(row, ready),
     conversation: row.conversation ?? null,
     tags: normalizeTags(String(row.tags ?? '').split(',')),
     useCount: 0,
@@ -2001,6 +2050,7 @@ export function turnsMentioningEntities(db, { conversation = null, names = [], o
   const ageArgs = olderThan === null ? [] : [olderThan];
   const rows = db.prepare(
     `SELECT t.session_id, t.seq, t.at, t.kind, t.user_text, s.conversation AS conversation,
+            s.file AS session_file,
             (SELECT group_concat(g.tag) FROM memory_tag g
               WHERE g.session_id = t.session_id AND g.seq = t.seq) AS tags
        FROM entity_mention m
@@ -2012,17 +2062,23 @@ export function turnsMentioningEntities(db, { conversation = null, names = [], o
       ORDER BY t.at DESC
       LIMIT ?`,
   ).all(...wanted, conversation, ...ageArgs, Math.max(1, Math.min(500, max)));
-  return rows.map((row) => ({
-    id: `${row.session_id}#${row.seq}`,
-    at: Number(row.at),
-    text: String(row.user_text ?? ''),
-    kind: row.kind,
-    conversation: row.conversation ?? null,
-    tags: normalizeTags(String(row.tags ?? '').split(',')),
-    useCount: 0,
-    lastUsedAt: 0,
-    vector: null,
-  }));
+  // F1 读闸:实体共现是**第四条**进 prompt 的通道,同样要现算清洁正文/kind
+  // (审查抓到:这一条原来直接回 raw user_text,归档未迁移时旧临时要求会借实体召回回流)。
+  const projectionReady = ownDerivedProjectionReady(db);
+  return rows.map((row) => {
+    const text = projectDerivedRead(row, projectionReady);
+    return {
+      id: `${row.session_id}#${row.seq}`,
+      at: Number(row.at),
+      text,
+      kind: row.kind,
+      conversation: row.conversation ?? null,
+      tags: normalizeTags(String(row.tags ?? '').split(',')),
+      useCount: 0,
+      lastUsedAt: 0,
+      vector: null,
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -3067,7 +3123,8 @@ export function embeddingBacklog(db, { model = null, conversation = null, limit 
   if (!hasTable(db, 'embedding')) return { todo: [], skipped: 0, stale: 0 };
   const skip = NON_MEMORY_KINDS.map(() => '?').join(',');
   const rows = db.prepare(
-    `SELECT t.session_id, t.seq, t.user_text, s.conversation, e.source AS has_vec, e.model AS vec_model
+    `SELECT t.session_id, t.seq, t.user_text, s.conversation, s.file AS session_file,
+            e.source AS has_vec, e.model AS vec_model
        FROM turn t
        JOIN session s ON s.id = t.session_id
        LEFT JOIN embedding e ON e.source = t.session_id || '#' || t.seq
@@ -3075,6 +3132,7 @@ export function embeddingBacklog(db, { model = null, conversation = null, limit 
         ${conversation ? 'AND s.conversation = ?' : ''}
       ORDER BY t.at DESC LIMIT ?`,
   ).all(...NON_MEMORY_KINDS, ...(conversation ? [conversation] : []), Math.max(1, Math.min(5000, limit)));
+  const projectionReady = ownDerivedProjectionReady(db);
   const todo = [];
   let skipped = 0;
   let stale = 0;
@@ -3086,7 +3144,7 @@ export function embeddingBacklog(db, { model = null, conversation = null, limit 
     //       它们的"用户消息"是提示词(比如摘要指令),不是任何人对她说的话。
     if (isInjectedBlock(row.user_text)) { skipped += 1; continue; }
     if (isToolConversation(row.conversation) || isToolConversation(row.session_id)) { skipped += 1; continue; }
-    const text = cleanMemoryText(row.user_text);
+    const text = cleanMemoryText(projectDerivedRead(row, projectionReady));
     if (text === '') { skipped += 1; continue; }
     if (row.has_vec) {
       // 模型换了 → 旧向量作废(**重算**,而不是拿着旧语义空间的向量继续用)
@@ -3122,6 +3180,36 @@ export function embeddingBacklog(db, { model = null, conversation = null, limit 
         continue;
       }
       todo.push({ id, text, conversation: null });
+    }
+  }
+  // 自愈通道(F1):上面按 `at DESC LIMIT` 取窗口,窗口内每轮都已有当前模型向量时,
+  // **更老**那些"向量被失效删掉"的轮永远进不了 backlog(每拍 todo=0,语义召回永久缺口)。
+  // 这里只补「缺向量 / 模型过期」的行;既有 skipped/stale 计数口径不变(它们仍由上面主查询算)。
+  const remaining = Math.max(1, Math.min(5000, limit)) - todo.length;
+  if (remaining > 0) {
+    const seen = new Set(todo.map((item) => item.id));
+    // 窗口留足余量:JS 侧还会滤掉注入块/工具会话,取窄了会再次"饿死"更老的失效项。
+    const healWindow = Math.min(5000, Math.max(50, remaining * 20));
+    const healRows = db.prepare(
+      `SELECT t.session_id, t.seq, t.user_text, s.conversation, s.file AS session_file
+         FROM turn t
+         JOIN session s ON s.id = t.session_id
+         LEFT JOIN embedding e ON e.source = t.session_id || '#' || t.seq
+        WHERE t.kind NOT IN (${skip}) AND length(t.user_text) > 0
+          AND (e.source IS NULL OR (? IS NOT NULL AND e.model <> ?))
+          ${conversation ? 'AND s.conversation = ?' : ''}
+        ORDER BY t.at DESC LIMIT ?`,
+    ).all(...NON_MEMORY_KINDS, model ?? null, model ?? null,
+      ...(conversation ? [conversation] : []), healWindow);
+    for (const row of healRows) {
+      if (todo.length >= Math.max(1, Math.min(5000, limit))) break;
+      const id = `${row.session_id}#${row.seq}`;
+      if (seen.has(id)) continue;
+      const text = cleanMemoryText(projectDerivedRead(row, ownDerivedProjectionReady(db)));
+      if (text === '' || isInjectedBlock(row.user_text)
+        || isToolConversation(row.conversation) || isToolConversation(row.session_id)) continue;
+      seen.add(id);
+      todo.push({ id, text, conversation: row.conversation ?? null });
     }
   }
   return { todo, skipped, stale };

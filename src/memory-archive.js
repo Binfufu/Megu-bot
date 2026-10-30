@@ -426,7 +426,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS turn_fts USING fts5(
  * (engine.runIsolatedTurn,每次自带全量材料)。旧版本生成的摘要可能吸收过跨来源材料 ——
  * 读侧版本闸停用旧摘要(交接回落原文层),summaryDue 判 due 后按新规则重建;原行保留不删。
  */
-export const SUMMARY_VERSION = 3;
+// v3 → v4 (F1)：旧 notes/rawText 可能污染输入；读闸停用 v3，按清洁归档重建，原行不删。
+export const SUMMARY_VERSION = 4;
 
 /** 摘要要写多少字(模型的软上限)。它是**行为预算**,不是技术上限:太长她就容易背摘要。 */
 export const SUMMARY_TARGET_CHARS = 400;

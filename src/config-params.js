@@ -196,6 +196,8 @@ export function createConfigParamDefinitions(parsers) {
   boolean('QQBOT_MEMORY_KB', false);
   nonnegative('QQBOT_MEMORY_KB_BUDGET_CHARS', 600);
   nonnegative('QQBOT_MEMORY_KB_MAX_CHUNKS', 2);
+  // 实例级"百科说明"授权(F2):只关 kb 事实块尾部那一段措辞;knowledge 授权由每轮
+  // decision 决定 —— 关掉它不装傻、不禁常识/角色 KB 事实,显式 task 也不会因此变 chat。
   boolean('QQBOT_MEMORY_KB_ENCY', true);
   positive('QQBOT_MEMORY_NOTE_LIMIT', 1);
   positive('QQBOT_MEMORY_RECENCY_WEIGHT_X10', 5);
@@ -266,6 +268,10 @@ export function createConfigParamDefinitions(parsers) {
   complex('QQBOT_ACCESS_MODE', 'allowlist', parsers.accessMode, { scope: 'deployment' });
   complex('QQBOT_MOOD_THEME', 'megumin', parsers.moodTheme);
   complex('QQBOT_BODY_THEME', undefined, parsers.bodyTheme);
+  // 实例级**媒介表现**参数(S1 风格包接线):只选风格包 id,功能/授权/工具/预算都不在这里。
+  // 合法值来自 `content/styles/*` 目录发现(见 config.js 的 enums);未知 id 在参数层
+  // 就 fail closed(PARAM_VALUE),不落进任何内容包/world 包的数据白名单。
+  complex('QQBOT_STYLE_PACK', 'legacy-online', parsers.stylePack);
   complex('QQBOT_WARMUP_MODE', 'random', parsers.warmupMode);
   complex('QQBOT_ANNOUNCE_MODE', 'character', parsers.announceMode);
   complex('QQBOT_ANNOUNCE_TARGETS', 'c2c', parsers.announceTargets);

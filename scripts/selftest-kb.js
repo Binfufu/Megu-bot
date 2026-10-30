@@ -35,6 +35,7 @@ import { INJECT_KINDS, wrapInject, stripInjectMarks } from '../src/inject-mark.j
 import { importDoc, knowledgeSource, knowledgeStats, libraryDocs, makeKnowledgeProvider, openMemory, saveEmbedding } from '../src/memory-store.js';
 import { detectEncyclopedia, ENCYCLOPEDIA_NOTE } from '../src/kb.js';
 import { DIRECT_RESPONSE_NOTES } from '../src/style.js';
+import { composeModeNote, createTurnDecision } from '../src/turn-policy.js';
 
 const BRIDGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -237,13 +238,25 @@ export function registerKbTests({ test, assert: rawAssert }) {
     }
     // 配置块与注入标记在源码里各就各位(照 selftest-insights 的 wiring 判据形状,防漏接)。
     const indexSource = fs.readFileSync(path.join(BRIDGE_ROOT, 'src', 'index.js'), 'utf8');
-    a.match(indexSource, /wrapInject\('kb', ency \? /, '注入端要过 wrapInject("kb")(百科模式在块内附说明要求)');
+    // **F2(2026-10-30)单一 authority**:KB 只供事实,不再自己 detectEncyclopedia;
+    // 要不要附"百科说明"由本轮不可变 decision 决定。
+    a.match(indexSource, /import \{ composeModeNote, createTurnDecision, detectTurnMode,/,
+      'turn-policy 的决策构造器必须被真实 import');
+    a.doesNotMatch(indexSource, /detectEncyclopedia\(/, 'KB 不许再自己判"这是不是知识题"(单一 authority)');
+    a.match(indexSource, /turnDecision\.noteGates\.includeEncyclopediaNote/,
+      '百科说明的唯一开关必须来自本轮 decision.noteGates');
+    a.match(indexSource, /wrapInject\('kb', ency \?/,
+      '注入端仍要过 wrapInject("kb"),说明段仍在块内部(剥壳后不漏进记忆)');
     a.match(indexSource, /memoryCfg\.kb\?\.enabled && memoryDb && typeof kbNote === 'function'/, '消息路径要有回滚开关');
-    a.match(indexSource, /detectEncyclopedia\(query\)/, '百科模式(D297):意图判定要接在 kbNote 内');
+    a.match(indexSource, /function kbNote\(recall = null, turnDecision = null\)/,
+      'kbNote 接收本轮 decision(只供事实,不重判)');
     a.match(indexSource, /ENCYCLOPEDIA_NOTE/, '百科说明要求常量要被注入端引用');
     const configSource = fs.readFileSync(path.join(BRIDGE_ROOT, 'src', 'config.js'), 'utf8');
     a.match(configSource, /asBool\('QQBOT_MEMORY_KB', false\)/, '开关默认关');
-    a.match(configSource, /asBool\('QQBOT_MEMORY_KB_ENCY', true\)/, '百科模式独立回滚开关(默认开,套在 kb 总闸里)');
+    a.match(configSource, /asBool\('QQBOT_MEMORY_KB_ENCY', true\)/,
+      '百科说明独立回滚开关(默认开;只关措辞,不关 knowledge 授权)');
+    a.match(configSource, /它\*\*不是\*\*"知识库总闸"/,
+      '精确关开语义必须写在配置档案里(关掉不装傻/不禁常识/不改 task)');
 
     // ── ② 消费端:真切 turnNotes 进 vm 沙箱(判据钉"notes 里到没到",不是钉"代码里写过")。
     const source = indexSource;
@@ -270,6 +283,8 @@ export function registerKbTests({ test, assert: rawAssert }) {
         nextNudges: () => [],
         renderInsights: () => '',
         wrapInject,
+        ENCYCLOPEDIA_NOTE,
+        composeModeNote,
         log: { info: () => {}, warn: () => {}, error: () => {} },
         memoryCfg: {
           kb: { enabled: kbEnabled, budgetChars: 300, maxChunks: 2 },
@@ -278,7 +293,7 @@ export function registerKbTests({ test, assert: rawAssert }) {
         // ⚠️ 两只沙箱都给**真值** memoryDb:关的那只唯一挡住它的就是 kb.enabled=false ——
         //    否则 memoryDb=null 也能挡,"enabled 闸"这条判据就没咬到它要咬的东西。
         memoryDb: {},
-        kbNote: (recall) => { calls.push(recall); return kbNote(recall); },
+        kbNote: (recall, turnDecision) => { calls.push(recall); return kbNote(recall, turnDecision); },
       });
       return { run, calls };
     };
@@ -289,13 +304,32 @@ export function registerKbTests({ test, assert: rawAssert }) {
     a.equal(offBox.calls.length, 0, '配置关 = 不检索、不调 kbNote');
     a.equal(offNotes.some((note) => String(note).includes('[[bridge-inject kb')), false, 'notes 里不许出现 kb 块');
     // 开:块**真的到达 notes**,而且 recall 从消息推出来(query = 说的那句话)。
-    const onBox = makeSandbox(true, () => wrapInject('kb', '知识库判据指纹'));
+    const onBox = makeSandbox(true, () => ({ text: '知识库判据指纹', noteAllowed: false }));
     const onNotes = await onBox.run(null, message, [], null);
     a.equal(onBox.calls.length, 1, '开着且命中路径要调一次 kbNote');
     a.equal(onBox.calls[0]?.query, message.content, '检索 query = 这一轮那句话');
     a.equal(onBox.calls[0]?.conversation, 'kb-sandbox-key', '重复抑制记账按会话');
     a.ok(onNotes.some((note) => String(note).includes('[[bridge-inject kb]]') && String(note).includes('知识库判据指纹')),
       '知识块要真的到达本轮 notes(消费端见货)');
+    // ── ③ 单一 authority:百科说明只由**本轮不可变 decision**决定,不由 KB 自己判。
+    const kbHit = () => ({ text: '知识库判据指纹', noteAllowed: true });
+    const knowledgeDecision = createTurnDecision({ content: '合成工具是什么' }, { conversation: 'kb-sandbox-key' });
+    a.equal(knowledgeDecision.knowledge.authorized, true, 'knowledge 授权在决策里');
+    a.equal(knowledgeDecision.noteGates.includeEncyclopediaNote, true, '实例允许时决策放行百科说明');
+    const withNoteBox = makeSandbox(true, kbHit);
+    const withNoteNotes = await withNoteBox.run(null, message, [], null, { decision: knowledgeDecision });
+    a.ok(withNoteNotes.some((note) => String(note).includes('【科普模式】')),
+      '决策放行时,百科说明随命中块到达 notes');
+    const offNoteDecision = createTurnDecision({ content: '合成工具是什么' }, {
+      conversation: 'kb-sandbox-key', allowKnowledgeNote: false,
+    });
+    a.equal(offNoteDecision.knowledge.authorized, true, '关掉说明**不撤销** knowledge 授权(不装傻)');
+    a.equal(offNoteDecision.noteGates.includeEncyclopediaNote, false);
+    const offNoteBox = makeSandbox(true, kbHit);
+    const offNoteNotes = await offNoteBox.run(null, message, [], null, { decision: offNoteDecision });
+    a.ok(offNoteNotes.some((note) => String(note).includes('知识库判据指纹')), 'KB 事实照旧注入');
+    a.equal(offNoteNotes.some((note) => String(note).includes('【科普模式】')), false,
+      '关掉说明时只是少一段措辞(事实还在)');
   });
 
   test('百科模式(D297):意图词表正反例;说明要求只随命中块进注入;剥壳后一字不剩', () => {

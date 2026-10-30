@@ -79,7 +79,7 @@ import {
   pickSelfDecidedBranch,
   storyExpired,
 } from './story.js';
-import { breakBeforeKaomoji, DIRECT_RESPONSE_NOTES, pickNudges, rememberNudges, SPOKEN_STANDING_NOTES, withFacts, withStyleNudge } from './style.js';
+import { breakBeforeKaomoji, DEMO_STYLE_NUDGES, DIRECT_RESPONSE_NOTES, pickNudges, rememberNudges, SPOKEN_STANDING_NOTES, withFacts, withStyleNudge } from './style.js';
 import { getMoodTheme, buildMoodNote, decideMood, maybeSpokenEmoji, splitSpokenLines } from './mood.js';
 import {
   buildChronicle,
@@ -171,7 +171,7 @@ import { createConversationImageCarry } from './image-carry.js';
 import { createActionLog } from './action-log.js';
 import { installCrashLogging } from './crash-log.js';
 import { wrapInject } from './inject-mark.js';
-import { detectEncyclopedia, ENCYCLOPEDIA_NOTE } from './kb.js';
+import { ENCYCLOPEDIA_NOTE } from './kb.js';
 import { decideRecheck, decideSpeakUp } from './social.js';
 import { archiveOwnHistory } from './own-memory-archive.js';
 import { createMemoryArchiveTick, startMemoryArchive } from './memory-archive-tick.js';
@@ -181,7 +181,8 @@ import { INSIGHT_MIN_NOTES, appendInsights, buildInsights, insightsDue, latestIn
 // P0 记忆作用域(2026-10-28):常驻块/洞察只在允许的会话里出现(口径一份,纯函数)。
 import { filterBlocksForAccess, filterInsightsForAccess, memoryAccessFor } from './memory-scope.js';
 // P1 任务口径(2026-10-28):闲聊/办事/求知三态,平台无关;**只给权限不下命令**。
-import { composeModeNote, detectTurnMode, groupLinesForDelivery, noteGatesFor, outputPolicyFor } from './turn-policy.js';
+// F2(2026-10-30):入口构造**一次不可变决策**(createTurnDecision),下游只消费不重判。
+import { composeModeNote, createTurnDecision, detectTurnMode, groupLinesForDelivery, noteGatesFor, outputPolicyFor } from './turn-policy.js';
 // P3-b 工具装配(2026-10-28):能力注册/授权判据在 capabilities 层,这里只做实例装配。
 import { advertisedTools, defineCapability, turnContextFor, withBudget } from './capabilities.js';
 import { createWebSearchProvider } from './web-search-provider.js';
@@ -700,6 +701,17 @@ export async function main() {
     log.info('情绪：关闭（QQBOT_MOOD=false）—— 语气完全由角色卡决定');
   }
 
+  // **风格包横幅**(S1 接线):报**生效包**与三个关键开关,便于事后核对"她为什么这样发"。
+  // 只报 id/开关,不报包文件路径或内容(私密面最小)。
+  {
+    const style = config.policy.style.pack;
+    log.info(
+      `风格：${style.id}（拆条=${style.split.enabled ? 'on' : 'off'} ` +
+      `标点=${style.punctuation.preserve ? '保留' : '清理'} ` +
+      `emoji≤${style.emoji.enabled ? style.emoji.chanceMax : 0}）`,
+    );
+  }
+
   const morning = config.policy.morning;  if (morning.time) {
     const at = `${String(morning.time.hour).padStart(2, '0')}:${String(morning.time.minute).padStart(2, '0')}`;
     const targets = [morning.c2cTarget ? '私聊 1 个' : null, '所有已知群聊'].filter(Boolean).join(' + ');
@@ -975,6 +987,8 @@ export async function main() {
         log.warn(`/发图：把图喂回模型失败（不影响已发出的图）: ${describeError(err)}`);
       }
       const conversationKey = sessionIdFor(message);
+      // F2 反射轮固定口径:/发图 的自述是桥内功能,不继承用户上一轮的任务。
+      const turnDecision = reflexTurnDecision('send-image', { conversation: conversationKey });
       const mood = moodFor(conversationKey, message.content);
       const result = await runner.runTurn(
         conversationKey,
@@ -983,7 +997,7 @@ export async function main() {
         config.policy.replyTimeoutMs,
         imageBlocks,
       );
-      const body = composeReply(result, message, { hasImage: false });
+      const body = composeReply(result, message, { hasImage: false, decision: turnDecision });
       await sendChunked(message, body, { typing: true });
       log.info(`/发图：她补了一句（${body.length} 字）`);
     } catch (err) {
@@ -2898,6 +2912,10 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       const lastReplyAt = groupContext.stats(target.id).lastReplyAt;
       if (lastReplyAt !== null && now - lastReplyAt < config.policy.warmup.gapMs) return;
     }
+    // F2 反射轮固定口径:她自己出门的报备,不继承用户上一轮的任务。
+    const turnDecision = reflexTurnDecision('selfcare-travel', {
+      conversation: conversationKey, text: activity.line ?? to.name,
+    });
     await semaphore.acquire();
     try {
       const mood = moodFor(conversationKey);
@@ -2909,7 +2927,9 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       });
       const result = await runner.runTurn(
         conversationKey,
-        withStyleNudge(prompt, await turnNotes(mood, null, [], { conversation: conversationKey, query: activity.line ?? to.name })),
+        withStyleNudge(prompt, await turnNotes(mood, null, [], {
+          conversation: conversationKey, query: activity.line ?? to.name,
+        }, { decision: turnDecision })),
         config.policy.replyTimeoutMs,
       );
       lastSelfCareAt = now;
@@ -2918,7 +2938,9 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         return;
       }
       // ⚠️ 1.106.2(D174):主动发言**一条条短句发**(不再砍尾巴)。
-      const lines = planSpokenLines(composeReply(result), mood, { label: '她自己出门' });
+      const lines = planSpokenLines(composeReply(result, null, { decision: turnDecision }), mood, {
+        label: '她自己出门', decision: turnDecision,
+      });
       const synthetic = { scene: target.scene, targetId: target.id, messageId: undefined, content: '' };
       await sendSpokenLines(synthetic, lines, { typing: target.scene === 'c2c' });
       recordTurn('selfcare', { conversationKey, scene: target.scene, userText: activity.line ?? '', replyText: lines.join('\n') });
@@ -3074,6 +3096,9 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       log.warn(`写"她此刻在哪"失败（页面会显示不知道她在哪，不影响这一轮）: ${describeError(err)}`);
     }
 
+    // F2 反射轮固定口径:她自己过日子的报备,不继承用户上一轮的任务。
+    const turnDecision = reflexTurnDecision('selfcare', { conversation: conversationKey });
+
     await semaphore.acquire();
     try {
       const mood = moodFor(conversationKey);
@@ -3112,7 +3137,9 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       }
       const result = await runner.runTurn(
         conversationKey,
-        withStyleNudge(prompt, await turnNotes(mood, null, [], { conversation: conversationKey, query })),
+        withStyleNudge(prompt, await turnNotes(mood, null, [], {
+          conversation: conversationKey, query,
+        }, { decision: turnDecision })),
         config.policy.replyTimeoutMs,
       );
 
@@ -3125,7 +3152,9 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
 
       // ⚠️ 1.106.2(D174):她自己冒泡那两句,原来被砍到只剩第一句(现场 64 → 28 字)——
       //    现在按短句分条发,一个字不丢。日志写"几条 / 共多少字",不再只写一条的长度。
-      const lines = planSpokenLines(composeReply(result), mood, { label: '她自己过日子' });
+      const lines = planSpokenLines(composeReply(result, null, { decision: turnDecision }), mood, {
+        label: '她自己过日子', decision: turnDecision,
+      });
       const synthetic = { scene: target.scene, targetId: target.id, messageId: undefined, content: '' };
       await sendSpokenLines(synthetic, lines, { typing: target.scene === 'c2c' });
       log.info(
@@ -3191,6 +3220,10 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       log.info(`事件钩子：${pending.key} 的会话正忙，这一拍只落了账，收尾那句等下一拍`);
       return;
     }
+    // F2 反射轮固定口径:事件钩子收尾,不继承用户上一轮的任务。
+    const turnDecision = reflexTurnDecision('story-settle', {
+      conversation: conversationKey, text: pending.setup,
+    });
     await semaphore.acquire();
     try {
       const mood = moodFor(conversationKey);
@@ -3198,7 +3231,9 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         conversationKey,
         withStyleNudge(
           buildStorySettlePrompt({ scene: pending.scene, event, silentToken: SILENT_TOKEN }),
-          await turnNotes(mood, null, [], { conversation: conversationKey, query: pending.setup }),
+          await turnNotes(mood, null, [], {
+            conversation: conversationKey, query: pending.setup,
+          }, { decision: turnDecision }),
         ),
         config.policy.replyTimeoutMs,
       );
@@ -3206,7 +3241,9 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         log.info(`事件钩子：${pending.eventId} 已落账，模型选择不开口`);
         return;
       }
-      const lines = planSpokenLines(composeReply(result), mood, { label: `事件钩子收尾(${pending.eventId})` });
+      const lines = planSpokenLines(composeReply(result, null, { decision: turnDecision }), mood, {
+        label: `事件钩子收尾(${pending.eventId})`, decision: turnDecision,
+      });
       const synthetic = { scene: pending.scene, targetId: pending.targetId, messageId: undefined, content: '' };
       await sendSpokenLines(synthetic, lines, { typing: pending.scene === 'c2c' });
       log.info(
@@ -3441,6 +3478,9 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
     });
     recentWarmupTopics = rememberWarmupTopics(recentWarmupTopics, topic);
 
+    // F2 反射轮固定口径:暖群是她自己找话,不继承用户上一轮的任务。
+    const turnDecision = reflexTurnDecision('warmup', { conversation: conversationKey, text: topic });
+
     await semaphore.acquire();
     try {
       const prompt = buildWarmupPrompt(topic, {
@@ -3457,7 +3497,9 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         conversationKey,
         // 暖群没有"触发它的那句话",但**话题方向**就是这一轮的由头 ——
         // 把它当长期记忆的 query,否则主动开口永远看不到她答应过的事。
-        withStyleNudge(prompt, await turnNotes(mood, null, ledger, { conversation: conversationKey, query: topic })),
+        withStyleNudge(prompt, await turnNotes(mood, null, ledger, {
+          conversation: conversationKey, query: topic,
+        }, { decision: turnDecision })),
         config.policy.replyTimeoutMs,
       );
 
@@ -3475,7 +3517,9 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
 
       // Nobody asked for this one, so the mood's length limit applies ——
       // ⚠️ 1.106.2(D174)起是"**按上限分条发**"而不是"砍到上限"(见 `planSpokenLines`)。
-      const lines = planSpokenLines(composeReply(result), mood, { label: '暖群发言' });
+      const lines = planSpokenLines(composeReply(result, null, { decision: turnDecision }), mood, {
+        label: '暖群发言', decision: turnDecision,
+      });
       await sendSpokenLines({ scene: 'group', targetId: groupId, messageId: undefined, content: '' }, lines);
       log.info(
         `暖群发言 群=${groupId} ${lines.length} 条 / 共 ${lines.reduce((sum, one) => sum + one.length, 0)} 字` +
@@ -3532,42 +3576,196 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
     );
 
   // ---------------------------------------------------------------------------
-  // **P1 任务口径的状态**(2026-10-28):只记"这个会话上一轮是什么口径",给追问继承用。
-  // 上限 200 个会话(超出丢最老的),避免长跑进程里这张表无限长。
-  const lastTurnMode = new Map();
-  const LAST_TURN_MODE_MAX = 200;
-  function rememberTurnMode(conversationKey, mode) {
-    const key = String(conversationKey ?? '');
-    if (key === '') return;
-    if (mode === 'chat' && !lastTurnMode.has(key)) return; // 闲聊不占位
-    lastTurnMode.delete(key);
-    lastTurnMode.set(key, mode);
-    while (lastTurnMode.size > LAST_TURN_MODE_MAX) {
-      const oldest = lastTurnMode.keys().next().value;
-      lastTurnMode.delete(oldest);
+  // **F2 单轮不可变决策的状态**(2026-10-30)。
+  //
+  // 旧实现只按"会话"记上一轮口径,而且 `turnNotes` 是 **await 长期记忆之后**才判定并
+  // 写入的 —— 同会话另一轮在这段 await 里跑完就能改写它,先到的那一轮于是按**别人的
+  // 状态**回答。现在:
+  //   · 入口在**任何 await 之前**用纯函数建一份冻结决策(`createTurnDecision`);
+  //   · 追问继承只认 **同说话人 + 可信回复关系 + 既有窗口 + 同实例**(不按全群 lastMode);
+  //   · prompt / plan / send 只读那份决策,之后不再重判、不再回头读这张表。
+  const turnDecisionState = new Map(); // `${conversation}\u0000${speaker}` → 上一轮记录
+  const TURN_DECISION_MAX = 200;
+  // 她最近一条**发出去的**消息锚点(按会话，含说话人/触发消息):
+  // 显式引用自己上一轮交换的回复才算追问，不能拿刚回别人的消息续上自己的旧任务。
+  const lastOutboundMessageIds = new Map();
+  const LAST_OUTBOUND_MAX = 200;
+
+  /** 本实例身份(群/网页两条通道同一个身份来源)。 */
+  function botIdentity() {
+    return String(gateway?.botName || 'bot');
+  }
+
+  /** 继承键:同一会话里的**同一个说话人**才可能是同一段追问。 */
+  function turnSpeakerKey(conversationKey, speakerId) {
+    return `${String(conversationKey ?? '')}\u0000${String(speakerId ?? '')}`;
+  }
+
+  /**
+   * 上一轮可继承的口径。**任何一项不成立都退回 chat**:
+   * 未知(没有说话人/没有记录/没有回复关系)、过期(超出既有对话窗口)、
+   * 异群(会话 key 不同)、异账号(说话人不同)、异实例(别的 bot 写的记录)。
+   *
+   * "可信回复关系" = 这条消息**显式引用**了上一轮那次交换:
+   * 引用她上一轮发出去的那条,或引用上一轮触发她的那条。
+   * ⚠️ **不按全群 lastMode** —— 表按 会话+说话人 分键;@ 别人的消息不继承(不越权)。
+   */
+  function previousTurnModeFor(message, conversationKey, now = Date.now()) {
+    if (!message || typeof message !== 'object') return 'chat';
+    const speakerId = message.senderId === undefined || message.senderId === null
+      ? '' : String(message.senderId);
+    // 未知说话人不继承;@ 了别人/别的 bot 的消息不继承。
+    if (speakerId === '') return 'chat';
+    if (message.mentionsOthers === true || message.mentionsForeignBot === true) return 'chat';
+    const record = turnDecisionState.get(turnSpeakerKey(conversationKey, speakerId));
+    if (!record) return 'chat';
+    if (record.instance !== botIdentity()) return 'chat'; // 异实例
+    if (record.conversation !== String(conversationKey ?? '')) return 'chat'; // 异群
+    if (record.speaker !== speakerId) return 'chat'; // 异账号
+    const windowMs = Number(config.policy.group?.windowMs) || 0;
+    if (!(windowMs > 0) || now - record.at > windowMs) return 'chat'; // 过期(既有窗口)
+    // 群聊还要真的处在**既有对话窗口**里(复用 group-context 的判据,不新造 TTL)。
+    if (message.scene === 'group') {
+      const groupId = message.targetId === undefined || message.targetId === null
+        ? '' : String(message.targetId);
+      if (groupId === '' || typeof groupContext?.isWindowOpen !== 'function'
+        || !groupContext.isWindowOpen(groupId, now)) return 'chat';
+    }
+    // 可信回复关系:没有显式引用 = 不继承(只引用 URL/代码也不算)。
+    const replyTo = message.replyToMessageId === undefined || message.replyToMessageId === null
+      ? '' : String(message.replyToMessageId);
+    if (replyTo === '') return 'chat';
+    const lastOutbound = lastOutboundMessageIds.get(String(conversationKey ?? ''));
+    if ((record.triggerMessageId !== null && replyTo === record.triggerMessageId)
+      || (lastOutbound?.id === replyTo && lastOutbound.speaker === speakerId
+        && lastOutbound.triggerMessageId === record.triggerMessageId)) return record.mode;
+    return 'chat';
+  }
+
+  /**
+   * 这一轮**真的跑了模型**才记账(`turnNotes` 消费决策时调一次;命令/缓冲消息不记)。
+   * chat 也记 —— 否则一个旧的 task 会一直继承到窗口过期。
+   * 反射轮不记(它本来就不继承,也不该覆盖用户的任务记录)。
+   */
+  function rememberTurnDecision(decision) {
+    const scope = decision?.scope;
+    if (!scope || scope.speaker === '' || scope.conversation === '') return;
+    const key = turnSpeakerKey(scope.conversation, scope.speaker);
+    turnDecisionState.delete(key);
+    turnDecisionState.set(key, {
+      mode: decision.mode,
+      at: decision.createdAt,
+      conversation: scope.conversation,
+      speaker: scope.speaker,
+      instance: scope.instance,
+      triggerMessageId: scope.triggerMessageId,
+    });
+    while (turnDecisionState.size > TURN_DECISION_MAX) {
+      turnDecisionState.delete(turnDecisionState.keys().next().value);
     }
   }
+
   /**
-   * 这一轮的口径(给**交付**用:要不要保真、要不要压口语清理)。
-   * ⚠️ 与 `turnNotes` 里那次判定**共用同一份纯函数与同一份上一轮状态**(D159:判定只有一份)。
+   * 入口构造这一轮**唯一的一份**决策(冻结)。必须在**任何 await 之前**调用。
+   *
+   * @param {object|null} message 触发这一轮的消息(主动/反应轮可空)
+   * @param {string} conversationKey
+   * @param {{reflex?: boolean, reason?: string|null, groupBackground?: string|null}} [options]
    */
-  function turnModeFor(message) {
-    const key = message ? conversationKeyFor(message) : '';
-    return detectTurnMode(message?.content ?? '', { previous: lastTurnMode.get(key) ?? 'chat' }).mode;
+  function buildTurnDecision(message, conversationKey, { reflex = false, reason = null, groupBackground = null } = {}) {
+    const previous = reflex ? 'chat' : previousTurnModeFor(message, conversationKey);
+    const seriousPolicy = turnPolicyFor(message?.content ?? '', { enabled: config.policy.seriousGuard });
+    const decision = createTurnDecision(message, {
+      previous,
+      conversation: conversationKey,
+      instance: botIdentity(),
+      seriousPolicy,
+      // 实例级"百科说明"授权 → 决策里的 knowledge.noteAllowed:
+      // **只关那一段措辞**,不关 knowledge 授权、不禁常识、不禁角色 KB 事实。
+      allowKnowledgeNote: memoryCfg.kb?.ency !== false,
+      groupBackground,
+      reflex,
+      reason,
+    });
+    if (decision.mode !== 'chat' || decision.structural) {
+      log.info(
+        `本轮口径：${decision.mode}（${decision.reason}｜决策#${decision.id}` +
+        `${decision.structural ? '｜结构保真' : ''}${decision.followUp ? '｜追问继承' : ''}` +
+        `${decision.reflex ? '｜反射轮' : ''}）会话=${conversationKey || '-'}`,
+      );
+    }
+    return decision;
+  }
+
+  /**
+   * **反射轮/主动轮固定口径**(戳/表情/群自发/暖群/她自己过日子/报数/钱包):
+   * “固定”指本轮快照不可重判，不指强制 chat。有受信当前正文就按正文判口径，
+   * **永远不继承**用户上一轮的任务，也不写继承表；未被叫的群消息只放背景槽。
+   */
+  function reflexTurnDecision(reason, { conversation = '', message = null, text = null, groupBackground = null } = {}) {
+    const source = message ?? { content: typeof text === 'string' ? text : '' };
+    return buildTurnDecision(source, conversation, { reflex: true, reason, groupBackground });
+  }
+
+  /**
+   * 交付时用的群背景(F2):入口快照存在就**只读快照**,不再在 await 之后回头读 buffer。
+   * 没有快照(非群轮/旧调用)就退回同一个 `groupContext`(不写第二份判断)。
+   */
+  function sceneContextForDecision(decision) {
+    const background = decision?.slots?.groupBackground;
+    if (background === null || background === undefined) return groupContext;
+    return { render: () => background };
   }
 
   /** Draw this turn's style instructions, and remember them to avoid repeats. */
   function nextNudges() {
-    // **固定表达要求**(1.171.0 / D288):普通发言的底层口径(短句/不带标点/不总结)
-    // 每轮都带,不进"别重复"的去重池(它本来就是每轮都在的)。
+    // **固定表达要求 + 随机 nudge**(S1 接线):
+    //   · 固定表达要求(短句/不带标点/不总结)是**媒介表达**,归实例选择的风格包;
+    //   · 随机 nudge 池:legacy-online = **角色包自带的那一池**(旧默认行为逐字不变 ——
+    //     主人要求"没选新风格就保持旧风格自身默认",角色语感不能被换池悄悄删掉);
+    //     其余风格包用自己的中性池(现代口头表达不该再混角色专属要求)。
     // ⚠️ 严肃话题那一轮 `turnNotes` 会把**整组** nudge 压掉(`suppressNudges`),
     //    固定要求也跟着一起闭嘴 —— 不需要这里再写一份"严肃"判断(D159)。
-    if (config.policy.style.nudgeCount === 0) return [...SPOKEN_STANDING_NOTES];
-    // 用**这套主题**的提示词表:主实例那张里有「抱怨一下饿或者穷」「嫌弃队友」,
-    // 发给副实例她就会开始喊饿(实测过)。
-    const picked = pickNudges(config.policy.style.nudgeCount, recentNudges, moodTheme.styleNudges);
+    // ⚠️ `config.policy.style.pack` 缺失只发生在旧 vm 切片/旧安装:回退到引入前默认。
+    const style = config.policy.style?.pack;
+    const standing = style?.standingNotes ? [...style.standingNotes] : [...SPOKEN_STANDING_NOTES];
+    const legacyIdentity = style === undefined || style === null || style.id === 'legacy-online';
+    // legacy:角色主题自带池优先(旧默认);主题没有自己的池(如 demo)时才用包里那套中性池。
+    const pool = legacyIdentity
+      ? (moodTheme.styleNudges ?? style?.nudges ?? DEMO_STYLE_NUDGES)
+      : (style.nudges ?? moodTheme.styleNudges);
+    if (config.policy.style.nudgeCount === 0) return [...standing];
+    const picked = pickNudges(config.policy.style.nudgeCount, recentNudges, pool);
     recentNudges = rememberNudges(recentNudges, picked);
-    return [...SPOKEN_STANDING_NOTES, ...picked];
+    return [...standing, ...picked];
+  }
+
+  /**
+   * **风格层的 mood 长度缩放**(S1 接线,2026-10-30)。
+   *
+   * 只在风格包**显式**给出 `moodLength.maxCharsFactor` / `maxSentences` 时生效:
+   *   · legacy-online = `maxCharsFactor 1` + 无句数上限 → **identity**(现行行为逐字不变);
+   *   · 其余包按 factor 缩放字数上限、按 maxSentences 收紧句数(取 min,不放宽角色原有上限)。
+   * 只影响"每轮的长度提示",不碰情绪判定本身 / 状态机 / 数值。
+   * ⚠️ `style.pack` 缺失只发生在旧 vm 切片/旧安装:跳过缩放(= 引入前行为)。
+   */
+  function applyStyleMoodLength(decision) {
+    if (!decision) return decision;
+    const style = config.policy.style?.pack;
+    if (!style) return decision;
+    const factor = Number(style.moodLength?.maxCharsFactor);
+    const rawCap = style.moodLength?.maxSentences;
+    const scale = Number.isFinite(factor) && factor > 0 ? factor : 1;
+    const cap = Number.isSafeInteger(rawCap) && rawCap > 0 ? rawCap : null;
+    // 纯文本包不额外建议颜文字，避免 standingNotes 禁用而 moodNote 又鼓励的矛盾。
+    // 只取消可选提示，不改情绪/抽样状态，不做出站删字符。
+    const kaomoji = style.emoji?.enabled === false ? null : decision.kaomoji;
+    if (scale === 1 && cap === null && kaomoji === decision.kaomoji) return decision;
+    const maxChars = Math.max(1, Math.round(decision.maxChars * scale));
+    const maxSentences = cap === null ? decision.maxSentences : Math.min(decision.maxSentences, cap);
+    if (maxChars === decision.maxChars && maxSentences === decision.maxSentences
+      && kaomoji === decision.kaomoji) return decision;
+    return { ...decision, maxChars, maxSentences, kaomoji };
   }
 
   /**
@@ -3585,7 +3783,7 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
   function moodFor(conversationKey, text = '') {
     if (!config.policy.mood.enabled) return null;
     const stats = config.policy.stats.enabled ? currentStats() : null;
-    const decision = decideMood(moodState.get(conversationKey) ?? null, {
+    const rawDecision = decideMood(moodState.get(conversationKey) ?? null, {
       now: Date.now(),
       text,
       ttlMs: config.policy.mood.ttlMs,
@@ -3593,6 +3791,8 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       stats,
       theme: moodTheme,
     });
+    // 风格包只缩放"长度提示"(S1);identity 包返回原对象,不改现行行为。
+    const decision = applyStyleMoodLength(rawDecision);
     moodState.set(conversationKey, decision.state);
     if (decision.changed) {
       log.info(
@@ -4865,11 +5065,15 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       '4. 四五句以内，不要提问、不要加表情之外的装饰。',
     ].join('\n');
 
+    // F2 反射轮固定口径:报数播报是系统操作,不继承用户上一轮的任务。
+    const turnDecision = reflexTurnDecision('stats-scan', {
+      conversation: conversationKeyFor(message),
+    });
     const mood = moodFor(conversationKeyFor(message));
     try {
       const result = await runner.runTurn(
         conversationKeyFor(message),
-        withStyleNudge(prompt, await turnNotes(mood, null, [])),
+        withStyleNudge(prompt, await turnNotes(mood, null, [], null, { decision: turnDecision })),
         config.policy.replyTimeoutMs,
       );
       if (result.timedOut || isSilentReply(result.text)) {
@@ -4884,7 +5088,7 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         }));
         return;
       }
-      const body = composeReply(result);
+      const body = composeReply(result, null, { decision: turnDecision });
       await sendChunked(message, body);
       log.info(`数值扫描：已播报（长度 ${body.length}）`);
     } catch (err) {
@@ -4924,11 +5128,13 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         : `（我还有 ${amount} ${CURRENCY.name}。）`,
     );
     const conversationKey = conversationKeyFor(message);
+    // F2 反射轮固定口径:钱包回话是桥内功能,不继承用户上一轮的任务。
+    const turnDecision = reflexTurnDecision('wallet', { conversation: conversationKey });
     const mood = moodFor(conversationKey);
     try {
       const result = await runner.runTurn(
         conversationKey,
-        withStyleNudge(walletPrompt(amount), await turnNotes(mood, null, [])),
+        withStyleNudge(walletPrompt(amount), await turnNotes(mood, null, [], null, { decision: turnDecision })),
         config.policy.replyTimeoutMs,
       );
       if (result.timedOut || isSilentReply(result.text)) {
@@ -4942,7 +5148,7 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         await fallback();
         return;
       }
-      const body = composeReply(result);
+      const body = composeReply(result, null, { decision: turnDecision });
       await sendChunked(message, body);
       log.info(`钱包：已回话（${CURRENCY.name} ${amount}，长度 ${body.length}）`);
     } catch (err) {
@@ -5055,11 +5261,20 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
    *   它挡的正是最糟的那件事:把原作里的伙伴说成你们之间的人(C 档:错了不报错)。
    * · 理由进日志、原文不进(与长期层同一条纪律);`doc:<id>#<seq>` 说得出是哪份资料哪一段。
    *
+   * **F2(2026-10-30):知识库只供事实。** 它不再自己判"这是不是知识题",也不再决定
+   * 要不要加"百科说明"—— 那两项的**唯一 authority 是本轮 decision**
+   * (`decision.knowledge` / `decision.noteGates.includeEncyclopediaNote`)。
+   * 这里只负责检索与返回**事实正文**;渲染(含说明段)由 `turnNotes` 用同一份决策做。
+   *
    * ⚠️ **刻意同步**(没有 async):turnNotes 区里 Promise 形状的调用被
    * selftest-async-seams 钉死只有 longTermNote 一条;语义那一维走 kbVectorMemo
    * (长期层这一轮已经为同一句话取回的向量),不额外发请求。
+   *
+   * @param {{conversation?: string, query?: string}|null} recall
+   * @param {object|null} turnDecision 本轮不可变决策(唯一口径权威;缺失=不加百科说明)
+   * @returns {{text: string, noteAllowed: boolean}|null} 命中事实;没命中 null
    */
-  function kbNote(recall = null) {
+  function kbNote(recall = null, turnDecision = null) {
     if (!kbProvider || !recall) return null;
     const query = String(recall.query ?? '').trim();
     if (query === '') return null;
@@ -5071,20 +5286,19 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       semantic: memoVector ? { vector: memoVector, model: memoryCfg.embedding.model } : null,
     });
     if (result.text) {
-      // 百科模式(D297,2026-10-22 主人拍板):「细说/为什么/是什么」类问题 → 资料块尾部
-      // 附一句措辞要求(约 100 字说明、先给结论),她这轮用说明式回答而不是聊天短句。
-      // ⚠️ 指令写在 kb 块**内部**:归档剥壳随块消失,不会漏进她的记忆(剥壳判据管着);
-      //    没命中/开关关 = 照常按角色卡说话,行为一字不变。
-      const ency = memoryCfg.kb?.ency !== false && detectEncyclopedia(query);
+      // 百科说明(D297):**只在决策授权时**追加(实例开关 QQBOT_MEMORY_KB_ENCY 已折进
+      // decision.noteGates.includeEncyclopediaNote)。关掉 = 少一段措辞,不是装傻。
+      const noteAllowed = turnDecision?.noteGates?.includeEncyclopediaNote === true;
       log.info(
         `知识库：注入 ${result.picked.length} 条（用 ${result.text.length}/${memoryCfg.kb.budgetChars} 字，预算独立）` +
-        (memoVector ? '｜含语义检索' : '') + (ency ? '｜百科模式' : ''),
+        (memoVector ? '｜含语义检索' : '') + (noteAllowed ? '｜百科说明' : ''),
       );
       for (const picked of result.picked) {
         log.info(`知识库：为什么选中它 —— ${picked.id} ｜ ${(picked.why ?? []).join(' ｜ ')}`);
       }
-      // 自报家门(D177):归档读路径剥壳后一字不剩(判据 4)。
-      return wrapInject('kb', ency ? `${result.text}\n${ENCYCLOPEDIA_NOTE}` : result.text);
+      // **只回事实**;渲染/说明段由 turnNotes 统一决定(仍包在同一个 kb 块内部,
+      // 归档剥壳时随块消失,不会漏进她的记忆 —— D177/剥壳判据)。
+      return { text: result.text, noteAllowed };
     }
     // 命不中**不记**日志(每轮一条会把日志淹掉);只有 provider 真失败才留痕。
     if (/失败/.test(result.reason ?? '')) log.warn(`知识库：不注入 —— ${result.reason}`);
@@ -5115,20 +5329,84 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
    * @param {{conversation?: string, query?: string}|null} [recall]
    *   **只有**在没有 `message` 可推的场合才需要显式传(暖群:那一轮没有"人说的话",
    *   但话题方向可以当检索的 query)。默认从 `message` 推。
-   * @param {{hasImage?: boolean|null, backgroundImages?: boolean}} [options]
+   * @param {{hasImage?: boolean|null, backgroundImages?: boolean, decision?: object|null}} [options]
    *   `hasImage` = 这一轮**真的喂进模型的图**(`imageBlocks.length > 0`)。传 null/不传就按
    *   `message.images` 推。⚠️ 为什么要显式传:"窗内补图"(前几条消息里的图被一起喂进去)时
    *   `message.images` 是空的,但图确实上桌了 —— 不传就等于又漏掉一类投喂。
    *   `backgroundImages` = 这些图**不是**触发那条消息自带的(是窗内补进来的)。
    *   ⚠️ 它决不只是措辞问题:不标出来她就会**把旧图当成这一口**
    *   (现场:`[投喂 宿舍的零食]` → 她答"这**盘肉**看着还算有点诚意",肉来自三天前那张图)。
+   *   `decision` = 入口在**任何 await 之前**构造的**不可变决策**(F2)。传了它,这里
+   *   **只消费、不重判**:mode、注入闸、知识授权全读它。没传 = 旧直调/旧 vm 切片,
+   *   走本函数末尾的兼容分支(生产入口一律传)。
    */
   async function turnNotes(
     moodDecision, message = null, ledger = [], recall = null,
-    { hasImage = null, backgroundImages = false } = {},
+    { hasImage = null, backgroundImages = false, decision = null } = {},
   ) {
     // 直接回应不属于口语花活：任务/知识、严肃场景和随机风格关闭时也必须到达。
     const notes = [...DIRECT_RESPONSE_NOTES];
+    // recallFor 与"本轮决策"都必须在**这次 await 之前**定下来:
+    // 旧实现是 await 长期记忆**之后**才判 mode 并写共享状态,同会话另一轮在 await 里
+    // 跑完就能改写它 —— 先到的这一轮于是按别人的状态回答(F2 修的正是这个)。
+    const recallFor = recall ?? (message ? { conversation: conversationKeyFor(message), query: message.content } : null);
+    const policy = turnPolicyFor(message?.content ?? '', { enabled: config.policy.seriousGuard });
+    /**
+     * 兼容旧直调/旧切片沙箱:没有入口决策时按旧口径现场拼一份。
+     * ⚠️ 生产路径不会走到这里 —— 四个入口(web/QQ/合并/群自发)都显式传 decision。
+     */
+    const legacyTurnDecision = () => {
+      const conversationId = recallFor?.conversation ?? (message ? conversationKeyFor(message) : '');
+      const previous = typeof lastTurnMode !== 'undefined' && lastTurnMode && typeof lastTurnMode.get === 'function'
+        ? (lastTurnMode.get(conversationId) ?? 'chat') : 'chat';
+      const detected = typeof detectTurnMode === 'function'
+        ? detectTurnMode(message?.content ?? '', { previous })
+        : { mode: 'chat', reason: 'policy-module-missing', followUp: false, structural: false };
+      const mode = detected.mode;
+      const base = typeof outputPolicyFor === 'function' ? outputPolicyFor(mode) : { preserveFormatting: false };
+      const gates = typeof noteGatesFor === 'function'
+        ? noteGatesFor(mode, policy)
+        : {
+          includeMoodLength: !policy.suppressMood,
+          includeRandomNudges: !policy.suppressNudges,
+          includeSeriousComfort: Boolean(policy.note),
+          includeModeNote: false,
+          includeEncyclopediaNote: false,
+        };
+      if (mode !== 'chat' && typeof log !== 'undefined' && typeof log.info === 'function') {
+        log.info(`本轮口径：${mode}（${detected.reason}）会话=${conversationId || '-'}`);
+      }
+      // 旧直调兼容:只读旧表、不回写(生产入口一律传 decision 并由入口记账)。
+      return {
+        id: 0,
+        mode,
+        reason: detected.reason,
+        structural: detected.structural === true,
+        followUp: detected.followUp === true,
+        reflex: false,
+        previous,
+        slots: { currentRequest: message?.content ?? '', quote: null, addressee: [], groupBackground: null },
+        outputPolicy: { ...base, preserveFormatting: base.preserveFormatting === true || detected.structural === true },
+        noteGates: gates,
+        knowledge: {
+          authorized: mode === 'knowledge',
+          noteAllowed: mode === 'knowledge' && (typeof memoryCfg === 'undefined' || memoryCfg.kb?.ency !== false),
+        },
+        seriousNote: typeof policy?.note === 'string' ? policy.note : null,
+        scope: {
+          conversation: conversationId,
+          speaker: String(message?.senderId ?? ''),
+          instance: '',
+          triggerMessageId: message?.messageId === undefined || message?.messageId === null ? null : String(message.messageId),
+        },
+        createdAt: Date.now(),
+      };
+    };
+    const turnDecision = decision ?? legacyTurnDecision();
+    // 真的跑了模型才记"上一轮口径"(反射轮不记,也不覆盖用户的任务记录)。
+    if (turnDecision.reflex !== true && typeof rememberTurnDecision === 'function') {
+      rememberTurnDecision(turnDecision);
+    }
     if (config.policy.stats.enabled) {
       const bodyTheme = getBodyTheme(config.policy.stats.theme);
       notes.push(
@@ -5210,8 +5488,7 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
     }
     // 长期记忆(D75):像 stats/mood 那样**每轮**拼一小块,而不是只在换代时。
     // query 默认就是"这一轮触发它的那句话" —— 没有那句话就没有检索的由头(判据 1)。
-    // (W3 起 recallFor 三个通道共用:长期层 / 洞察 / 知识库,提出来只算一次。)
-    const recallFor = recall ?? (message ? { conversation: conversationKeyFor(message), query: message.content } : null);
+    // (W3 起 recallFor 三个通道共用;**F2 起在函数开头就算好**,不再等这次 await。)
     const longTerm = await longTermNote(recallFor);
     if (longTerm) notes.push(longTerm);
     // P2-A:记忆洞察(2026-10-22,方案 §4.4):最新 ≤3 条作为**独立小块**,预算独立
@@ -5240,14 +5517,22 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       }
     }
     // W3 知识库(P2-B,2026-10-22):doc/doc_chunk 里她在原作的经历,命中才作为**独立来源块**
-    // 注入(预算独立 ≤300 字,不与长期层 300 / 洞察 360 互抢),过 wrapInject('kb') 自报家门
+    // 注入(预算独立,不与长期层/洞察互抢),过 wrapInject('kb') 自报家门
     // (D177;kind 已在 INJECT_KINDS 登记)。配置关/没命中 = 一字不加(回滚开关 QQBOT_MEMORY_KB)。
+    // **F2**:KB 只供事实;要不要附"百科说明"由本轮决策唯一决定
+    // (`turnDecision.noteGates.includeEncyclopediaNote`,实例开关已折进决策)。
     // ⚠️ typeof 守卫与上面 insight 同一条纪律:本函数会被 selftest-longterm-consumption
     // 整段切片进 vm 沙箱(kbNote/memoryCfg/memoryDb 不在桩里),typeof 只是给切片留活路,
     // 不是运行时开关。
     if (typeof memoryCfg !== 'undefined' && memoryCfg.kb?.enabled && memoryDb && typeof kbNote === 'function') {
-      const kbBlock = kbNote(recallFor); // 同步(见 kbNote 头注释)—— 检索/渲染都不发网络请求
-      if (kbBlock) notes.push(kbBlock);
+      const kbFact = kbNote(recallFor, turnDecision); // 同步(见 kbNote 头注释)—— 检索不发网络请求
+      if (kbFact && typeof kbFact === 'object' && typeof kbFact.text === 'string') {
+        const ency = turnDecision.noteGates.includeEncyclopediaNote === true && kbFact.noteAllowed !== false;
+        // 说明段仍写在 **kb 块内部**:归档剥壳时随块消失,不会漏进她的记忆。
+        notes.push(wrapInject('kb', ency ? `${kbFact.text}\n${ENCYCLOPEDIA_NOTE}` : kbFact.text));
+      } else if (typeof kbFact === 'string') {
+        notes.push(kbFact); // 旧桩/旧直调兼容:已经包好的整块
+      }
     }
     // ⚠️ **「关于人的事实」不在这里**(2026-10-09 挪走):它原先被拼进这一块,
     //    而这一块是"**表达要求,照做但别念出来**"—— 事实与要求同居一栏正是 D163 那条教训
@@ -5256,33 +5541,12 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
     // 他提了"关于她"的关系主张 → 把决定权交给她(她认了才落库)。
     const claim = claimNote(message);
     if (claim) notes.push(claim);
-    // ⚠️ **严肃话题要收敛**(D80):重病/去世/灾难这类场合,把每轮的花活关掉。
-    //    用户 2026-10-01:「涉及严肃话题的时候也要按角色设定判断(如 911,大地震等等)」——
-    //    注意这条**不写台词**,只关花活 + 交代态度;具体怎么说仍然是角色卡的活。
-    const policy = turnPolicyFor(message?.content ?? '', { enabled: config.policy.seriousGuard });
-    // **P1 任务口径**(2026-10-28):平台无关的纯函数判定 —— chat 维持现状,task/knowledge
-    //   松开短句与字数限制并压掉"改答案"的随机风格。追问继承上一轮(别讲完三步又被拉回闲聊)。
-    // ⚠️ typeof 守卫同 memoryCfg 那条:本函数会被切片进 vm 沙箱(那里没有这个模块)。
-    const conversationId = recallFor?.conversation ?? (message ? conversationKeyFor(message) : '');
-    const turnMode = typeof detectTurnMode === 'function'
-      ? detectTurnMode(message?.content ?? '', { previous: lastTurnMode.get(conversationId) ?? 'chat' })
-      : { mode: 'chat', reason: 'policy-module-missing' };
-    // ⚠️ 下面三样在 vm 切片沙箱里都不存在(typeof 守卫与 memoryCfg 同一条纪律)。
-    if (turnMode.mode !== 'chat' && typeof log !== 'undefined' && typeof log.info === 'function') {
-      log.info(`本轮口径：${turnMode.mode}（${turnMode.reason}）会话=${conversationId || '-'}`);
-    }
-    if (typeof rememberTurnMode === 'function') rememberTurnMode(conversationId, turnMode.mode);
-    const gates = typeof noteGatesFor === 'function'
-      ? noteGatesFor(turnMode.mode, policy)
-      : {
-        includeMoodLength: !policy.suppressMood,
-        includeRandomNudges: !policy.suppressNudges,
-        includeSeriousComfort: Boolean(policy.note),
-        includeModeNote: false,
-      };
-    if (gates.includeSeriousComfort && policy.note) notes.push(policy.note);
+    // **F2:注入闸只读本轮决策**(不再在这里 detectTurnMode / 读 lastTurnMode)。
+    //   严肃话题的安慰策略、口径说明、情绪字数、随机风格全由 decision.noteGates 决定。
+    const gates = turnDecision.noteGates;
+    if (gates.includeSeriousComfort && turnDecision.seriousNote) notes.push(turnDecision.seriousNote);
     if (gates.includeModeNote) {
-      const modeNote = composeModeNote(turnMode.mode);
+      const modeNote = composeModeNote(turnDecision.mode);
       if (modeNote) notes.push(modeNote);
     }
     if (gates.includeMoodLength) notes.push(...moodNotes(moodDecision));
@@ -5955,16 +6219,22 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
    * **一个字不丢**),段数上限借用平台那个"一条入站消息最多 5 条"(`MAX_PASSIVE_SEQ`)。
    *
    * @param {string} text
-   * @param {object|null} decision 情绪决策(`maxChars` 在这里面;可空)
-   * @param {{label?: string, preserveFormatting?: boolean}} [options]
-   *   `label` = 日志前缀;`preserveFormatting` = **任务/知识口径(P1)**:整条原样交付,
-   *   不做口语分句与标点清理 —— 代码缩进、JSON 冒号、命令分号必须留着
-   *   (长文由 `sendChunked` 按平台上限切块,那是传输,不改语法)。
+   * @param {object|null} moodDecision 情绪决策(`maxChars` 在这里面;可空)
+   * @param {{label?: string, preserveFormatting?: boolean, decision?: object|null}} [options]
+   *   `label` = 日志前缀;`decision` = **本轮不可变决策(F2)** —— 有它时保真开关只读
+   *   `decision.outputPolicy.preserveFormatting`,不再接受调用方各自重判;
+   *   `preserveFormatting` 只留给旧直调/旧切片(与 `decision` 二选一)。
+   *   保真的含义:整条原样交付,不做口语分句与标点清理 —— 代码缩进、JSON 冒号、
+   *   命令分号必须留着(长文由 `sendChunked` 按平台上限切块,那是传输,不改语法)。
    * @returns {string[]} 每一段单独发一条消息
    */
-  function planSpokenLines(text, decision, { label = '发言', preserveFormatting = false } = {}) {
+  function planSpokenLines(text, moodDecision, { label = '发言', preserveFormatting = false, decision = null } = {}) {
     if (!config.policy.spoken.enabled) return [text];
-    if (preserveFormatting) {
+    // **F2**:入口决策在时,它是保真开关的唯一来源(不再各处 outputPolicyFor(turnModeFor(...)))。
+    const preserve = decision && decision.outputPolicy
+      ? decision.outputPolicy.preserveFormatting === true
+      : preserveFormatting;
+    if (preserve) {
       // **P2 任务轮交付**:按**整行**预分组(与出站 chunkText 同一个上限,D159)——
       // 边界只落在原本的换行上,代码缩进/JSON/命令一个字符不动;
       // 条数超被动槽由 sendSpokenLines 既有的"超限转主动"(D289)兜底。
@@ -5975,11 +6245,15 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       }
       return groups;
     }
-    const maxChars = Number(decision?.maxChars) > 0 ? Number(decision.maxChars) : config.policy.spoken.maxChars;
+    const maxChars = Number(moodDecision?.maxChars) > 0 ? Number(moodDecision.maxChars) : config.policy.spoken.maxChars;
+    // 风格包(S1):拆条关=整条交付;否则按包上限/标点策略分条;任务保真已在上面返回。
+    const style = config.policy.style?.pack;
+    const whole = String(text ?? '');
+    if (style?.split?.enabled === false) return whole.trim() === '' ? [] : [whole];
     const lines = splitSpokenLines(text, {
       maxChars,
-      maxLines: MAX_PASSIVE_SEQ,
-    });
+      maxLines: Math.min(MAX_PASSIVE_SEQ, style?.split?.maxLinesPerTurn ?? MAX_PASSIVE_SEQ),
+    }, style?.punctuation?.preserve === true);
     if (lines.length > 1) {
       log.info(
         `${label}：按短句分 ${lines.length} 条发（${text.length} 字 → ` +
@@ -5991,11 +6265,12 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         '—— 整句照发，不砍尾巴',
       );
     }
-    // **emoji 单发**(1.171.2 / D290,用户拍板代码档):每轮一次掷骰,命中就在
-    // 段间插一条 emoji(不在第一条之前 —— 真人节奏是"先说话再甩表情");
-    // 与 kaomoji 各掷各的。概率【暂定】`QQBOT_SPOKEN_EMOJI_CHANCE`(默认 0.12),0 = 关。
+    // **emoji 单发**(1.171.2 / D290):概率 = **min(实例 QQBOT_SPOKEN_EMOJI_CHANCE, 风格包上限)**;
+    // 风格包 emoji.enabled=false = 0(一律不插)。命中就在段间插一条(不在第一条之前)。
     const emoji = maybeSpokenEmoji({
-      chance: config.policy.spoken.emojiChance,
+      chance: style?.emoji?.enabled === false
+        ? 0
+        : Math.min(config.policy.spoken.emojiChance, style?.emoji?.chanceMax ?? 1),
       recent: recentSpokenEmoji,
     });
     if (emoji !== null && lines.length > 0) {
@@ -6154,22 +6429,39 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       //    因为 transcript 与 memory.db 存的都是 `planSpokenLines()` 之前的模型原文
       //    (2026-10-10 现场:64 字被砍成 28 字,只看 transcript 的人会以为整段都发了)。
       let sentKind = active || message.messageId === undefined ? 'active' : 'passive';
+      let sentBody = null;
       try {
         // A passive reply (msg_id + msg_seq) is exempt from active-message quotas.
         // `startSeq` 让"一句话分几条发"能接着数下去 —— 咏唱技能的"咏唱 + 结束词
         // 分多条消息"就是靠它(D82):同一个 msg_id 下 msg_seq 1..5 是允许的。
         // ⚠️ `active: true` = **不带 msg_id 的主动消息**(吃每月配额):只在
         //    被动回复的 5 条用完之后才用(D86:"六句全发")。
-        await send(message.targetId, active
+        sentBody = await send(message.targetId, active
           ? { content: chunk }
           : { content: chunk, msgId: message.messageId, msgSeq: startSeq + index + 1 });
       } catch (err) {
         if (err.passiveExpired) {
           log.warn(`被动回复窗口已失效（code=${err.code}），改用主动消息`);
           sentKind = 'active';
-          await send(message.targetId, { content: chunk });
+          sentBody = await send(message.targetId, { content: chunk });
         } else {
           throw err;
+        }
+      }
+      // F2:平台回了消息 id → 记成"她刚说的那条"。「可信回复关系」用它:
+      // 下一条显式引用这条 = 同一段交流里的追问(引用上一轮触发消息也算)。
+      const outboundId = sentBody && typeof sentBody === 'object'
+        ? (sentBody.id ?? sentBody.message_id ?? null) : null;
+      if (outboundId !== null && outboundId !== undefined && String(outboundId) !== '') {
+        const outboundKey = conversationKeyFor(message);
+        lastOutboundMessageIds.delete(outboundKey);
+        lastOutboundMessageIds.set(outboundKey, {
+          id: String(outboundId),
+          speaker: message.senderId == null ? '' : String(message.senderId),
+          triggerMessageId: message.messageId == null ? null : String(message.messageId),
+        });
+        while (lastOutboundMessageIds.size > LAST_OUTBOUND_MAX) {
+          lastOutboundMessageIds.delete(lastOutboundMessageIds.keys().next().value);
         }
       }
       lastKind = sentKind;
@@ -6734,13 +7026,15 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
     // D229:网页群聊已退役，此入口只处理按玩家隔离的网页私聊。
     const label = '网页聊天';
     const startedAt = Date.now();
+    // **F2 入口决策**:在任何 await 之前构造一次,之后 prompt/plan/segments 全读这一份。
+    const turnDecision = buildTurnDecision(message, conversationKey);
     await semaphore.acquire();
     try {
-      const mood = moodFor(conversationKey, message.content);
+      const mood = moodFor(conversationKey, turnDecision.slots.currentRequest);
       // 网页聊天/房间这条路也吃梗库(同一个人换了个入口问同一句话,不该两副面孔)。
       const copypastaHit = copypastaFor(message);
       const turnFactList = turnFacts(message);
-      const turnNoteList = await turnNotes(mood, message, [], null, {});
+      const turnNoteList = await turnNotes(mood, message, [], null, { decision: turnDecision });
       if (copypastaHit) {
         turnFactList.push(copypastaHit.fact);
         turnNoteList.push(copypastaHit.note);
@@ -6771,10 +7065,8 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       }
       // 1.171.0 / D288:网页聊天与 QQ **同一份**分条规划 —— 面板按段一泡一条地存。
       // P1:网页也走同一份口径(通道不决定能力,只决定怎么显示)。
-      const segments = planSpokenLines(body, mood, {
-        label,
-        preserveFormatting: outputPolicyFor(turnModeFor(message)).preserveFormatting,
-      });
+      // F2:保真开关只读入口决策,交付时不再用 turnModeFor 重判。
+      const segments = planSpokenLines(body, mood, { label, decision: turnDecision });
       return { text: body, segments };
     } catch (err) {
       log.error(`${label}：这一轮失败会话=${conversationKey}`, err);
@@ -6996,6 +7288,15 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
     // 「认识的人」= 见过面的 openid。放在准入闸门**之后**:被黑名单挡住的人
     // 不该出现在她的记忆里。见 `growth.js` / D40。
     touchSender(message);
+    // **F2 单轮不可变决策**:只对"可能真跑模型的那一轮"(私聊 / 群 @)构造 ——
+    // 群里的普通消息只进缓冲、不会触发模型(它们不需要决策,也不浪费背景快照)。
+    // ⚠️ 构造点在**任何 await 之前**;之后 prompt/mood/compose/plan/send 只读这一份。
+    const turnDecision = message.scene === 'c2c' || message.isMention === true
+      ? buildTurnDecision(
+        message, conversationKey,
+        message.scene === 'group' ? { groupBackground: groupContext.render(message.targetId) } : {},
+      )
+      : null;
     // 「关于人的事实」(D79):私聊里他说的照记;群里只认"@ 了人 + 关系词"的声明式关系。
     learnFactsFrom(message);
     // 体力 / 魔力:每轮被搭话回一点魔力、耗一点体力;亲密的话另算(D83)。
@@ -7612,7 +7913,8 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
 
       // A question was asked, so the mood sets the tone but the length limit is
       // only a hint: truncating an answer would drop what the asker wanted.
-      const mood = moodFor(conversationKey, message.content);
+      // F2:mood 只吃决策里的**当前请求正文**(引用/群背景不参与),不吃原始整条消息。
+      const mood = moodFor(conversationKey, turnDecision.slots.currentRequest);
       // 经济(D42):先掷这一轮的收支,再拼提示词 —— 这样"刚接了个委托"能当场说出来。
       // ⚠️ 把**这一轮的原话**一起给它:在聊钱/工作才讲,问别的事时只落账(用户 2026-10-02 报的那次)。
       const ledger = rollEconomy({ scene: message.scene, text: message.content });
@@ -7642,6 +7944,8 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       const turnNoteList = await turnNotes(mood, message, ledger, null, {
         hasImage: turnHasImage && !turnHasBackgroundImages,
         backgroundImages: turnHasBackgroundImages,
+        // **F2**:入口那份冻结决策;turnNotes 只消费,不再自己判 mode。
+        decision: turnDecision,
       });
       if (copypastaHit) {
         turnFactList.push(copypastaHit.fact);
@@ -7653,7 +7957,7 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
           // ⚠️ **事实贴在消息旁边**(`withTurnFacts`),表达要求(`turnNotes`)另起一块 ——
           //    顺序是刻意的:消息 → 事实 → 表达要求(D163)。
           withTurnFacts(
-            withSceneTag(message, config.policy.promptContext, groupContext),
+            withSceneTag(message, config.policy.promptContext, sceneContextForDecision(turnDecision)),
             turnFactList,
           ),
           turnNoteList,
@@ -7668,14 +7972,12 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         // ⚠️ 窗内补进来的旧图**只作背景**:他 @ 她那一轮里"图 + 一句骂人话"不该变成一顿饭
         // (用户 2026-10-08 的蟑螂现场就是这一类);真要投喂,发图那条自己会带图。
         hasImage: turnHasImage && !turnHasBackgroundImages,
+        decision: turnDecision,
       });
       // 1.171.0 / D288:答话也是普通发言 —— 按短句分条(`sendSpokenLines` 里接 `msg_seq`),
       // 判据仍是"除标点/空白外一个字不丢"(D171 那笔账是截断欠的,分段不欠)。
-      const replyLines = planSpokenLines(body, mood, {
-        label: '答话',
-        // P1:任务/知识口径整条保真交付(代码缩进、JSON 冒号、命令分号都不许被口语清理改掉)。
-        preserveFormatting: outputPolicyFor(turnModeFor(message)).preserveFormatting,
-      });
+      // F2:保真开关只读入口决策(不再用 turnModeFor 重判一次)。
+      const replyLines = planSpokenLines(body, mood, { label: '答话', decision: turnDecision });
       await sendSpokenLines(message, replyLines, { typing: true });
       groupReplied = message.scene === 'group';
       // 参与状态机(D277):被叫后回了话 = 她在场说了话(连击清零;自发开口才计数)。
@@ -7733,6 +8035,13 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
     // 合并后的正文已经自带场合标记与时间标注(见 `renderBurst`),所以这里**不再**
     // 让 `withSceneTag` 拼一遍 —— 那份带合并说明的正文就是这一轮要说的话。
     merged.mergedBurst = true;
+    // **F2 入口决策**(合并轮):合并后的正文就是这一轮要说的话;在**任何 await 之前**定死,
+    // 之后 prompt/compose/plan/send 只读这一份(合并的几条消息不各自再判一次)。
+    // 群聊:群背景在入口**快照**进决策。
+    const turnDecision = buildTurnDecision(
+      merged, conversationKey,
+      merged.scene === 'group' ? { groupBackground: groupContext.render(merged.targetId) } : {},
+    );
 
     await semaphore.acquire();
     let groupReplied = false;
@@ -7763,7 +8072,8 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         );
       }
 
-      const mood = moodFor(conversationKey, merged.content);
+      // F2:合并轮 mood 同样只吃决策里的当前请求正文。
+      const mood = moodFor(conversationKey, turnDecision.slots.currentRequest);
       const ledger = rollEconomy({ scene: message.scene, text: merged.content });
       const turnHasImage = imageBlocks.length > 0;
       const turnHasBackgroundImages = extraSources.length > 0;
@@ -7774,6 +8084,7 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         // 注入与结算同口径(2026-10-23,同答话路):窗内旧图只作背景,不灌"图=投喂"教学。
         hasImage: turnHasImage && !turnHasBackgroundImages,
         backgroundImages: turnHasBackgroundImages,
+        decision: turnDecision,
       });
       if (copypastaHit) {
         turnFactList.push(copypastaHit.fact);
@@ -7785,7 +8096,7 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
           // ⚠️ 连发合并这条路同样要有**事实**那一块(D163):`merged` 保留了 `senderId`,
           //    所以身份照样认得出(第一版就是这里最容易漏)。
           withTurnFacts(
-            withSceneTag(merged, config.policy.promptContext, groupContext),
+            withSceneTag(merged, config.policy.promptContext, sceneContextForDecision(turnDecision)),
             turnFactList,
           ),
           turnNoteList,
@@ -7799,12 +8110,13 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       const body = composeReply(result, merged, {
         // 连发合并同理:窗内补进来的旧图只作背景,不算"有人喂她"(见自发发言那处的注释)
         hasImage: turnHasImage && !turnHasBackgroundImages,
+        decision: turnDecision,
       });
       // 1.171.0 / D288:合并回答同答话口径 —— 同一份分条规划。
+      // F2:保真开关只读入口决策(合并的是同一批请求,口径跟着合并正文走)。
       const replyLines = planSpokenLines(body, mood, {
         label: `合并答话(${bursts.length}条)`,
-        // P1:同答话口径(合并的是同一批请求,口径跟着触发它的正文走)。
-        preserveFormatting: outputPolicyFor(turnModeFor(merged)).preserveFormatting,
+        decision: turnDecision,
       });
       await sendSpokenLines(merged, replyLines, { typing: true });
       groupReplied = merged.scene === 'group';
@@ -7891,10 +8203,15 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
    * @param {object} result
    * @param {object|null} [message] the triggering message — needed to settle any
    *   `<intake>` block the model attached (and to strip it from what gets sent).
-   * @param {{hasImage?: boolean}} [options] `hasImage` = **这一轮真的喂进模型的图**
-   *   (见 `settleIntake` 的说明:不是"触发那条消息带没带图")。
+   * @param {{hasImage?: boolean, decision?: object|null}} [options]
+   *   `hasImage` = **这一轮真的喂进模型的图**(见 `settleIntake` 的说明:不是"触发那条消息带没带图")。
+   *   `decision` = **本轮不可变决策(F2)**:显式贯穿到组装这一站(日志可核对决策序号);
+   *   它不改输出内容,只是保证"这一轮从判定到交付是同一个对象"。
    */
-  function composeReply(result, message = null, { hasImage = null } = {}) {
+  function composeReply(result, message = null, { hasImage = null, decision = null } = {}) {
+    if (decision && typeof log !== 'undefined' && typeof log.debug === 'function') {
+      log.debug(`作答组装：决策#${decision.id}（${decision.mode}）`);
+    }
     if (result.timedOut) {
       return `（等待超时：本轮超过 ${Math.round(config.policy.replyTimeoutMs / 1000)} 秒仍未结束，已放弃等待）`;
     }
@@ -7961,9 +8278,19 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       return false;
     }
 
+    // **F2 反射轮固定口径**:戳/表情不是提问 —— 不继承用户上一轮的任务,也不写继承表。
+    // 决策在**任何 await 之前**定死,后面 prompt/plan/send 只读这一份。
+    const turnDecision = reflexTurnDecision(
+      kind === 'poke' ? 'poke-reflex' : 'face-reflex',
+      {
+        conversation: conversationKey,
+        text: kind === 'poke' ? '有人戳了你一下' : '有人只发了一个表情',
+      },
+    );
+
     await semaphore.acquire();
     try {
-      const mood = moodFor(conversationKey, message.content);
+      const mood = moodFor(conversationKey, turnDecision.slots.currentRequest);
       const prompt = kind === 'poke'
         ? [
           '[群聊] 有人戳了你一下（戳一戳）。',
@@ -7986,7 +8313,7 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         conversationKey,
         withStyleNudge(
           `${prompt}\n\n如果觉得没必要理，就只回复 ${SILENT_TOKEN}。`,
-          await turnNotes(mood, message, ledger),
+          await turnNotes(mood, message, ledger, null, { decision: turnDecision }),
         ),
         config.policy.replyTimeoutMs,
       );
@@ -8003,7 +8330,11 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         return false;
       }
 
-      const lines = planSpokenLines(composeReply(result, message), mood, { label: `${label}反应` });
+      const lines = planSpokenLines(
+        composeReply(result, message, { decision: turnDecision }),
+        mood,
+        { label: `${label}反应`, decision: turnDecision },
+      );
       await sendSpokenLines({ scene: 'group', targetId: groupId, messageId: undefined, content: '' }, lines);
       // 有人戳/发表情在先 = 对方发起,不算"她找话"(连击只数自发开口,D277)。
       socialState.noteSpoke(groupId, { selfInitiated: false });
@@ -8060,6 +8391,20 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
    */
   async function maybeGroupReply(groupId, { addressed = false, reason, message } = {}) {
     const conversationKey = sessionIdFor({ scene: 'group', targetId: groupId });
+
+    // **F2 群自发入口决策**:在**任何 await 之前**定死(正文取触发这条的那条消息,
+    // 没有就取群里最新一条;群背景是**入口快照**,之后不再回头读 buffer 重判)。
+    // 反射轮只禁止继承；被叫时仍按当前正文判口径，纯自发只看背景、不授予任务口径。
+    const selfSource = message ?? lastGroupMessage.get(groupId);
+    const turnDecision = reflexTurnDecision(
+      addressed ? 'group-self-addressed' : 'group-self',
+      {
+        conversation: conversationKey,
+        // 未被叫的最新群消息是背景，不冒充发给机器人的当前请求。
+        message: addressed ? selfSource : null,
+        groupBackground: groupContext.render(groupId),
+      },
+    );
 
     // Never start a reply on top of a turn that is already running: the two
     // share one session queue, so the unrequested turn would delay a real one.
@@ -8171,7 +8516,8 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
 
     await semaphore.acquire();
     try {
-      const context = groupContext.render(groupId);
+      // F2:群背景用**入口快照**(决策里的槽),不再在 await 之后再读 buffer。
+      const context = turnDecision.slots.groupBackground ?? '';
       const prompt = [
         '[群聊] 下面是群里最近的消息。你可以自然地接一句，也可以选择不发言。',
         '场合是群聊：别把私聊的内容带进来，也别逐条点评。',
@@ -8187,7 +8533,7 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       // "[图片]" placeholder and it could not react to it at all.
       // ⚠️ 2026-10-02 起还要把**时间窗内其他消息的图**一起带上:自发接话本来就是
       //    "接群里刚才那几句",而那几句里的图只喂最后一条的话,照样会漏(见 `conversationImageCarry`)。
-      const source = message ?? lastGroupMessage.get(groupId);
+      const source = selfSource;
       const selfCarried = carriedConversationSources(groupId, source);
       const selfSources = [source, ...selfCarried].filter((entry) => entry?.images?.length);
       const imageBlocks = selfSources.length > 0
@@ -8205,7 +8551,8 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
 
       // Self-initiated: the mood may come from a topic in the buffered chatter,
       // so the newest message is offered to the mood detector too.
-      const mood = moodFor(conversationKey, source?.content ?? '');
+      // F2:mood 只吃决策里的当前请求正文(入口已定死)。
+      const mood = moodFor(conversationKey, turnDecision.slots.currentRequest);
       // 自己接话也要掷:她主动开口时"顺嘴提一句刚接的委托"最自然。
       const ledger = rollEconomy({ scene: 'group', proactive: true });
       const turnHasImage = imageBlocks.length > 0;
@@ -8216,6 +8563,8 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
           // 注入与结算同口径(2026-10-23,同答话路):窗内旧图只作背景,不灌"图=投喂"教学。
           hasImage: turnHasImage && !turnHasBackgroundImages,
           backgroundImages: turnHasBackgroundImages,
+          // F2:群自发消费的是入口那份**反射轮决策**(不继承用户任务,不写继承表)。
+          decision: turnDecision,
         })),
         config.policy.replyTimeoutMs,
         imageBlocks,
@@ -8255,11 +8604,13 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
           //    现在的口径:**自发接话时,只有她这一轮真正"收到的"图才算投喂**;
           //    窗内补进来的旧图只作背景看(她能评论,但不当饭)。
           hasImage: turnHasImage && !turnHasBackgroundImages,
+          decision: turnDecision,
         }),
         mood,
         // 1.171.0 / D288:`addressed` 选项退役 —— 答话与纯主动**同一份**分条规划;
         // `answering` 只留给下面的日志与状态机分类。
-        { label: '自发发言' },
+        // F2:群自发固定口径(不继承用户任务),保真开关只读入口决策。
+        { label: '自发发言', decision: turnDecision },
       );
       const synthetic = { scene: 'group', targetId: groupId, messageId: undefined, content: '' };
       await sendSpokenLines(synthetic, lines, { typing: true });

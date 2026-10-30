@@ -44,7 +44,8 @@ import {
   planCompaction,
   splitHistory,
 } from './context-budget.js';
-import { hasInjectMarks, stripInjectMarks, wrapInject } from './inject-mark.js';
+import { wrapInject } from './inject-mark.js';
+import { CHAT_INPUT_PROJECTION_VERSION, projectChatInput } from './chat-input-projection.js';
 import { normalizeLlmImages } from './llm.js';
 // P3-b 工具循环(P3-a 纯层):引擎只管循环,权限口径在 capabilities 层。
 import { budgetExhaustedText, buildAssistantMessage, buildToolResultMessages, nextLoopAction } from './tool-loop.js';
@@ -107,7 +108,7 @@ function readPersona(personaPath) {
 import { validateLlmRequestOptions } from './llm.js';
 
 /** T1-C(2026-10-29):own 持久摘要的装配规则版本 —— 升级时旧摘要读时停用、原档重建(见 stateFor)。 */
-const OWN_SUMMARY_POLICY_V = 2;
+const OWN_SUMMARY_POLICY_V = CHAT_INPUT_PROJECTION_VERSION;
 
 export function createOwnEngine(options) {
   const {
@@ -278,12 +279,15 @@ export function createOwnEngine(options) {
         ? s.compactionCalls.slice(-COMPACTION_CALLS_KEPT) : [];
       // T1-C(2026-10-29)读时版本闸:旧装配口径(临时注入随历史逐字重发、摘要任务跨来源共享)
       // 生成的持久摘要不再直接入口 —— 停用(不删)并把覆盖游标退回 reset 边界,原档以干净投影重建。
-      // 这一步只影响读侧:旧摘要字节保留在原 meta 里,回滚代码即可恢复。
-      if (s.summary && s.summaryPolicyV !== OWN_SUMMARY_POLICY_V) {
+      // 原档不删；停用旧摘要后不允许失败兜底把它重新送回主轮/摘要轮。
+      if (s.summaryPolicyV !== OWN_SUMMARY_POLICY_V && (s.summary || s.coveredId > s.resetId)) {
         log.warn?.(`[engine] 摘要规则升级(v${s.summaryPolicyV ?? 0}→v${OWN_SUMMARY_POLICY_V}):旧摘要停用,coveredId ${s.coveredId}→${s.resetId}(reset 边界),原档保留待重建`);
         s.summary = '';
         s.coveredId = s.resetId;
         s.summaryPolicyV = OWN_SUMMARY_POLICY_V;
+        // 旧投影对应的失败水位不可阻止本次安全重建；后续失败仍遵守原退避。
+        s.armed = true;
+        s.compactFailAt = null;
         saveState(key, s);
       }
       state.set(key, s);
@@ -302,13 +306,13 @@ export function createOwnEngine(options) {
    */
   /**
    * **历史投影**(T1-A,2026-10-29):一轮进模型前剥掉桥注入块(自报家门标记)。
-   * stripInjectMarks 只认标记行,用户原话逐字保留;无标记的轮原样返回(不复制)。
+   * 新标记与可确认的旧桥尾缀共用归档的唯一清洁入口，不信任旧 rawText。
    * tokens 按投影后重算 —— 水位不许拿"曾经注入过的旧文本"虚高。
    */
   function projectTurn(row) {
-    if (!hasInjectMarks(row.content)) return row;
-    const content = stripInjectMarks(row.content);
-    return { ...row, content, tokens: approxTokens(content) };
+    const content = projectChatInput(row.content, { source: row.meta?.source, role: row.role,
+      inputProjectionVersion: row.meta?.inputProjectionVersion });
+    return content === row.content ? row : { ...row, content, tokens: approxTokens(content) };
   }
 
   function historicalImageText(turn) {
@@ -562,7 +566,8 @@ export function createOwnEngine(options) {
             //    桥自己注入的块(交接/事实/长期记忆,全部 `[[bridge-inject …]]` 自报家门,D177)
             //    必须从它里面剥掉。以前它们裸着,于是 rawText 既被当成 kind 判据的输入、
             //    又让"原始提示词"这句话不成立(探针当场抓到:FTS 注入旧记忆后 rawText 变脏)。
-            meta: { source: 'own-engine', resetId: s.resetId, scene, rawText: stripInjectMarks(String(text ?? '')), ...(block.trim() ? { handoffApplied: true } : {}), ...(images.length ? { images } : {}) } });
+            meta: { source: 'own-engine', inputProjectionVersion: CHAT_INPUT_PROJECTION_VERSION,
+              resetId: s.resetId, scene, rawText: projectChatInput(text), ...(block.trim() ? { handoffApplied: true } : {}), ...(images.length ? { images } : {}) } });
           // ⚠️ 2026-10-15(并行审查 F2):`appendConversationTurn` 对**空白内容**拒收并返回 null
           //    (sqlite-store 的既有口径:「空轮没有前缀意义」)。以前这里不判 ⇒ null 被当成
           //    "这一轮的锚点"传下去:影子观测拿到非法 id(镜像断链)、归档配对校验永久抛错(毒丸),

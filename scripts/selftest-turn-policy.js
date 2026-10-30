@@ -14,18 +14,21 @@ import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import { DIRECT_RESPONSE_NOTES } from '../src/style.js';
+import { splitSpokenLines } from '../src/mood.js';
 import { ENCYCLOPEDIA_NOTE } from '../src/kb.js';
 import {
   TURN_MODES,
   composeModeNote,
+  createTurnDecision,
   detectTurnMode,
   groupLinesForDelivery,
   noteGatesFor,
   outputPolicyFor,
+  splitTurnSlots,
 } from '../src/turn-policy.js';
 
 export function registerTurnPolicyTests({ test, assert }) {
-  test('口径判定:闲聊仍是闲聊，办事/求知被认出，带结构的输入按任务', () => {
+  test('口径判定:闲聊仍是闲聊，办事/求知被认出；结构**只标记保真**,不单独授予 task/knowledge', () => {
     const chat = ['今天好累啊', '在吗', '你为什么这样啊', '今天也辛苦了', '来两张甘雨美图', '哈哈哈'];
     for (const text of chat) {
       assert.equal(detectTurnMode(text).mode, 'chat', `闲聊不许被改成任务:${text}`);
@@ -35,7 +38,6 @@ export function registerTurnPolicyTests({ test, assert }) {
       '帮我分析线程池死锁，给复现和修复步骤',
       '给我列个这周的计划',
       '报错 401 Unauthorized 怎么解决',
-      '```python\nprint(1)\n```',
       '把这个 JSON 改成数组：{"a":1}',
     ];
     for (const text of task) {
@@ -49,6 +51,13 @@ export function registerTurnPolicyTests({ test, assert }) {
     ];
     for (const text of knowledge) {
       assert.equal(detectTurnMode(text).mode, 'knowledge', `该按求知答:${text}`);
+    }
+    // **F2 形状变更**:裸结构(代码块/JSON/URL)只标记 preserveFormatting,不再判 task。
+    const structuralOnly = ['```python\nprint(1)\n```', '{"a":1, "b":2}', '看 https://example.invalid/x 这个'];
+    for (const text of structuralOnly) {
+      const detected = detectTurnMode(text);
+      assert.equal(detected.mode, 'chat', `结构信号不许单独授予权限:${text}`);
+      assert.equal(detected.structural, true, `结构信号仍要标记保真需求:${text}`);
     }
     // 认不出 = 维持现状(失败的默认必须是 chat,不许强行改口吻)。
     assert.equal(detectTurnMode('').mode, 'chat');
@@ -118,43 +127,129 @@ export function registerTurnPolicyTests({ test, assert }) {
     );
   });
 
-  test('wiring:index.js 真接线、kb 的「不要列点」矛盾已消（扫源码）', () => {
+  test('F2 消费判据:真实 turnNotes/planSpokenLines 只消费入口决策（不再重判/重读 lastTurnMode）', async () => {
     const indexSource = fs.readFileSync(path.resolve('src', 'index.js'), 'utf8');
-    assert.match(indexSource, /import \{ composeModeNote, detectTurnMode, groupLinesForDelivery, noteGatesFor, outputPolicyFor \} from '\.\/turn-policy\.js'/,
-      'import 必须与模块导出一致');
-    // turnNotes:判定一次、按 gates 决定注入(而不是散落的 if)。
+    // 反证形状:旧的三处"各自重判"入口必须已经不存在(它们是 F2 修掉的病,不是接线)。
+    // 去掉注释再查,免得只查字面注释自喂绿。
+    const indexCode = indexSource.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    assert.doesNotMatch(indexCode, /turnModeFor\(/, 'index.js 不许再有交付前的第二次口径重判');
+    assert.doesNotMatch(indexCode, /preserveFormatting:\s*outputPolicyFor/,
+      '保真开关不许再由交付处临时重判(只许读入口决策)');
     const notesStart = indexSource.indexOf('  async function turnNotes(');
     const notesEnd = indexSource.indexOf('\n  /**', notesStart);
-    const notesBody = indexSource.slice(notesStart, notesEnd);
-    assert.match(notesBody, /detectTurnMode\(message\?\.content/, 'turnNotes 要按真实用户正文判口径');
-    assert.match(notesBody, /noteGatesFor\(turnMode\.mode, policy\)/, '注入由 gates 决定');
-    assert.match(notesBody, /if \(gates\.includeMoodLength\) notes\.push\(\.\.\.moodNotes\(moodDecision\)\)/,
-      '情绪字数必须受 gates 管');
-    assert.match(notesBody, /if \(gates\.includeRandomNudges\) notes\.push\(\.\.\.nextNudges\(\)\)/,
-      '随机/固定风格必须受 gates 管');
-    // 交付:三个真实答题入口都要传保真开关(QQ 答话 / 合并答话 / 网页)。
-    const preserveCount = (indexSource.match(/preserveFormatting: outputPolicyFor\(turnModeFor\(/g) ?? []).length;
-    assert.equal(preserveCount, 3, `三个答题入口都要传保真开关，实际 ${preserveCount}`);
-    assert.match(indexSource, /function planSpokenLines\(text, decision, \{ label = '发言', preserveFormatting = false \} = \{\}\)/,
-      'planSpokenLines 要有 preserveFormatting 参数');
-    // 保真分支必须**早于**口语切分(否则保护的是已经坏掉的文本)。
+    assert.ok(notesStart >= 0 && notesEnd > notesStart, 'turnNotes 切片要切得准');
     const planStart = indexSource.indexOf('  function planSpokenLines(');
-    const planBody = indexSource.slice(planStart, planStart + 1600);
-    const preserveAt = planBody.indexOf('if (preserveFormatting)');
-    const splitAt = planBody.indexOf('splitSpokenLines(');
-    assert.ok(preserveAt >= 0 && splitAt > preserveAt, '保真分支必须排在 splitSpokenLines 之前');
-    // P2:保真分支必须按**整行**预分组,且与出站 chunkText 用**同一个上限**(D159)。
-    assert.match(planBody, /groupLinesForDelivery\(whole, config\.policy\.maxChars\)/,
-      '任务轮分组必须与出站同一上限');
-    // kb 的百科说明不许再与"需要分条"打架。
-    // 2026-10-29：说明文本已外提到非公开内容（有 C 用原文、公开用中性默认），
-    // 所以这里不再断言源文件字面量，而是断言**实际生效的说明文本**（含 C 时仍是原口径）。
-    const kbSource = fs.readFileSync(path.resolve('src', 'kb.js'), 'utf8');
-    assert.doesNotMatch(kbSource, /也不要列点/, 'kb 里"不要列点"与任务口径冲突，必须改掉');
-    assert.match(kbSource, /LOCAL_INFRA_CONTENT|encyclopediaNote/, 'kb 的百科说明必须走外提内容接线');
+    const planEnd = indexSource.indexOf('\n  /**', planStart);
+    assert.ok(planStart >= 0 && planEnd > planStart, 'planSpokenLines 切片要切得准');
+
+    const turnNotesCode = indexSource.slice(notesStart, notesEnd);
+    const planCode = indexSource.slice(planStart, planEnd);
+    const makeConsumer = () => {
+      const lastTurnMode = new Map();
+      const sandbox = {
+        DIRECT_RESPONSE_NOTES,
+        config: {
+          policy: {
+            stats: { enabled: false }, growth: { enabled: false }, seriousGuard: true,
+            spoken: { enabled: true, maxChars: 60, emojiChance: 0 },
+            maxChars: 1500,
+          },
+        },
+        pendingStoryFor: () => null, companyTurnNote: () => null, affinityNote: () => null,
+        describeFishingScene: () => null, readFishing: () => null,
+        panelPromptNote: () => null, describeLedgerForPrompt: () => null,
+        conversationKeyFor: (message) => message?.conversation ?? 'c-f2',
+        longTermNote: async () => null, claimNote: () => null,
+        turnPolicyFor: () => ({ suppressMood: false, suppressNudges: false }),
+        detectTurnMode, noteGatesFor, outputPolicyFor, composeModeNote, createTurnDecision,
+        lastTurnMode, rememberTurnMode: () => {},
+        moodNotes: () => ['MOOD-LENGTH-STUB'],
+        nextNudges: () => ['RANDOM-STYLE-STUB'],
+        log: { info() {}, warn() {}, debug() {} },
+        splitSpokenLines, groupLinesForDelivery, MAX_PASSIVE_SEQ: 5,
+        maybeSpokenEmoji: () => null, recentSpokenEmoji: [],
+      };
+      return {
+        ...vm.runInNewContext(`${turnNotesCode}\n${planCode}\n({ turnNotes, planSpokenLines })`, sandbox),
+        lastTurnMode,
+      };
+    };
+
+    const taskDecision = createTurnDecision(
+      { content: '帮我分析线程池死锁，给复现和修复步骤', senderId: 'u1', messageId: 'm1' },
+      { conversation: 'c-f2', instance: 'bot' },
+    );
+    const chatDecision = createTurnDecision(
+      { content: '今天好累啊', senderId: 'u1', messageId: 'm2' },
+      { conversation: 'c-f2', instance: 'bot' },
+    );
+    const consumer = makeConsumer();
+
+    // ① 传 task 决策 + **闲聊正文**:必须按决策注入口径(证明不重新按正文判)。
+    const taskNotes = (await consumer.turnNotes(null, { content: '今天好累啊', conversation: 'c-f2' }, [], null, { decision: taskDecision })).join('\n');
+    assert.match(taskNotes, /本轮口径/, '决策是 task 时,即便正文像闲聊也要给 task 口径');
+    assert.doesNotMatch(taskNotes, /MOOD-LENGTH-STUB|RANDOM-STYLE-STUB/, 'task 决策要压掉字数与随机风格');
+
+    // ② 传 chat 决策 + **任务正文**:必须按决策维持闲聊口径(证明决策是唯一权威)。
+    const chatNotes = (await consumer.turnNotes(null, { content: '帮我分析线程池死锁，给复现和修复步骤', conversation: 'c-f2' }, [], null, { decision: chatDecision })).join('\n');
+    assert.doesNotMatch(chatNotes, /本轮口径/, '决策是 chat 时,即便正文像任务也不许自己改口');
+    assert.match(chatNotes, /MOOD-LENGTH-STUB/);
+    assert.match(chatNotes, /RANDOM-STYLE-STUB/);
+
+    // ③ 决策冻结:入口之后改共享 lastTurnMode,也不许影响本轮(旧实现会重读它)。
+    const followUpChat = createTurnDecision(
+      { content: '第二步呢', senderId: 'u1' }, { conversation: 'c-f2', previous: 'chat', instance: 'bot' },
+    );
+    assert.equal(followUpChat.mode, 'chat');
+    consumer.lastTurnMode.set('c-f2', 'task'); // 模拟同会话另一轮在这之后写了共享状态
+    const frozenNotes = (await consumer.turnNotes(null, { content: '第二步呢', conversation: 'c-f2' }, [], null, { decision: followUpChat })).join('\n');
+    assert.doesNotMatch(frozenNotes, /本轮口径/, '决策之后的共享状态变化不许改这一轮口径');
+
+    // ④ 结构只标记保真:chat + 代码块 → 不加口径,但 plan 整行保真。
+    const structuralDecision = createTurnDecision(
+      { content: '```python\nprint(1)\n```', senderId: 'u1' }, { conversation: 'c-f2', instance: 'bot' },
+    );
+    assert.equal(structuralDecision.mode, 'chat');
+    assert.equal(structuralDecision.structural, true);
+    assert.equal(structuralDecision.outputPolicy.preserveFormatting, true, '结构信号必须把保真打开');
+    const structuralNotes = (await consumer.turnNotes(null, { content: '```python\nprint(1)\n```', conversation: 'c-f2' }, [], null, { decision: structuralDecision })).join('\n');
+    assert.doesNotMatch(structuralNotes, /本轮口径/, '结构信号不许授予 task/knowledge');
+
+    // ⑤ planSpokenLines:有决策时,保真只读 decision(与调用方参不传 preserveFormatting 无关)。
+    const code = '解释：\n```json\n{ "a": 1, "b": 2 }\n```\n最后一行。';
+    const preserved = consumer.planSpokenLines(code, null, { label: '测', decision: structuralDecision });
+    assert.equal(preserved.join('\n'), code, '结构保真决策必须整条逐字交付');
+    const chatLines = consumer.planSpokenLines('第一句。\n第二句。', null, { label: '测', decision: chatDecision });
+    assert.notDeepEqual(chatLines, ['第一句。\n第二句。'], 'chat 决策仍走口语分条(不被结构串味)');
+
+    // ⑥ knowledge 单一 authority:关掉"百科说明"授权不撤销 knowledge 本身(不装傻)。
+    const knowledgeNoNote = createTurnDecision(
+      { content: '解释一下癌症筛查原理', senderId: 'u1' },
+      { conversation: 'c-f2', instance: 'bot', allowKnowledgeNote: false },
+    );
+    assert.equal(knowledgeNoNote.knowledge.authorized, true, 'knowledge 授权仍在');
+    assert.equal(knowledgeNoNote.noteGates.includeEncyclopediaNote, false, '只关说明那一段措辞');
+    const knowledgeNotes = (await consumer.turnNotes(null, { content: '解释一下癌症筛查原理', conversation: 'c-f2' }, [], null, { decision: knowledgeNoNote })).join('\n');
+    assert.match(knowledgeNotes, /本轮口径/, '关掉说明后 knowledge 口径仍在(不装傻)');
+    assert.match(knowledgeNotes, /常识/, 'knowledge 口径必须保留常识授权');
+
+    // ⑦ 决策对象不可变(冻结)。
+    assert.equal(Object.isFrozen(createTurnDecision({ content: 'x', senderId: 'u' })), true);
+    assert.throws(() => { 'use strict'; createTurnDecision({ content: 'x', senderId: 'u' }).mode = 'task'; }, TypeError);
+    const slots = splitTurnSlots({
+      content: '【引用材料 https://example.invalid/page 】\n这张也太好笑了',
+      mentions: [{ id: 'other', username: 'someone', bot: false }],
+    });
+    assert.equal(slots.currentRequest, '这张也太好笑了', '引用材料不进当前请求槽');
+    assert.match(slots.quote, /引用材料/, '引用材料单独进 quote 槽');
+    assert.equal(slots.addressee[0].id, 'other', '@ 对象单独进 addressee 槽');
+
+    // kb 的百科说明文本仍要与"分条讲清楚"相容(生效文本,不是源码字面量)。
     const effectiveNote = ENCYCLOPEDIA_NOTE;
     assert.equal(typeof effectiveNote, 'string', 'kb 必须导出可核对的百科说明文本');
     assert.match(effectiveNote, /需要分条讲清楚时就分条讲/, '生效说明里必须允许分条讲清楚');
+    const kbSource = fs.readFileSync(path.resolve('src', 'kb.js'), 'utf8');
+    assert.doesNotMatch(kbSource, /也不要列点/, 'kb 里"不要列点"与任务口径冲突，必须改掉');
   });
 
   test('P2 交付分组:只搬运换行,一个字符不改;超长单行独立;与出站同上限', () => {
