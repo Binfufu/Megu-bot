@@ -70,8 +70,15 @@ export function composeTurnContent(
   { worldSections = null, packSections = packsAsStyleNudges(PACKS) } = {},
 ) {
   if (!legacyContent) {
-    // 旧安装没有本次快照：只有世界包时聚合只含世界两张表（styleNudges 由消费者回退）。
-    return worldSections ? { ...worldSections } : null;
+    // 官方安装已迁移：世界两张表来自世界包，风格表来自内容包；都没有才回退 null。
+    if (!worldSections && !packSections) return null;
+    const content = {};
+    if (packSections) content.styleNudges = { ...packSections.styleNudges };
+    if (worldSections) {
+      content.warmupTopics = worldSections.warmupTopics;
+      content.meituLines = worldSections.meituLines;
+    }
+    return content;
   }
   if (!packSections && !worldSections) return legacyContent;
   const content = { ...legacyContent };

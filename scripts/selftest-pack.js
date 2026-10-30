@@ -5,26 +5,41 @@
  *
  *     node scripts/selftest-pack.js
  *
- * 只使用**注入的合成 read/readdir** 与内存里的示例包：不读真实 `content/`、不联网、
- * 不 git、不 spawn、不写任何文件。钉的是加载器的 fail-closed 契约：
+ * 只使用**注入的合成 read/readdir** 与内存里的示例包：不联网、不 git、不 spawn、不写任何文件。
+ * 模块级的 `PACKS`（内容包加载器）与 `src/explosion.js` 导入会读本仓固定 content 路径；
+ * 公开集没有这些目录/文件时分别是 `null` 与中性默认，不依赖私有内容也能跑。
+ * 钉的是加载器与触发词的 fail-closed / 行为不变契约：
  *   ① 合法包按目录发现，`packById` 原样返回（逐字一致，不拷贝/不改写/不重排字段）；
  *   ② 没有 `content/packs/` 目录 → `null`（旧行为：调用方回退旧本地文件）；
  *      权限类读错仍然大声抛错；
  *   ③ 坏 JSON / 缺 pack.json / 坏 schema / id 与目录名不符 / 重复 id / 未知 id → 抛错；
  *      错误信息只含包 id 与错误码，不含绝对路径或包内容片段；
  *   ④ 包内 `companion.art` 只认单层 png/jpg 文件名（不许路径分隔符）；
- *   ⑤ 聚合导出（mood/body、style nudges、story 角色段）形状与既有消费者一致。
+ *   ⑤ 聚合导出（mood/body、style nudges、story 角色段、技能触发词）形状与既有消费者一致；
+ *   ⑥ 可选 `skill` 段（技能触发词内容外提）：合法绿、坏形状 fail closed；
+ *   ⑦ 触发词行为不变：公开集默认词表只含中性通用词（冻结摘要），官方安装生效并集由
+ *      两个角色包的 `skill` 段恢复成改造前那组词（冻结摘要），正则由字面词表生成；
+ *   ⑧ 可选 `order` 段：合法绿、坏形状 fail closed；聚合导出按 (order ?? 最大, id) 排序，
+ *      官方安装聚合键序保持 megumin→aris（`PACKS.ids` 本身仍是目录序）。
  *
- * API 以 `src/content-pack.js` 的实际导出为准；若实现参数名调整，以该文件为准同步本套件。
+ * API 以 `src/content-pack.js` / `src/explosion.js` 的实际导出为准；若实现参数名调整，以这两个文件为准同步本套件。
  *
  * 反证（断言必须真红，改完只留一条即可验证）：
  *   - 把 `readContentPacks` 里 `if (problem) throw ...` 改成静默跳过 → 「坏 schema」用例红；
  *   - 把 `readdir` 的 ENOENT 分支改成返回空结构 → 「缺目录 → null」用例红；
  *   - 把错误信息拼上 `String(url)` → 「坏 JSON 不含路径」用例红；
  *   - 把 `packById` 未知 id 改成返回 `undefined` → 「未知 id 抛错」用例红；
- *   - 把聚合里的 `topicTable` 换成 `topics` → 「聚合形状」用例红。
+ *   - 把聚合里的 `topicTable` 换成 `topics` → 「聚合形状」用例红；
+ *   - 删掉 `validatePack` 的 `skill` 校验 → 「skill 坏形状」用例红；
+ *   - 往 `NEUTRAL_TRIGGER_WORDS` 塞一个作品专属词 → 「公开集默认词表冻结摘要」用例红；
+ *   - 把官方包 `skill` 段去掉/改词 → 「官方安装生效并集冻结摘要」用例红；
+ *   - 在 `src/explosion.js` 里硬编码官方包声明词 → 「专属词不出现在公开源码」用例红；
+ *   - 删掉 `validatePack` 的 `order` 校验 → 「order 坏形状」用例红；
+ *   - 把聚合循环从 `orderedPackIds()` 改回 `packs.ids` → 「官方安装聚合键序」用例红。
  */
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -32,11 +47,18 @@ import {
   packById,
   packParamsForTheme,
   packsAsMoodBodyContent,
+  packsAsSkillTriggerWords,
   packsAsStoryRoleSections,
   packsAsStyleNudges,
   readContentPacks,
   validatePack,
 } from '../src/content-pack.js';
+import {
+  NEUTRAL_TRIGGER_WORDS,
+  explosionTriggerSource,
+  explosionTriggerWords,
+  isExplosionRequest,
+} from '../src/explosion.js';
 
 const cases = [];
 const test = (name, fn) => cases.push([name, fn]);
@@ -389,6 +411,196 @@ test('content-pack:多个参数包命中同一主题必须红，不按目录顺�
   assert.deepEqual(packParamsForTheme('example', readContentPacks(fakeContentDir({ a }))), a.params);
 });
 
+// ---------------------------------------------------------------------------
+// ⑤ 可选 `skill` 段（技能触发词内容外提）
+// ---------------------------------------------------------------------------
+
+test('content-pack:可选 skill 段合法绿、逐字保留；无 skill 段保持旧行为', () => {
+  const skill = { triggerWords: ['演示技能', '演示咒文'] };
+  const pack = packFixture({ skill });
+  assert.equal(validatePack(pack), null, '合法 skill 段必须通过');
+  assert.equal(validatePack(packFixture()), null, '没有 skill 段仍是合法包（旧包兼容）');
+  const loaded = readContentPacks(fakeContentDir({ example: pack }));
+  assert.deepEqual(packById('example', loaded).skill, skill, 'skill 段逐字保留（不裁剪/不改写）');
+  assert.deepEqual(packsAsSkillTriggerWords(loaded), ['演示技能', '演示咒文']);
+  assert.deepEqual(packsAsSkillTriggerWords(null), [], '公开集（无包）→ 空数组');
+});
+
+test('content-pack:skill 坏形状 fail closed，错误只含包 id 与固定码', () => {
+  const BAD_WORD = '隐形触发词';
+  const badShapes = [
+    null, true, 1, 'triggerWords', [],
+    {}, { triggerWords: [] }, { triggerWords: [''] }, { triggerWords: ['   '] },
+    { triggerWords: '演示技能' }, { triggerWords: [1] },
+    { triggerWords: [BAD_WORD, BAD_WORD] },
+    { triggerWords: [BAD_WORD], extra: true },
+    { extra: true },
+    { triggerWords: [`${BAD_WORD}\u0000`] },
+    { triggerWords: [`${BAD_WORD}\n`] },
+    { triggerWords: [`${BAD_WORD}\u007f`] },
+  ];
+  for (const skillValue of badShapes) {
+    const mutated = packFixture({ skill: skillValue });
+    assert.equal(validatePack(mutated), 'skill', `坏 skill 必须被 validatePack 拒绝：${JSON.stringify(skillValue)}`);
+    const error = capture(() => readContentPacks(fakeContentDir({ example: mutated })));
+    assert.match(error.message, /^content pack "example": skill$/, '错误只带包 id 与错误码');
+    assertNoPayloadLeak(error.message);
+    assert.doesNotMatch(error.message, new RegExp(BAD_WORD), '错误不回显触发词内容');
+  }
+});
+
+test('content-pack:skill 触发词聚合按聚合展示顺序去重，无 skill 段不贡献', () => {
+  const a = packFixture({ id: 'a', skill: { triggerWords: ['甲词', '共用词'] } });
+  const b = packFixture({ id: 'b', skill: { triggerWords: ['共用词', '乙词'] } });
+  const c = packFixture({ id: 'c' });
+  const packs = readContentPacks(fakeContentDir({ a, b, c }));
+  assert.deepEqual(packsAsSkillTriggerWords(packs), ['甲词', '共用词', '乙词']);
+  assert.deepEqual(packsAsSkillTriggerWords(readContentPacks(fakeContentDir({ c }))), []);
+});
+
+// ---------------------------------------------------------------------------
+// ⑤b 可选 `order` 段（聚合展示顺序）
+// ---------------------------------------------------------------------------
+
+test('content-pack:可选 order 合法绿（非负安全整数），坏形状 fail closed', () => {
+  for (const order of [0, 1, 2, Number.MAX_SAFE_INTEGER]) {
+    const pack = packFixture({ order });
+    assert.equal(validatePack(pack), null, `合法 order 必须通过：${order}`);
+    const loaded = readContentPacks(fakeContentDir({ example: pack }));
+    assert.equal(packById('example', loaded).order, order, 'order 原样保留');
+  }
+  const badOrders = [-1, -0.5, 1.5, '1', Number.NaN, Infinity, -Infinity, true, null, [], {},
+    Number.MAX_SAFE_INTEGER + 1];
+  for (const order of badOrders) {
+    const mutated = packFixture({ order });
+    assert.equal(validatePack(mutated), 'order', `坏 order 必须被 validatePack 拒绝：${String(order)}`);
+    const error = capture(() => readContentPacks(fakeContentDir({ example: mutated })));
+    assert.match(error.message, /^content pack "example": order$/, '错误只带包 id 与错误码');
+    assertNoPayloadLeak(error.message);
+  }
+});
+
+test('content-pack:聚合按 (order ?? 最大, id) 排序；无 order 按 id 保持旧逻辑', () => {
+  const themed = (id, order) => packFixture({
+    id,
+    ...(order === undefined ? {} : { order }),
+    themes: { mood: `${id}-mood`, body: `${id}-body`, style: `${id}-style` },
+    story: { pack: { id: `${id}-story`, label: `${id} 故事段` }, phrases: [] },
+  });
+  // order 压过 id：id 升序本是 a,b，但 order 让 b 先
+  const ordered = readContentPacks(fakeContentDir({ a: themed('a', 2), b: themed('b', 1) }));
+  assert.deepEqual(ordered.ids, ['a', 'b'], 'PACKS.ids 保持目录/发现序，不被 order 改写');
+  const moodBody = packsAsMoodBodyContent(ordered);
+  assert.deepEqual(Object.keys(moodBody.mood), ['b-mood', 'a-mood']);
+  assert.deepEqual(Object.keys(moodBody.body), ['b-body', 'a-body']);
+  assert.deepEqual(Object.keys(packsAsStyleNudges(ordered).styleNudges), ['b-style', 'a-style']);
+  assert.deepEqual(packsAsSkillTriggerWords(ordered), [], '没有 skill 段的包不贡献触发词');
+  const story = packsAsStoryRoleSections(ordered);
+  for (const section of [story.storyPacks, story.characterDays, story.phrasesByRole]) {
+    assert.deepEqual(Object.keys(section), ['b', 'a']);
+  }
+  // 无 order → 旧逻辑（按包 id 升序 = 原目录发现序）
+  const plain = readContentPacks(fakeContentDir({ a: themed('a'), b: themed('b') }));
+  assert.deepEqual(Object.keys(packsAsMoodBodyContent(plain).mood), ['a-mood', 'b-mood']);
+  assert.deepEqual(Object.keys(packsAsStyleNudges(plain).styleNudges), ['a-style', 'b-style']);
+  // 重复 order → 包 id 稳定兜底
+  const tied = readContentPacks(fakeContentDir({ a: themed('a', 1), b: themed('b', 1) }));
+  assert.deepEqual(Object.keys(packsAsMoodBodyContent(tied).mood), ['a-mood', 'b-mood']);
+});
+
+test('content-pack:官方安装聚合键序 = megumin→aris（旧展示序），PACKS.ids 保持目录序', () => {
+  if (PACKS === null) return; // 公开集没有官方包
+  assert.deepEqual(PACKS.ids, ['aris', 'megumin'], 'PACKS.ids 仍是目录发现序（既有消费者依赖）');
+  const moodBody = packsAsMoodBodyContent();
+  assert.deepEqual(Object.keys(moodBody.mood), ['megumin', 'aris'], '情绪主题键序：megumin 先');
+  assert.deepEqual(Object.keys(moodBody.body), ['megumin', 'aris'], '身体主题键序：megumin 先');
+  assert.deepEqual(Object.keys(packsAsStyleNudges().styleNudges), ['megumin', 'aris']);
+  const story = packsAsStoryRoleSections();
+  assert.deepEqual(Object.keys(story.storyPacks), ['megumin', 'aris']);
+  assert.deepEqual(Object.keys(story.companionsById), ['megumin', 'aris']);
+  assert.deepEqual(Object.keys(story.characterDays), ['megumin', 'aris']);
+  assert.deepEqual(Object.keys(story.phrasesByRole), ['megumin', 'aris']);
+});
+
+// ---------------------------------------------------------------------------
+// ⑥ 触发词：公开集默认（中性）与官方安装（行为不变）
+// ---------------------------------------------------------------------------
+
+const sha256Text = (text) => createHash('sha256').update(text, 'utf8').digest('hex');
+/** 冻结词表摘要：词按 UTF-16 排序后以 `\n` 连接再取 sha256（与词序无关）。 */
+const wordsDigest = (words) => sha256Text([...words].sort().join('\n'));
+/**
+ * 改造前冻结：公开集默认词表=只含中性通用词；官方安装生效并集=原硬编码集合。
+ * 公开文件不写作品专属词字面量；快照摘要就是"加/删/换任何一个词必红"的锚点。
+ */
+const FROZEN_NEUTRAL_TRIGGER_SHA256 = '96a669af16390b77a4cf8878cd9abb90532181037b35f311725ca4903241a0d8';
+const FROZEN_OFFICIAL_TRIGGER_SHA256 = 'ed4a60e4b281a367f287aad29a7d6336507e6efb31e5bb52e18205326b48e8e8';
+const canonicalTriggerSource = (words) => `(${words.map((word) => String(word).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`;
+
+test('技能触发词:公开集默认只有中性通用词（冻结摘要），加专属词必红', () => {
+  assert.deepEqual([...NEUTRAL_TRIGGER_WORDS], ['来一发', '放一个', '咏唱', '念咒', '咒文'],
+    '中性默认词表逐字冻结（公开可直接运行）');
+  assert.equal(wordsDigest(NEUTRAL_TRIGGER_WORDS), FROZEN_NEUTRAL_TRIGGER_SHA256,
+    '默认词表摘要冻结：新增/删改任何一个词都会红');
+  assert.equal(wordsDigest(explosionTriggerWords(null)), FROZEN_NEUTRAL_TRIGGER_SHA256,
+    '无内容包（公开集）时生效词表只剩中性默认词');
+  for (const word of NEUTRAL_TRIGGER_WORDS) {
+    assert.equal(isExplosionRequest(`请${word}试试`), true, `中性词必须命中：${word}`);
+    assert.equal(isExplosionRequest(word), true, `中性词单独出现必须命中：${word}`);
+  }
+  assert.equal(isExplosionRequest('今天天气不错'), false, '随便一句不许炸');
+});
+
+test('技能触发词:生效正则由字面词表生成且大小写不敏感（无隐藏词）', () => {
+  const effective = explosionTriggerWords();
+  assert.equal(explosionTriggerSource(), canonicalTriggerSource(effective),
+    '正则源码必须恰好等于字面词表生成的并集：直接往正则里塞词会红');
+  for (const word of effective) {
+    if (!/[A-Za-z]/.test(word)) continue;
+    assert.equal(isExplosionRequest(word.toUpperCase()), true, `大写变体必须命中：${word.toUpperCase()}`);
+    assert.equal(isExplosionRequest(word.toLowerCase()), true, `小写变体必须命中：${word.toLowerCase()}`);
+  }
+});
+
+test('技能触发词:官方安装生效并集等于改造前硬编码集合（冻结摘要）', () => {
+  if (PACKS === null) return; // 公开集没有官方包：上一条默认词表判据覆盖公开行为
+  assert.equal(wordsDigest(explosionTriggerWords()), FROZEN_OFFICIAL_TRIGGER_SHA256,
+    '官方安装生效并集必须逐字等于改造前那组词（由两个角色包 skill 段提供）');
+  const declared = packsAsSkillTriggerWords();
+  assert.ok(declared.length > 0, '官方安装的角色包必须声明 skill.triggerWords');
+  const matrix = [];
+  for (const word of declared) {
+    matrix.push([word, true], [`请${word}吧`, true], [`不要${word}`, true]);
+    if (/[A-Za-z]/.test(word)) matrix.push([word.toUpperCase(), true], [word.toLowerCase(), true]);
+  }
+  for (const word of NEUTRAL_TRIGGER_WORDS) matrix.push([word, true]);
+  matrix.push(['今天天气不错', false], ['', false], [null, false], [0, false]);
+  for (const [input, expected] of matrix) {
+    assert.equal(isExplosionRequest(input), expected, `冻结矩阵不一致：${JSON.stringify(input)}`);
+  }
+});
+
+test('技能触发词:作品专属词不出现在公开源码/默认词表（官方安装按包内容反证）', () => {
+  const source = readFileSync(new URL('../src/explosion.js', import.meta.url), 'utf8');
+  if (PACKS === null) return; // 公开集无官方包可反证；默认词表摘要已在上方钉住
+  // ⚠️ `GAMEPLAY_CONTENT.explosion` 这类标识符合法（ASCII 词不能按 includes 扫）；
+  //    对 ASCII 词只查字符串字面量，对非 ASCII 词（不可能是标识符）直接查整份源码。
+  const quotedStrings = [...source.matchAll(/'([^'\\\n]*)'|"([^"\\\n]*)"/g)]
+    .flatMap((match) => [match[1], match[2]])
+    .filter((text) => typeof text === 'string');
+  for (const word of packsAsSkillTriggerWords()) {
+    assert.equal(quotedStrings.some((text) => text.includes(word)), false,
+      `src/explosion.js 的字符串字面量不得含角色包声明词：${word}`);
+    if (!/^[\x00-\x7f]*$/.test(word)) {
+      assert.equal(source.includes(word), false, `src/explosion.js 不得硬编码角色包声明词：${word}`);
+    }
+    for (const neutral of NEUTRAL_TRIGGER_WORDS) {
+      assert.equal(neutral.includes(word) || word.includes(neutral), false,
+        `中性默认词表不得包含角色包声明词：${word}`);
+    }
+  }
+});
+
 export function registerPackTests(register) {
   const testFn = typeof register === 'function' ? register : register?.test;
   if (typeof testFn !== 'function') throw new TypeError('registerPackTests 需要 test');
@@ -399,7 +611,7 @@ export function registerPackTests(register) {
 const SELF_FILE = fileURLToPath(import.meta.url);
 if (process.argv[1] && path.resolve(process.argv[1]) === SELF_FILE) {
   let passed = 0;
-  console.log('[selftest-pack] 只跑合成夹具：不读真实 content/、不联网、不 git、不 spawn');
+  console.log('[selftest-pack] 合成夹具为主；包/触发词读本仓固定 content 路径（公开集为中性/空），不联网、不 git、不 spawn');
   for (const [name, fn] of cases) {
     try {
       await fn();

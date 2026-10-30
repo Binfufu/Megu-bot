@@ -11,11 +11,15 @@
  *   node scripts\command-index.js           # 打印(不改文件)
  *   node scripts\command-index.js --write   # 写进 docs\命令与关键字.md
  *   node scripts\command-index.js --selftest # 离线验证公开视图与私有覆写边界
+ *
+ * ⚠️ 公开页**不列内部决策号**(`D##`):数据里的号是私有侧追溯用的,渲染时统一中性化
+ * (`src\public-doc-text.js`) —— 不在 `src\commands.js` 里删,否则运行时的 `/help` 文案也跟着变。
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PUBLIC_COMMAND_VIEW } from '../src/commands.js';
+import { neutralizeDecisionRefs } from '../src/public-doc-text.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const DOC_FILE = path.join(ROOT, 'docs', '命令与关键字.md');
@@ -29,6 +33,8 @@ const WHO_LABEL = { anyone: '任何人', operator: '操作者名单', bridge: '�
  */
 export function renderCommandDoc(view = PUBLIC_COMMAND_VIEW) {
   const { commands, cardClaims, keywordGroups, phrases, opsScripts } = view;
+  /** 公开页文本:去内部决策号(D##),空串给一个占位,免得表格空一格。 */
+  const publicText = (text) => neutralizeDecisionRefs(text ?? '') || '—';
   const lines = [];
   lines.push('# 命令与关键字(总表)');
   lines.push('');
@@ -38,8 +44,8 @@ export function renderCommandDoc(view = PUBLIC_COMMAND_VIEW) {
   lines.push('>');
   lines.push('> `selftest.js` 里有一条测试比对"本文件 == 生成结果",所以改了代码忘记重新生成会被测出来。');
   lines.push('');
-  lines.push('> 本页固定渲染程序的中性公开视图，不包含本机可选内容覆写；命令协议存在不代表 demo 已启用所有可选功能。');
-  lines.push('> 节点 A 不包含网页或专用形象素材；具体能力以实例配置和公开文件集合为准。');
+  lines.push('> 本页固定渲染程序的中性公开视图，不包含本机可选内容覆写，也不列内部决策号（渲染时已中性化）；命令协议存在不代表 demo 已启用所有可选功能。');
+  lines.push('> 公开集不包含网页或专用形象素材；具体能力以实例配置和公开文件集合为准。');
   lines.push('');
   lines.push('## 一、桥识别并调度的命令');
   lines.push('');
@@ -50,12 +56,12 @@ export function renderCommandDoc(view = PUBLIC_COMMAND_VIEW) {
   for (const cmd of commands) {
     lines.push(
       `| \`${cmd.name}\` | ${cmd.aliases.length > 0 ? cmd.aliases.map((a) => `\`${a}\``).join(' ') : '—'} | ` +
-      `${SCOPE_LABEL[cmd.scope] ?? cmd.scope} | ${WHO_LABEL[cmd.who] ?? cmd.who} | ${cmd.effect} | ${cmd.source} |`,
+      `${SCOPE_LABEL[cmd.scope] ?? cmd.scope} | ${WHO_LABEL[cmd.who] ?? cmd.who} | ${publicText(cmd.effect)} | ${cmd.source} |`,
     );
   }
   lines.push('');
   lines.push('> 「操作者名单」= `QQBOT_ADMIN_IDS`,没配就回落到 `QQBOT_ANNOUNCE_C2C` / `QQBOT_MORNING_C2C`;');
-  lines.push('> 三者都没有 = **谁都不能**(fail closed,见 D32)。');
+  lines.push('> 三者都没有 = **谁都不能**(fail closed)。');
   lines.push('');
   lines.push('## 二、角色卡自称的能力(**核对用**)');
   lines.push('');
@@ -65,7 +71,7 @@ export function renderCommandDoc(view = PUBLIC_COMMAND_VIEW) {
   lines.push('| 卡里写的 | 代码里真有? | 说明 |');
   lines.push('|---|---|---|');
   for (const claim of cardClaims) {
-    lines.push(`| \`${claim.claim}\` | ${claim.implemented ? '✅ 有' : '⚠️ 只是台词'} | ${claim.note} |`);
+    lines.push(`| \`${claim.claim}\` | ${claim.implemented ? '✅ 有' : '⚠️ 只是台词'} | ${publicText(claim.note)} |`);
   }
   lines.push('');
   lines.push('## 三、关键词(命中就立刻考虑回复)');
@@ -89,7 +95,7 @@ export function renderCommandDoc(view = PUBLIC_COMMAND_VIEW) {
   lines.push('| 说法 | 说明 |');
   lines.push('|---|---|');
   for (const item of phrases) {
-    lines.push(`| ${item.phrase} | ${item.note} |`);
+    lines.push(`| ${item.phrase} | ${publicText(item.note)} |`);
   }
   lines.push('');
   lines.push('## 五、公开离线工具(不是 QQ 命令)');
@@ -99,7 +105,7 @@ export function renderCommandDoc(view = PUBLIC_COMMAND_VIEW) {
   lines.push('| 脚本 | 干什么 |');
   lines.push('|---|---|');
   for (const script of opsScripts) {
-    lines.push(`| \`scripts\\${script.name}\` | ${script.effect} |`);
+    lines.push(`| \`scripts\\${script.name}\` | ${publicText(script.effect)} |`);
   }
   lines.push('');
   return `${lines.join('\n')}\n`;
@@ -130,6 +136,9 @@ export async function selftestPublicCommandDoc() {
   assert.equal(renderCommandDoc(present.PUBLIC_COMMAND_VIEW), expected, 'local overrides must not change public rendering');
   assert.ok(!JSON.stringify(present.PUBLIC_COMMAND_VIEW).includes(marker), 'public view must not contain injected private content');
   assert.ok(!expected.includes(marker), 'generated page must not contain injected private content');
+  assert.doesNotMatch(expected, /\bD\d{1,4}\b/, '公开命令表不得出现内部决策号 D##(渲染时应中性化)');
+  assert.ok(PUBLIC_COMMAND_VIEW.commands.some(({ effect }) => /\bD\d{1,4}\b/.test(effect)),
+    '源数据仍保留决策号(中性化只在渲染层,不改运行时文案)');
   assert.equal(PUBLIC_COMMAND_VIEW.keywordGroups.length, 0, 'public defaults have no persona keywords');
   assert.equal(PUBLIC_COMMAND_VIEW.phrases.length, 0, 'public defaults have no persona phrases');
   assert.deepEqual(protocols(present.BRIDGE_COMMANDS), protocols(absent.BRIDGE_COMMANDS), 'local content must not change command protocol');

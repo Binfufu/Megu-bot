@@ -18,6 +18,8 @@ import { registerPlayTests } from './selftest-play.js';
 import { registerParamsTests } from './selftest-params.js';
 import { registerConfigParamsTests } from './selftest-config-params.js';
 import { registerModelParamsTests } from './selftest-model-params.js';
+import { registerContractPublicTests } from './selftest-contract.js';
+import { selftestPublicCommandDoc } from './command-index.js';
 
 export async function runPublicSelftest() {
   const cases = [];
@@ -39,6 +41,10 @@ export async function runPublicSelftest() {
   register('params（类型/覆盖/来源/安全错误/未知项）', ({ test, assert }) => registerParamsTests(test, assert));
   register('config-params（主配置兼容接线/文件/包/env 来源）', registerConfigParamsTests);
   register('model-params（模型字段来源/校验/热覆盖/秘密边界）', registerModelParamsTests);
+  register('contract-public（边界契约公开视图：公开锚点/页面同步/无决策号）', registerContractPublicTests);
+  register('command-doc-public（命令表公开视图：公开渲染/无决策号/生成页同步）', ({ test }) => {
+    test('命令与关键字公开视图', async () => { await selftestPublicCommandDoc(); });
+  });
 
   // 与原全量 runner 相同的名称子串显式跳过、计数及 --out 语义。
   const patterns = String(process.env.QQBOT_SELFTEST_SKIP ?? '')

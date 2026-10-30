@@ -39,5 +39,10 @@ export function registerChannelTests({ test, assert }) {
     assert.ok(page.includes('按短句分 4 条发'), '要有"分条发"的真实日志例子');
     assert.ok(page.includes('距上次已 188 分钟'), '要有"摘要节流"的真实日志例子');
     assert.ok(page.includes('❌ **对不上**'), '要有一条"对不上"的例子(位置 TTL / 到达窗口那条死链)');
+
+    // ⑥ 公开页不列内部决策号(数据里保留追溯,渲染时中性化 —— 见 src\public-doc-text.js)
+    assert.doesNotMatch(page, /\bD\d{1,4}\b/, '通道策略表不得出现内部决策号 D##');
+    assert.match(CHANNEL_ROWS.map((row) => [row.cap, row.late, row.note ?? ''].join(' ')).join(' '),
+      /\bD\d{1,4}\b/, '源数据仍保留决策号(中性化只作用于渲染层)');
   });
 }

@@ -15,6 +15,7 @@
  * 渲染与锚点校验的实现在 `src\anchored-page.js`(**只此一份**,D159)。
  */
 import { checkAnchors, describeAnchor, renderTable } from './anchored-page.js';
+import { neutralizeDecisionRefs } from './public-doc-text.js';
 
 /**
  * @typedef {object} ChannelRow
@@ -130,6 +131,8 @@ export const REQUIRED_FIELDS = Object.freeze(['id', 'channel', 'cap', 'late']);
  * @returns {string}
  */
 export function renderChannelPage(rows = CHANNEL_ROWS) {
+  /** 本页公开可见:内部决策号(D##)只在数据里留作追溯,渲染时中性化掉。 */
+  const publicText = (text) => neutralizeDecisionRefs(text ?? '');
   const lines = [];
   lines.push('# 17 · 通道策略表 —— 每条通道:满了怎么办 / 迟了怎么办');
   lines.push('');
@@ -139,17 +142,18 @@ export function renderChannelPage(rows = CHANNEL_ROWS) {
   lines.push('> **用途**:任何一条"塞不下 / 来不及"的现场(被截断、过期、没轮到),先在表里找到那条通道,');
   lines.push('> 对"满了/迟了"两列 —— **对不上就是 bug,对得上就是设计**。');
   lines.push('> 来源:跨游戏模组调研第 3.1 节 —— 每条通道都要有"溢出"与"过期"的成文对策。');
+  lines.push('> 本页公开可见:内部决策号只在数据里留作追溯,渲染时已中性化。');
   lines.push('');
   lines.push(...renderTable(
     ['通道', '满了怎么办', '迟了怎么办'],
-    rows.map((row) => [row.channel, row.cap, row.late]),
+    rows.map((row) => [publicText(row.channel), publicText(row.cap), publicText(row.late)]),
   ));
   lines.push('');
   lines.push('## 逐条:最容易出事的那个坑 + 凭什么这么写(锚)');
   lines.push('');
   for (const row of rows) {
-    lines.push(`### ${row.channel}`);
-    if (row.note) lines.push(`- ${row.note}`);
+    lines.push(`### ${publicText(row.channel)}`);
+    if (row.note) lines.push(`- ${publicText(row.note)}`);
     for (const anchor of row.anchors ?? []) lines.push(`- ${describeAnchor(anchor)}`);
     lines.push('');
   }
