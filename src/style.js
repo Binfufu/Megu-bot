@@ -27,8 +27,8 @@ export const DEMO_STYLE_NUDGES = [
 ];
 
 /** Legacy theme identifiers remain API-compatible; displayed content is local or neutral. */
-export const MEGUMIN_STYLE_NUDGES = LOCAL_TURN_CONTENT?.styleNudges.megumin ?? [...DEMO_STYLE_NUDGES];
-export const ARIS_STYLE_NUDGES = LOCAL_TURN_CONTENT?.styleNudges.aris ?? [...DEMO_STYLE_NUDGES];
+export const MEGUMIN_STYLE_NUDGES = LOCAL_TURN_CONTENT?.styleNudges?.megumin ?? [...DEMO_STYLE_NUDGES];
+export const ARIS_STYLE_NUDGES = LOCAL_TURN_CONTENT?.styleNudges?.aris ?? [...DEMO_STYLE_NUDGES];
 
 /** 样式主题名 → 提示词表；保留旧主题接口，并提供独立中性 demo。 */
 export const STYLE_NUDGE_THEMES = {

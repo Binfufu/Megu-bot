@@ -316,7 +316,7 @@ export function resolveParamLayers(defs, layers, options = {}) {
         if (!supplied.has(key)) continue;
         const raw = supplied.get(key);
         if (raw === undefined || (raw === '' && def.emptyAsUnset)) continue;
-        if (def.scope === 'deployment' && ['content-pack', 'config-file'].includes(source)) fail('PARAM_SCOPE', def.id, source);
+        if (def.scope === 'deployment' && ['world-pack', 'content-pack', 'config-file'].includes(source)) fail('PARAM_SCOPE', def.id, source);
         const parsed = parseValue(def, raw, source);
         values[def.id] = parsed;
         inputs[def.id] = copyData(raw, def.id, source);
@@ -331,14 +331,18 @@ export function resolveParamLayers(defs, layers, options = {}) {
 }
 
 /**
- * Fixed general precedence. Only unregistered QQBOT_ names produce advisory env
- * warnings; knownEnv exempts names owned by other modules. index is the local
- * zero-based unknown-warning ordinal, never an unknown name or raw input.
+ * Fixed general precedence: default < world-pack < content-pack < config-file <
+ * env-file < env. World packs are content-owned tuning too, one layer below the
+ * selected character content pack and above schema defaults. Only unregistered
+ * QQBOT_ names produce advisory env warnings; knownEnv exempts names owned by
+ * other modules. index is the local zero-based unknown-warning ordinal, never an
+ * unknown name or raw input.
  */
 export function resolveParams(defs, options = {}) {
   const settings = new Map(readRecord(options, 'layers'));
-  const allowed = new Set(['contentPack', 'configFile', 'envFile', 'env', 'unknown', 'knownEnv']);
+  const allowed = new Set(['worldPack', 'contentPack', 'configFile', 'envFile', 'env', 'unknown', 'knownEnv']);
   if ([...settings.keys()].some((key) => !allowed.has(key))) fail('PARAM_LAYER', undefined, 'layers');
+  const worldPack = setting(settings, 'worldPack', {});
   const contentPack = setting(settings, 'contentPack', {});
   const configFile = setting(settings, 'configFile', {});
   const envFile = setting(settings, 'envFile', {});
@@ -349,6 +353,7 @@ export function resolveParams(defs, options = {}) {
     fail('PARAM_LAYER', undefined, 'env');
   }
   const result = resolveParamLayers(defs, [
+    { source: 'world-pack', values: worldPack, kind: 'params' },
     { source: 'content-pack', values: contentPack, kind: 'params' },
     { source: 'config-file', values: configFile, kind: 'params' },
     { source: 'env-file', values: envFile, kind: 'env' },

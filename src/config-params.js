@@ -18,11 +18,13 @@ export const CONFIG_DEFAULTS = Object.freeze({
  * Explicit params/packParams are runtime policy only; credentials/paths require env.
  */
 // Legitimate environment owned by other modules/tools, not typo fixtures.
+// QQBOT_WORLD belongs to the optional world-pack loader (active world selection),
+// not to the config catalogue: it never becomes a config field.
 export const CONFIG_KNOWN_ENV = Object.freeze([
   'QQBOT_HOME', 'QQBOT_QQBOT_HOME', 'QQBOT_PYTHON', 'QQBOT_EMBED_PORT',
   'QQBOT_EMBED_CHECK_MS', 'QQBOT_REPAIR_TOOLS', 'QQBOT_APP_ID', 'QQBOT_SELFTEST_SKIP',
   'QQBOT_RELAY', 'QQBOT_RELAY_CONFIRM', 'QQBOT_RELAY_DENY', 'QQBOT_RELAY_EXPECT_NAMES',
-  'QQBOT_RELAY_FROM', 'QQBOT_RELAY_TO', 'QQBOT_RELAY_VERIFY_NAMES',
+  'QQBOT_RELAY_FROM', 'QQBOT_RELAY_TO', 'QQBOT_RELAY_VERIFY_NAMES', 'QQBOT_WORLD',
 ]);
 
 export const CONFIG_DERIVED_DEFAULTS = Object.freeze({

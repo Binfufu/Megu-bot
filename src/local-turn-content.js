@@ -2,7 +2,8 @@
  * 固定旧快照里的共享句表 + 角色风格表的回退读取。
  *
  * 阶段 2（角色包化）起：`styleNudges` 优先来自内容包（见 `src/content-pack.js`）；
- * `warmupTopics` / `meituLines` 是世界级共享句表，仍读本固定文件。
+ * 阶段 4（世界包化）起：世界包激活时 `warmupTopics` / `meituLines` 来自
+ * `content/worlds/<id>/world.json`（见 `src/world-pack.js`），未激活时仍读本固定文件。
  *
  * Uses Node 24 fs.readFileSync + JSON.parse (asOf 2026-10-29):
  * https://nodejs.org/docs/latest-v24.x/api/fs.html#fsreadfilesyncpath-options
@@ -11,6 +12,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { PACKS, packsAsStyleNudges } from './content-pack.js';
+import { WORLD_PACKS, worldAsTurnSections } from './world-pack.js';
 
 const LOCAL_URL = new URL('../content/local/turn-lines.json', import.meta.url);
 const LINE_KEYS = ['groupDisabled', 'cooldown', 'unregistered', 'interpretFailed', 'noResult',
@@ -54,9 +56,35 @@ function mergeKeyed(base, overrides) {
   return out;
 }
 
-/** 角色包优先、旧快照回退（阶段 2）：只有 `styleNudges` 按主题来自包。 */
+/**
+ * 世界段 + 角色段的合成（阶段 4）：
+ * - 世界包激活时 `warmupTopics` / `meituLines` 来自世界包；
+ * - `styleNudges` 仍内容包优先（角色包只覆盖它）/ 旧快照回退；
+ * - 没有世界包时与改造前逐字段一致（无旧快照且无内容包 → null）。
+ *
+ * @param {object|null} legacyContent 旧快照（可缺省）
+ * @param {{worldSections?: object|null, packSections?: object|null}} [options]
+ */
+export function composeTurnContent(
+  legacyContent,
+  { worldSections = null, packSections = packsAsStyleNudges(PACKS) } = {},
+) {
+  if (!legacyContent) {
+    // 旧安装没有本次快照：只有世界包时聚合只含世界两张表（styleNudges 由消费者回退）。
+    return worldSections ? { ...worldSections } : null;
+  }
+  if (!packSections && !worldSections) return legacyContent;
+  const content = { ...legacyContent };
+  if (packSections) content.styleNudges = mergeKeyed(content.styleNudges, packSections.styleNudges);
+  if (worldSections) {
+    content.warmupTopics = worldSections.warmupTopics;
+    content.meituLines = worldSections.meituLines;
+  }
+  return content;
+}
+
 const legacyContent = readLocalTurnContent();
-const packSections = packsAsStyleNudges(PACKS);
-export const LOCAL_TURN_CONTENT = legacyContent && packSections
-  ? { ...legacyContent, styleNudges: mergeKeyed(legacyContent.styleNudges, packSections.styleNudges) }
-  : legacyContent;
+const activeWorld = WORLD_PACKS?.active ?? null;
+export const LOCAL_TURN_CONTENT = composeTurnContent(legacyContent, {
+  worldSections: activeWorld ? worldAsTurnSections(activeWorld) : null,
+});

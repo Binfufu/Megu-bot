@@ -2,14 +2,16 @@
  * 本地展示内容读取（旧快照回退）。
  *
  * 阶段 2（角色包化）起：角色内容优先来自 `content/packs/<id>/pack.json`（见
- * `src/content-pack.js`）；本文件只在没有内容包时读固定旧快照，并继续提供世界级
- * `config` / `ruleLabels`。固定路径、固定 schema、无目录发现、无代码执行。
+ * `src/content-pack.js`）；阶段 4（世界包化）起：世界级 `config` / `ruleLabels`
+ * 优先来自 `content/worlds/<id>/world.json`（见 `src/world-pack.js`）。本文件只在
+ * 没有内容包/世界包时读固定旧快照。固定路径、固定 schema、无目录发现、无代码执行。
  *
  * Node 24 fs.readFileSync + JSON.parse，asOf 2026-10-29:
  * https://nodejs.org/docs/latest-v24.x/api/fs.html#fsreadfilesyncpath-options
  */
 import { readFileSync } from 'node:fs';
 import { PACKS, packsAsMoodBodyContent } from './content-pack.js';
+import { WORLD_PACKS, worldAsMoodBodySections } from './world-pack.js';
 
 const CONTENT_URL = new URL('../content/local/mood-body.json', import.meta.url);
 const MOOD_IDS = {
@@ -73,11 +75,39 @@ function mergeKeyed(base, overrides) {
 }
 
 /**
- * 角色包优先、旧快照回退（阶段 2）。旧快照同时提供世界级 config/ruleLabels；
- * 包只覆盖 `mood` / `body` 两个按主题组织的映射，其余键原样保留（行为不变）。
+ * 世界段 + 角色段的合成（阶段 4）：
+ * - 世界包激活时 `config` / `ruleLabels` 来自世界包；
+ * - `mood` / `body` 仍内容包优先（角色包只覆盖这两个按主题组织的映射）/ 旧快照回退；
+ * - 没有世界包时与改造前逐字段一致（无旧快照且无内容包 → null）。
+ *
+ * 旧快照与世界包都缺 `mood` / `body` 时，聚合允许为
+ * `{schemaVersion: 1, config, ruleLabels}`（消费者必须逐层空值安全）。
+ *
+ * @param {object|null} legacyContent 旧快照（可缺省）
+ * @param {{worldSections?: object|null, packSections?: object|null}} [options]
  */
+export function composeMoodBodyContent(
+  legacyContent,
+  { worldSections = null, packSections = packsAsMoodBodyContent(PACKS) } = {},
+) {
+  if (!legacyContent) {
+    return worldSections ? { schemaVersion: 1, ...worldSections } : null;
+  }
+  if (!packSections && !worldSections) return legacyContent;
+  const content = { ...legacyContent };
+  if (packSections) {
+    content.mood = mergeKeyed(content.mood, packSections.mood);
+    content.body = mergeKeyed(content.body, packSections.body);
+  }
+  if (worldSections) {
+    content.config = worldSections.config;
+    content.ruleLabels = worldSections.ruleLabels;
+  }
+  return content;
+}
+
 const legacyContent = readLocalMoodBodyContent();
-const packSections = packsAsMoodBodyContent(PACKS);
-export const LOCAL_MOOD_BODY_CONTENT = legacyContent && packSections
-  ? { ...legacyContent, mood: mergeKeyed(legacyContent.mood, packSections.mood), body: mergeKeyed(legacyContent.body, packSections.body) }
-  : legacyContent;
+const activeWorld = WORLD_PACKS?.active ?? null;
+export const LOCAL_MOOD_BODY_CONTENT = composeMoodBodyContent(legacyContent, {
+  worldSections: activeWorld ? worldAsMoodBodySections(activeWorld) : null,
+});
