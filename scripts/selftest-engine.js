@@ -10,6 +10,7 @@ import * as assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import http from 'node:http';
+import { listenLoopback } from './test-local-port.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -79,7 +80,7 @@ export function registerEngineTests({ test, assert: rawAssert }) {
       count++; req.resume(); res.writeHead(200, { 'content-type': 'application/json' });
       res.write('{"choices":['); res.on('close', disconnected);
     });
-    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    await listenLoopback(server);
     const llm = createLlmClient({ baseUrl: 'http://127.0.0.1:' + server.address().port,
       apiKey: 'isolated', model: 'isolated', retryDelayMs: 1, log: {},
       fetchImpl: async (...args) => { const response = await fetch(...args); headersRead(); return response; } });
@@ -127,7 +128,7 @@ export function registerEngineTests({ test, assert: rawAssert }) {
             prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 10 } }));
       });
     });
-    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    await listenLoopback(server);
     let headers = 0;
     const llm = createLlmClient({ baseUrl: 'http://127.0.0.1:' + server.address().port,
       apiKey: 'isolated', model: 'isolated', retryDelayMs: 1, log: {},
@@ -438,7 +439,7 @@ export function registerEngineTests({ test, assert: rawAssert }) {
             prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: n * 10 } }));
       });
     });
-    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    await listenLoopback(server);
     const llm = createLlmClient({ baseUrl: 'http://127.0.0.1:' + server.address().port,
       apiKey: 'isolated', model: 'isolated', attempts: 1, log: {} });
     const key = 'qqbot-c2c-http-summary-cost';
@@ -1221,7 +1222,7 @@ export function registerEngineTests({ test, assert: rawAssert }) {
       const saved = JSON.parse(fx.store.getMeta('own-engine:v1:stale-key'));
       a.equal(saved.summary, '', '旧摘要从活状态停用');
       a.equal(saved.coveredId, 0, '游标退回reset边界(0),原档轮次可被干净投影重建');
-      a.equal(saved.summaryPolicyV, 2, '升级只做一次,落盘');
+      a.equal(saved.summaryPolicyV, 3, 'F1 清洁投影规则升级只做一次并落盘，旧 v2 摘要不可入口');
     } finally { await engine.stop(); fx.store.close(); fs.rmSync(fx.dir, { recursive: true, force: true }); }
   });
 }

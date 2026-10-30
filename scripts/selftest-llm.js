@@ -7,6 +7,7 @@
  */
 import * as assert from 'node:assert/strict';
 import http from 'node:http';
+import { listenLoopback } from './test-local-port.mjs';
 import {
   classifyLlmError,
   createLlmClient,
@@ -64,7 +65,7 @@ export function registerLlmTests({ test, assert: rawAssert }) {
     const server = http.createServer((req, res) => {
       count++; req.resume(); received(); res.on('close', disconnected);
     });
-    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    await listenLoopback(server);
     try {
       const controller = new AbortController();
       const client = createLlmClient({ ...BASE, baseUrl: 'http://127.0.0.1:' + server.address().port,
@@ -95,7 +96,7 @@ export function registerLlmTests({ test, assert: rawAssert }) {
       res.write('{"choices":['); // Headers and partial JSON arrive; response never completes.
       res.on('close', disconnected);
     });
-    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    await listenLoopback(server);
     const controller = new AbortController();
     try {
       const client = createLlmClient({ ...BASE, baseUrl: 'http://127.0.0.1:' + server.address().port,

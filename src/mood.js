@@ -439,7 +439,8 @@ export function remember(recent, item, limit) {
  * @param {() => number} [ctx.random]
  * @returns {{state: object, mood: string, directive: string, maxChars: number,
  *   maxSentences: number, changed: boolean, reason: string,
- *   interjection: string|null, kaomoji: string|null, penalised: boolean}}
+ *   interjection: string|null, interjectionScoped: boolean, kaomoji: string|null,
+ *   penalised: boolean}}
  */
 export function decideMood(previous, ctx) {
   const {
@@ -496,17 +497,22 @@ export function decideMood(previous, ctx) {
   // 出场闸(表见 ARIS_INTERJECTION_TOPIC_GATE):没上闸的语气词照常发;上闸的
   // 要「话题命中 + 这轮新掷中」才放行。过滤后不许空池 —— 真空了退回原池。
   const gate = theme.interjectionTopicGate;
-  const interjections = gate
+  const gated = gate
     ? rawInterjections.filter((item) => {
         const allowed = gate[item];
         if (!allowed) return true;
         return moodFresh && topic !== null && allowed.includes(topic.id);
       })
     : rawInterjections;
-  const interjection = pickAvoiding(
-    interjections.length > 0 ? interjections : rawInterjections,
-    state.recentInterjections,
-    random(),
+  const interjectionPool = gated.length > 0 ? gated : rawInterjections;
+  const interjection = pickAvoiding(interjectionPool, state.recentInterjections, random());
+  // **「主题专属」的标记**(2026-10-30 主人拍板:句前模板去机械化)。
+  // 只有「上过出场闸、且本轮确实靠闸放行」的语气词才算 —— 例如爱丽丝在 game/light
+  // 话题新掷中 fanfare 时的「邦邦咔邦！」(庆典登场的登场音效)。过滤后退回原池的、
+  // 或根本没上闸的日常语气词都不算(`buildMoodNote` 据此完全不提语气词)。
+  const interjectionScoped = Boolean(
+    gate && gated.length > 0 && interjection
+      && Object.hasOwn(gate, interjection) && moodFresh && topic !== null,
   );
   const taggedKaomoji = theme.kaomoji
     .filter((entry) => entry.tags.some((tag) => (definition.tags ?? []).includes(tag)))
@@ -542,6 +548,9 @@ export function decideMood(previous, ctx) {
     changed,
     reason,
     interjection,
+    // 只有「主题专属 + 本轮确实靠出场闸放行」才为 true;`buildMoodNote` 只对它给
+    // 「这个场面可以自然用、不强求」的可选提示,其余情况完全不提语气词。
+    interjectionScoped,
     kaomoji,
     penalised,
   };
@@ -550,16 +559,32 @@ export function decideMood(previous, ctx) {
 /**
  * The private note appended to the prompt for this turn.
  *
- * Kept to two lines: the length binding, the mood, and the two concrete items
- * the model is allowed to use. Naming the interjection is the point — a list to
- * choose from produced three distinct kaomoji in 400 replies.
+ * Kept to two lines: the length binding and the mood, plus the concrete optional
+ * items the model *may* use (a kaomoji, or a topic-scoped interjection).
+ *
+ * ⚠️ 2026-10-30(主人拍板,句前模板去机械化):旧实现把抽中的语气词写成
+ *    「语气词用「X」」—— 那是**要求模型用固定开场**,与「让 LLM 自己组织句子」
+ *    相反(现场:惠惠频繁「说到钱」「来来来」这类公式化开头)。现在:
+ *      · **普通回应完全不提语气词**,允许直接成句,不再要求句前塞词;
+ *      · 只有**主题专属**语气词(靠 `theme.interjectionTopicGate` 命中话题才放行的,
+ *        如爱丽丝庆典登场的「邦邦咔邦！」),才作为**可选**提示出现:
+ *        「这个场面可以自然用「X」，不强求」。
+ *    取消强制 ≠ 禁用角色语言:自称、性格、世界观、技能场景用语仍属角色轴,
+ *    恰当语境自然使用,不在这里封禁。**不用**扩口头禅池轮换、出站正则删句首
+ *    或二次润色模型来换模板 —— 那只是把机械开场藏起来。
+ *
+ * @param {{label?: string, mood: string, maxSentences: number, maxChars: number,
+ *   interjection?: string|null, interjectionScoped?: boolean, kaomoji?: string|null}} decision
+ * @returns {string}
  */
 export function buildMoodNote(decision) {
   const parts = [
     `本轮情绪：${decision.label ?? MOODS[decision.mood]?.label ?? decision.mood}`,
     `${decision.maxSentences} 句以内、不超过 ${decision.maxChars} 字`,
   ];
-  if (decision.interjection) parts.push(`语气词用「${decision.interjection}」`);
+  if (decision.interjectionScoped === true && decision.interjection) {
+    parts.push(`这个场面可以自然用「${decision.interjection}」，不强求`);
+  }
   if (decision.kaomoji) parts.push(`句尾可以带 ${decision.kaomoji}`);
   return parts.join('；');
 }
@@ -623,8 +648,18 @@ export function truncateForMood(text, maxChars) {
   return `${tidy(head)}…`;
 }
 
-/** Local display content is separate from the unchanged runtime policy. */
-export function splitSpokenLines(text, { maxChars = 0, maxLines = 5 } = {}) {
+/**
+ * 把一段普通发言切成**多条短句**交付(1.171.0 / D288 起;S1 风格包接线后由风格策略调用)。
+ *
+ * @param {string} text 模型原文
+ * @param {{maxChars?: number, maxLines?: number}} [options]
+ * @param {boolean} [preservePunctuation=false] **S1 风格包 `punctuation.preserve`**:
+ *   true 时**跳过** `cleanSpokenLine` 的行尾/停顿标点清理,标点原样保留;
+ *   链接/代码保护、空段过滤、段数封顶、防碎段照旧。任务/知识轮的整条保真分支
+ *   **不经过这里**(`planSpokenLines` 的 preserveFormatting 先返回)。
+ *   ⚠️ 刻意放在第三个位置参数(而不是 options 里):保持既有签名/旧切片兼容。
+ */
+export function splitSpokenLines(text, { maxChars = 0, maxLines = 5 } = {}, preservePunctuation = false) {
   // 空白规范化:行内连续空格并成一个,首尾 trim;换行**保留**(它是边界,不是空格)
   const plain = String(text ?? '')
     .replace(/[ \t\u3000]+/g, ' ')
@@ -703,8 +738,13 @@ export function splitSpokenLines(text, { maxChars = 0, maxLines = 5 } = {}) {
 
   // ④ **口语标点清理**(1.171.0 / D288;行尾剥 + 段内停顿标点变空格),然后**放回被保护的内容**。
   //    整段只有标点时(`。。。` 这种)结果就是空串 → 过滤掉 = 一条都不发(不是发一条空的)。
+  //    ⚠️ S1 风格包 `punctuation.preserve=true` 时跳过清理 → 标点原样保留(仍 trim 空白,
+  //       仍过滤空段,链接/代码仍在 restoreProtected 里原样放回)。
   return capped
-    .map((line) => restoreProtected(cleanSpokenLine(line), protected_))
+    .map((line) => restoreProtected(
+      preservePunctuation ? String(line ?? '').trim() : cleanSpokenLine(line),
+      protected_,
+    ))
     .filter((line) => line !== '');
 }
 

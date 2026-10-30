@@ -228,12 +228,17 @@ test('Y6:自发分类只认同一轮真实被叫(addressed),不拿答话排版�
   const source = fs.readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
   const start = source.indexOf('const answering = addressed || looksAddressedToBot');
   assert.ok(start > 0, 'Y6:生产自发开口处必须有状态机接线');
-  const block = source.slice(start, start + 4000);
+  const block = source.slice(start, start + 5200);
   assert.match(block, /noteSpoke\(groupId, \{ selfInitiated: !addressed \}/, 'Y6:自发分类必须用本轮真实被叫判定');
   assert.match(block, /if \(!addressed\) \{/, 'Y6:ignored 计时器只给真正自发的开口');
   // ⚠️ D288(1.171.0):`addressed: answering` 这个**排版**选项退役 —— 答话与纯主动走
   // 同一份 `planSpokenLines` 分条;`answering` 只留给日志/状态机分类(上面两行已钉)。
-  assert.match(block, /\{ label: '自发发言' \}/, 'D288:自发发言的分条不再按 answered 分叉');
+  // F2(2026-10-30):分条只带入口不可变决策,选项里不许再出现 addressed 分叉。
+  assert.match(block, /\{ label: '自发发言', decision: turnDecision \}/,
+    'D288+F2:自发发言同一份分条规划,只带入口决策(不再按 answered 分叉)');
+  const spokenAt = block.indexOf("label: '自发发言'");
+  assert.doesNotMatch(block.slice(Math.max(0, spokenAt - 200), spokenAt + 200), /addressed\s*:/,
+    'D288:自发发言分条不许再出现 addressed 选项');
   // 行为对照:真自发建立窗口并计数;被叫不带 selfInitiated 不算"她找话"。
   const clock = fixedClock();
   const sm = createSocialStateMachine({ now: clock.now });

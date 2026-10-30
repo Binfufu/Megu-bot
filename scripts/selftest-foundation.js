@@ -23,6 +23,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
+import { listenLoopback } from './test-local-port.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -288,7 +289,7 @@ async function checkVisionPassthrough() {
         usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }));
     });
   });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await listenLoopback(server);
   try {
     const llm = createLlmClient({ baseUrl: `http://127.0.0.1:${server.address().port}`,
       apiKey: 't0', model: 't0-model', retryDelayMs: 1, log: SILENT });

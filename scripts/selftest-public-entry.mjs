@@ -111,6 +111,8 @@ try {
       'src/action-log.js', 'src/body-rules.js', 'src/body-theme.js', 'src/capabilities.js',
       'src/condition.js', 'src/context-budget.js', 'src/control-markup.js', 'src/dream-cards.js',
       'src/engine.js', 'src/group-context.js', 'src/growth.js', 'src/inject-mark.js', 'src/llm.js',
+      // F1：engine 的历史/摘要读投影依赖这个纯模块（P 区，无私有内容；闭包再带 turn-policy）
+      'src/chat-input-projection.js', 'src/turn-policy.js',
       'src/local-gameplay-content.js', 'src/local-mood-body-content.js', 'src/log.js',
       'src/meitu-alias.js', 'src/meitu-command.js', 'src/meitu-interpret.js', 'src/meitu-service.js',
       'src/qq.js', 'src/runner-contract.js', 'src/sqlite-store.js', 'src/stat-binding.js',
@@ -128,6 +130,8 @@ try {
       'src/world-pack.js', 'scripts/selftest-world-pack.js', 'content/worlds/example/world.json',
       'src/burst.js', 'src/meitu-gallery.js', 'src/meitu-search.js', 'src/mood.js',
       'src/morning.js', 'src/social.js', 'src/style.js', 'src/warmup.js',
+      // S1：风格包加载器（P 区纯模块；content/styles 是 C 区，公开树没有它 → 内置 legacy 回退）
+      'src/style-pack.js',
       // 挂账B：边界契约公开视图 + 命令表公开视图两个公开套件及其闭包
       'scripts/selftest-contract.js', 'scripts/command-index.js',
       'src/boundary-contract.js', 'src/anchored-page.js', 'src/public-doc-text.js',

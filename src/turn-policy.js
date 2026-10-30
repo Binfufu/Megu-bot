@@ -38,9 +38,15 @@ const KNOWLEDGE_STRONG_RE = /是什么|什么意思|啥意思|什么原理|的�
 const KNOWLEDGE_WEAK_RE = /为什么|为啥|如何|怎么|有何|有哪些|多久|多少钱|几个|哪种|哪个/;
 
 /** 办事:动作动词。命中即按 task 给权限(仍然只是"可以说完")。 */
-const TASK_RE = /帮我|帮忙|给我|替我|列出|列举|罗列|写一(个|段|份|遍|下)|做个|做一(个|份)|分析|排查|修理|修复|解决|步骤|方案|代码|报错|异常|配置|对比|比较|总结|整理|翻译|计算|推导|设计|实现|优化|重构|调试|部署|规划|评估|检查|核对|梳理|拆解|给出|说明白|讲清楚/;
+const TASK_RE = /帮我|帮忙|给我|替我|列出|列举|罗列|写一(个|段|份|遍|下)|做个|做一(个|份)|分析|排查|修理|修复|解决|步骤|方案|代码|报错|异常|配置|对比|比较|总结|整理|翻译|计算|推导|设计|实现|优化|重构|调试|部署|规划|评估|检查|核对|梳理|拆解|给出|说明白|讲清楚|改成|换成|转成|转换为/;
 
-/** 结构信号:出现了这些,几乎不可能是随口闲聊 —— 直接 task(且要保真)。 */
+/**
+ * 结构信号:**只标记"这一轮要保真交付"**,不再单独授予 task/knowledge(F2,2026-10-30)。
+ *
+ * 旧行为(1.205.1):结构信号 + 长度 ≥8 → 直接判 task。那会把「贴了一段代码/链接、
+ * 只是想说句闲话」也放成任务轮,而真正该保真的是**她的交付形状**,不是"准许她办事"。
+ * 现在结构信号只提高 `outputPolicy.preserveFormatting`,口径仍由当前请求正文判定。
+ */
 const STRUCTURE_RE = /```|`[^`\n]+`|https?:\/\/|\{\s*"|\|.*\|.*\||^\s*(?:[-*·]|\d+[.、])\s/m;
 const STRUCTURE_KEYWORDS = /JSON|json|正则|命令行|脚本|接口|API|SQL|sql|HTML|CSS|TypeScript|Python|函数|变量|堆栈|日志|报错码|环境变量/;
 
@@ -64,11 +70,8 @@ export function detectTurnMode(text, { previous = 'chat' } = {}) {
   const prev = TURN_MODES.includes(previous) ? previous : 'chat';
   if (source === '') return { mode: 'chat', reason: 'empty', followUp: false, structural: false };
 
+  // 结构信号只标记保真需求(F2):不再因为它就把这一轮判成 task。
   const structural = STRUCTURE_RE.test(source) || STRUCTURE_KEYWORDS.test(source);
-  if (structural && source.length >= 8) {
-    // 带结构信号(代码块/URL/报错码/JSON 键值……)且不是一句寒暄 → 当成要办事。
-    return { mode: 'task', reason: 'structural', followUp: false, structural: true };
-  }
   if (TASK_RE.test(source)) {
     return { mode: 'task', reason: 'action-verb', followUp: false, structural };
   }
@@ -80,6 +83,183 @@ export function detectTurnMode(text, { previous = 'chat' } = {}) {
     return { mode: prev, reason: 'follow-up', followUp: true, structural };
   }
   return { mode: 'chat', reason: 'default', followUp: false, structural };
+}
+
+/**
+ * **引用/转发材料**的行首标记(F2 分槽):只认**显式**形状,不做"猜哪句是引用"。
+ *
+ * · markdown 引用 `> …` / `＞ …`;
+ * · 平台常见的中文块标记:`【引用 …】`、`【转发 …】`、`【引述 …】`、`【转贴 …】`;
+ * · 方括号形态:`[引用]` / `[转发]` / `[quote]`。
+ *
+ * ⚠️ 只认**开头连续**的这几行 —— 引用材料在消息里就是一块前置材料。正文中间
+ *    出现的一个 `>` 不当引用(那可能是她自己写的符号),不猜。
+ */
+const QUOTE_HEAD_RE = /^\s*(?:[>＞]\s?|【(?:引用|引述|转发|转贴|quote)[^】]*】|\[(?:引用|引述|转发|quote)\][:：]?\s?)/i;
+
+/**
+ * 把一条入站消息拆成**分槽**(F2,2026-10-30)。纯函数,只读入参,不碰任何共享状态。
+ *
+ * | 槽 | 来源 | 判定里怎么用 |
+ * |---|---|---|
+ * | `currentRequest` | 去掉开头引用块后的正文 | **唯一**参与 mode 判定的文本 |
+ * | `addressee` | `message.mentions[]`(@ 对象) | 只做事实记录;@ 别人不许继承/提权 |
+ * | `quote` | 开头连续引用/转发行 | 只供保真与展示,**不授予 task/knowledge** |
+ * | `groupBackground` | 由入口传入(群背景快照) | 同上,不参与判定 |
+ *
+ * @param {object|null} message
+ * @param {{groupBackground?: string|null}} [options]
+ */
+export function splitTurnSlots(message, { groupBackground = null } = {}) {
+  const raw = typeof message?.content === 'string' ? message.content : '';
+  const lines = raw.replace(/\r\n?/g, '\n').split('\n');
+  const quoteLines = [];
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    const opener = /^\s*【(引用|引述|转发|转贴|quote)/i.exec(line);
+    if (opener) {
+      const count = (text, char) => text.split(char).length - 1;
+      // 括号深度配对：嵌套的「【补充说明】」不会提前结束材料。
+      let depth = 0;
+      let end = index;
+      for (; end < lines.length; end += 1) {
+        depth += count(lines[end], '【') - count(lines[end], '】');
+        if (depth <= 0) break;
+      }
+      // 开括号一直没闭合：保守地整段（到文末）都算材料，不把它当请求。
+      if (end >= lines.length) end = lines.length - 1;
+      else if (end === index
+        && /^\s*【(?:引用|引述|转发|转贴|quote)(?:材料|消息|内容|原文)?】\s*$/i.test(line)) {
+        // 整行只有开标记：只认**同类**结束标记（引用↔引用结束），不让别类标记关它；
+        // 没有结束标记时不猜后面的普通正文属于引用。
+        const kind = opener[1].toLowerCase();
+        const closing = lines.findIndex((value, at) => {
+          if (at <= index) return false;
+          const m = /^\s*【(引用|引述|转发|转贴|quote)结束】\s*$/i.exec(value);
+          return m !== null && m[1].toLowerCase() === kind;
+        });
+        if (closing >= 0) end = closing;
+      }
+      quoteLines.push(...lines.slice(index, end + 1));
+      index = end + 1;
+    } else if (QUOTE_HEAD_RE.test(line)) {
+      quoteLines.push(line);
+      index += 1;
+    } else break;
+  }
+  const currentRequest = lines.slice(index).join('\n').trim();
+  const quote = quoteLines.length > 0 ? quoteLines.join('\n').trim() : null;
+  const addressee = Array.isArray(message?.mentions)
+    ? Object.freeze(message.mentions.map((entry) => Object.freeze({
+      id: entry?.id === undefined || entry?.id === null ? '' : String(entry.id),
+      username: typeof entry?.username === 'string' && entry.username !== '' ? entry.username : null,
+      bot: entry?.bot === true,
+    })))
+    : Object.freeze([]);
+  return Object.freeze({
+    currentRequest,
+    addressee,
+    quote,
+    // 入口给的是字符串就**当快照**(空串也算快照 —— 之后不再回头读 buffer);
+    // 没给(非群轮/旧调用)= null。
+    groupBackground: typeof groupBackground === 'string' ? groupBackground : null,
+  });
+}
+
+/**
+ * 单轮**不可变决策**的序号(F2):日志与测试用它核对"一轮只算一次"。
+ * 只增计数,不含任何业务状态。
+ */
+let decisionCounter = 0;
+
+/**
+ * **一轮的不可变决策**(F2,2026-10-30)—— 入口处**任何 await 之前**构造一次,
+ * 之后 prompt / turnNotes / mood / style / kb / compose / plan / send / 日志**共用这一份**。
+ *
+ * ## 为什么必须冻结
+ *
+ * 旧实现里 `turnNotes` 先 `await longTermNote()`,**回来之后**才 detectTurnMode 并写
+ * `lastTurnMode`;同会话另一轮在这段 await 里跑完,就会改写"上一轮口径",让先到的那一轮
+ * 以**别人的状态**回答(prompt 注入与交付保真都可能错)。冻结决策后,入口之后不再重判。
+ *
+ * ## 权限口径(单一 authority)
+ *
+ * · `mode`:chat / task / knowledge。**只看 `currentRequest`**(引用/群背景不参与);
+ * · `structural`:只表示"这一轮交付要保真",**不再单独授予 task/knowledge**;
+ * · `knowledge.authorized`:knowledge 模式是否被授予(唯一权威=本决策,KB 命中与否、实例开关都不改它);
+ * · `knowledge.noteAllowed`:该实例是否允许追加"百科说明"那一段措辞
+ *   (对应 `QQBOT_MEMORY_KB_ENCY`;**只是措辞开关**,关掉不等于装傻/禁常识/禁角色 KB 事实);
+ * · `noteGates`/`outputPolicy`:下游只读这两份,不再自己判 mode。
+ *
+ * @param {object|null} message 触发这一轮的消息(可空:主动/反应轮)
+ * @param {object} [options]
+ * @param {string} [options.previous='chat'] 上一轮口径 —— **必须由入口按"同说话人+可信回复关系+
+ *   既有窗口"验过**;本函数不再读任何状态。
+ * @param {string} [options.conversation] 会话 key(只进 scope,供继承与日志核对)
+ * @param {string} [options.instance] 本实例身份(供"异实例不继承"核对)
+ * @param {object} [options.seriousPolicy] 情绪安全层的返回(`turnPolicyFor()`)
+ * @param {boolean} [options.allowKnowledgeNote=true] 该实例的知识"百科说明"授权
+ * @param {string|null} [options.groupBackground] 群背景快照(不参与判定)
+ * @param {boolean} [options.reflex=false] 反射/主动轮只禁继承；当前正文仍可判 task/knowledge
+ * @param {string|null} [options.reason] 覆盖 reason(反射轮/入口给的可读原因)
+ * @param {number} [options.now] 时间戳(只进决策,不用于判定)
+ * @returns {Readonly<object>}
+ */
+export function createTurnDecision(message = null, {
+  previous = 'chat',
+  conversation = null,
+  instance = 'bot',
+  seriousPolicy = {},
+  allowKnowledgeNote = true,
+  groupBackground = null,
+  reflex = false,
+  reason: forcedReason = null,
+  now = Date.now(),
+} = {}) {
+  const slots = splitTurnSlots(message, { groupBackground });
+  const inherited = TURN_MODES.includes(previous) ? previous : 'chat';
+  // 反射轮只禁继承：显式当前请求仍可判 task/knowledge，不把“固定”误解为强制 chat。
+  const effectivePrevious = reflex ? 'chat' : inherited;
+  const detected = detectTurnMode(slots.currentRequest, { previous: effectivePrevious });
+  const mode = detected.mode;
+  const basePolicy = outputPolicyFor(mode);
+  const structural = detected.structural === true;
+  const outputPolicy = Object.freeze({
+    ...basePolicy,
+    // 结构信号只把"保真交付"打开;口径本身仍是上面判出来的 mode。
+    preserveFormatting: basePolicy.preserveFormatting || structural,
+  });
+  const noteGates = Object.freeze(noteGatesFor(mode, seriousPolicy, { knowledgeNote: allowKnowledgeNote }));
+  const knowledge = Object.freeze({
+    authorized: mode === 'knowledge',
+    // 关掉它 = 不追加"百科说明"这段措辞;knowledge 授权、常识、角色 KB 事实**都不变**。
+    noteAllowed: mode === 'knowledge' && allowKnowledgeNote === true,
+  });
+  decisionCounter += 1;
+  return Object.freeze({
+    id: decisionCounter,
+    mode,
+    reason: typeof forcedReason === 'string' && forcedReason !== '' ? forcedReason : detected.reason,
+    structural,
+    followUp: detected.followUp === true,
+    reflex: reflex === true,
+    previous: effectivePrevious,
+    slots,
+    outputPolicy,
+    noteGates,
+    knowledge,
+    seriousNote: typeof seriousPolicy?.note === 'string' && seriousPolicy.note !== ''
+      ? seriousPolicy.note : null,
+    scope: Object.freeze({
+      conversation: conversation === null || conversation === undefined ? '' : String(conversation),
+      speaker: message?.senderId === undefined || message?.senderId === null ? '' : String(message.senderId),
+      instance: instance === undefined || instance === null ? 'bot' : String(instance),
+      triggerMessageId: message?.messageId === undefined || message?.messageId === null
+        ? null : String(message.messageId),
+    }),
+    createdAt: now,
+  });
 }
 
 /**
@@ -198,8 +378,10 @@ export function groupLinesForDelivery(text, maxChars) {
  * @param {string} mode
  * @param {{suppressMood?: boolean, suppressNudges?: boolean, note?: string|null}} seriousPolicy
  *   `turnPolicyFor()` 的返回(情绪安全那一层)
+ * @param {{knowledgeNote?: boolean}} [options] `knowledgeNote` = 该实例是否允许"百科说明"
+ *   (映射 `QQBOT_MEMORY_KB_ENCY`;**只关措辞,不关 knowledge 授权/常识/角色 KB 事实**)
  */
-export function noteGatesFor(mode, seriousPolicy = {}) {
+export function noteGatesFor(mode, seriousPolicy = {}, { knowledgeNote = true } = {}) {
   const out = outputPolicyFor(mode);
   return {
     includeMoodLength: out.allowMoodLength && seriousPolicy?.suppressMood !== true,
@@ -208,5 +390,7 @@ export function noteGatesFor(mode, seriousPolicy = {}) {
     // (「解释一下癌症筛查原理」是知识请求,不是丧亲场面)。
     includeSeriousComfort: Boolean(seriousPolicy?.note) && mode === 'chat',
     includeModeNote: mode !== 'chat',
+    // 百科说明只在 knowledge 授权成立**且**该实例允许时出现;它随 KB 命中块一起注入。
+    includeEncyclopediaNote: mode === 'knowledge' && knowledgeNote !== false,
   };
 }

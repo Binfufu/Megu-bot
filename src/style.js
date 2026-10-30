@@ -49,7 +49,7 @@ export const STYLE_NUDGES = MEGUMIN_STYLE_NUDGES;
  * 本项目扩展到图片共同上下文；不注入示范台词，避免 D22 的模板化。
  */
 export const DIRECT_RESPONSE_NOTES = Object.freeze([
-  '直接回应：先给回答、态度或自然接话，不先复述、转述或概括对方刚说的话，也不先总结群聊。',
+  '直接回应：先给回答、态度或自然接话，不先复述、转述或概括对方刚说的话，也不先总结群聊。括号里的动作不是固定开场，不要求先写动作再说话；有实际语境需要时仍可自然使用动作描写。',
   '日常看图接话时，把图片当共同上下文，直接回应其中的笑点、情绪或相关细节，不先介绍画面、罗列物体或重念图中文字。',
   '可以自然提及支撑回应的局部细节，但不要为了证明看懂了而补一段说明。',
   '用户明确要求描述、识别、读字、翻译、总结、复述、原文照念或引用，或确实需要消歧、核对关键参数时，按任务需要描述或引用；看不清的如实说，不猜。',
@@ -105,15 +105,22 @@ export function pickNudges(count = 1, recent = [], pool = STYLE_NUDGES) {
  */
 export function withStyleNudge(text, nudges) {
   if (!Array.isArray(nudges) || nudges.length === 0) return text;
-  return [
-    text,
-    '',
-    '（本次表达要求，照做但不要念出来：）',
-    // ⚠️ 2026-10-18(P1-A 连带修):自报家门的注入块(长期记忆 `[[bridge-inject recall]]` 等)
-    //    **必须从行首开始** —— 以前统一加 `· ` 前缀,标记就不在行首了,剥壳(D177)认不出,
-    //    于是 rawText/"原始提示词"里混进注入内容(探针当场抓到)。带标记的块独占行,其余照旧。
-    ...nudges.flatMap((nudge) => (hasInjectMarks(nudge) ? ['', nudge] : [`· ${nudge}`])),
-  ].join('\n');
+  const blocks = [];
+  let notes = [];
+  const flushNotes = () => {
+    if (!notes.length) return;
+    blocks.push(wrapInject('notes', [
+      '（本次表达要求，照做但不要念出来：）', ...notes,
+    ].join('\n')));
+    notes = [];
+  };
+  for (const nudge of nudges) {
+    // F1：只给裸要求补 notes 边界；已有 recall/kb 等仍为独立来源块，顺序不变。
+    if (hasInjectMarks(nudge)) { flushNotes(); blocks.push(nudge); }
+    else notes.push(`· ${nudge}`);
+  }
+  flushNotes();
+  return [text, '', ...blocks].join('\n');
 }
 
 /**

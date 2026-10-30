@@ -1,6 +1,6 @@
 {
   "name": "dsh-qqbot-bridge",
-  "version": "1.205.1",
+  "version": "1.206.0",
   "private": true,
   "type": "module",
   "description": "QQ bot bridge with a self-contained model engine, code-driven image fetching and an offline public test entry.",

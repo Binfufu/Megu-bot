@@ -27,6 +27,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
+import { listenLoopback } from './test-local-port.mjs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -143,7 +144,7 @@ async function startMock() {
       }));
     });
   });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await listenLoopback(server);
   const { port } = server.address();
   return {
     baseUrl: `http://127.0.0.1:${port}/v1`,

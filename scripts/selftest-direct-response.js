@@ -97,6 +97,9 @@ export function registerDirectResponseTests({ test, assert: a = assert }) {
     a.match(direct, /回答.*态度.*接话/);
     a.match(direct, /不先.*复述.*概括/);
     a.match(direct, /不先.*群聊/);
+    a.match(direct, /括号里的动作不是固定开场/);
+    a.match(direct, /不要求先写动作再说话/);
+    a.match(direct, /有实际语境需要时仍可自然使用动作描写/);
     a.match(image, /图片.*共同上下文/);
     a.match(image, /直接回应/);
     a.match(image, /不先.*画面.*罗列物体.*重念.*图.*文字/);
