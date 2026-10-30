@@ -45,6 +45,9 @@ import { PACK_PARAM_SPECS, validatePackParams } from '../src/pack-params.js';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const readIndex = () => fs.readFileSync(path.join(ROOT, 'src', 'index.js'), 'utf8');
 
+/** 构造 RegExp 前的**完整**转义：先转义反斜杠，再转义元字符（CodeQL: incomplete string escaping）。 */
+const escapeRegExp = (text) => String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 /** 切片:从签名开始,到**下一个声明的已知边界**为止(边界显式写出,不猜)。 */
 function sliceFunction(source, signature, endMarker) {
   const begin = source.indexOf(signature);
@@ -748,7 +751,7 @@ async function testQqEntryConsumesOneDecision() {
   assert.equal(harness.decisions.length - before, 1, '一轮只许构造一次决策');
   const prompt = promptOf(harness.runnerCalls.at(-1));
   assert.match(prompt, /USER-FP:qq-task/, 'USER 控制指纹要到达模型');
-  assert.match(prompt, new RegExp(FACT.replace(/[-:]/g, '\\$&')), 'FACT 控制指纹要到达模型');
+  assert.match(prompt, new RegExp(escapeRegExp(FACT)), 'FACT 控制指纹要到达模型');
   assert.match(prompt, /本轮口径/, 'task 决策要有口径说明');
   const payload = sentText(harness);
   assert.match(payload, /PERSONA-FP:qq-task/,
@@ -1054,7 +1057,7 @@ async function testNegativeControlDecisionNotConsumed() {
   const prompt = promptOf(harness.runnerCalls.at(-1));
   // 对照指纹仍在(证明不是"整条丢了")；但消费判据必须红:决策没被消费,继承的 task 丢了。
   assert.match(prompt, /USER-FP:neg-a/);
-  assert.match(prompt, new RegExp(FACT.replace(/[-:]/g, '\\$&')));
+  assert.match(prompt, new RegExp(escapeRegExp(FACT)));
   assert.throws(
     () => assert.match(prompt, /本轮口径/),
     /本轮口径/,
