@@ -91,7 +91,19 @@ export function composeMoodBodyContent(
   { worldSections = null, packSections = packsAsMoodBodyContent(PACKS) } = {},
 ) {
   if (!legacyContent) {
-    return worldSections ? { schemaVersion: 1, ...worldSections } : null;
+    // 官方安装已迁移到世界包 + 角色包：旧快照不再存在时，世界段来自世界包、
+    // 角色段来自内容包；两者都没有才回退 null（公开最小树）。
+    if (!worldSections && !packSections) return null;
+    const content = { schemaVersion: 1 };
+    if (packSections) {
+      content.mood = { ...packSections.mood };
+      content.body = { ...packSections.body };
+    }
+    if (worldSections) {
+      content.config = worldSections.config;
+      content.ruleLabels = worldSections.ruleLabels;
+    }
+    return content;
   }
   if (!packSections && !worldSections) return legacyContent;
   const content = { ...legacyContent };

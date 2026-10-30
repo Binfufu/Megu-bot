@@ -14,12 +14,16 @@ import { fileURLToPath } from 'node:url';
 import {
   CONTRACT_ROWS,
   checkContract,
+  checkPublicContract,
   countOccurrences,
+  publicContractRows,
   renderContractPage,
+  renderPublicContractPage,
 } from '../src/boundary-contract.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PAGE = path.join(ROOT, 'docs', '16-边界契约.md');
+const PUBLIC_PAGE = path.join(ROOT, 'docs', '16-边界契约-公开版.md');
 const io = { readFile: (relative) => fs.readFileSync(path.join(ROOT, relative), 'utf8') };
 
 export function registerContractTests({ test, assert }) {
@@ -56,5 +60,44 @@ export function registerContractTests({ test, assert }) {
     }
     // 而且四个"边界"里最容易吵的两条要**明说方向相反**(她的身体共享 / 钓鱼按人)
     assert.ok(page.includes('一只 bot 一份,不按玩家分') && page.includes('按人'), '共享 vs 按人 要写清');
+  });
+}
+
+/**
+ * **公开集视图**的判据(2026-10-30)。注册进公开自测(`selftest-public.js`),所以**公开树里也能跑**:
+ * 只核公开集里真的存在的锚,并证明公开页不漏私有细节、不出现内部决策号。
+ *
+ * ⚠️ 它与上面那条私有判据**互不替代**:私有页仍要全量同步(那条不动),公开页只核公开集里能核的。
+ */
+export function registerContractPublicTests({ test, assert }) {
+  test('边界契约公开视图:只核公开集里的锚、页面同步、无内部决策号', () => {
+    const publicRows = publicContractRows(CONTRACT_ROWS);
+    const excluded = CONTRACT_ROWS.filter((row) => row.publicView === false);
+
+    // ① 每一行要么进公开视图,要么在「不在公开集」里被点名 —— 不许悄悄少
+    assert.equal(publicRows.length + excluded.length, CONTRACT_ROWS.length, '公开视图要么列、要么点名');
+    assert.ok(excluded.length >= 1, '依赖面板模块锚点的行必须被公开视图排除');
+
+    // ② 公开行的锚在公开树里都能核(缺文件 → 判据真红,不是"跳过")
+    const checked = checkPublicContract(CONTRACT_ROWS, io);
+    assert.ok(checked.ok, `公开视图锚点对不上:\n${checked.problems.join('\n')}`);
+
+    // ③ 提交的公开页 == 渲染结果(手改生成页 → 红)
+    const page = fs.readFileSync(PUBLIC_PAGE, 'utf8');
+    assert.equal(page, renderPublicContractPage(CONTRACT_ROWS), 'docs\\16-边界契约-公开版.md 与数据不同步:请跑 `node scripts\\contract.js --public --write`');
+
+    // ④ 公开页不列内部决策号;私有页仍保留(证明中性化只在渲染层,没动数据)
+    assert.doesNotMatch(page, /\bD\d{1,4}\b/, '公开契约页不得出现内部决策号 D##');
+    assert.match(renderContractPage(CONTRACT_ROWS), /\bD\d{1,4}\b/, '私有全量页仍保留决策号(中性化只作用于公开视图)');
+
+    // ⑤ 公开页不含网页面板模块的细节;但要把被排除的边界**点名**,不藏
+    for (const needle of ['panel.js', 'panel-actions.js', 'panel-view.js', 'requireAccountForActions', 'PANEL_ACTION_KINDS', 'home:shared']) {
+      assert.ok(!page.includes(needle), `公开契约页不该出现私有模块细节:${needle}`);
+    }
+    assert.ok(page.includes('不在公开集'), '公开页要说明哪些边界不在公开集');
+    for (const row of excluded) assert.ok(page.includes(row.boundary), `被排除的边界要明示:${row.boundary}`);
+
+    // ⑥ 少核的那条侧锚不冒充已核:公开页要写明"面板侧不核"
+    assert.ok(page.includes('面板侧不核'), 'quest 行的面板侧锚要写明不核,不许假装核过');
   });
 }

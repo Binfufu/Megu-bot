@@ -1,11 +1,39 @@
 /** 技能台词的选择与分句；本地展示内容可选，缺省采用原创通用示例。 */
 import { GAMEPLAY_CONTENT } from './local-gameplay-content.js';
+import { packsAsSkillTriggerWords } from './content-pack.js';
 
 export const EXPLOSION_CHANTS = GAMEPLAY_CONTENT.explosion.chants;
 export const EXPLOSION_FINISHERS = GAMEPLAY_CONTENT.explosion.finishers;
 
-/** 触发词只负责识别；实际场合和权限由调用方决定。 */
-const TRIGGER = /(爆裂魔法|爆裂|explosion|エクスプロージョン|エクスプロォージョン|来一发|放一个|咏唱|念咒|咒文)/i;
+/**
+ * 公开集（无内容包）的默认触发词：只放**中性通用**说法，不含任何作品/角色专属词。
+ * 角色专属触发词属 C 区内容，由角色包可选 `skill.triggerWords` 提供（格式见 docs/39）。
+ */
+export const NEUTRAL_TRIGGER_WORDS = Object.freeze(['来一发', '放一个', '咏唱', '念咒', '咒文']);
+
+/**
+ * 把一个字符串当**正则字面量**安全嵌入（Node 22 兼容；思路同
+ * `local-infra-content.js` 的 `escapeRegExpLiteral`）。包内容只作字面量，不得改变语法。
+ */
+function escapeRegExpLiteral(value) {
+  return String(value ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * 实际生效的触发词 = 中性默认词 + 所有已加载角色包 `skill.triggerWords` 的字面并集。
+ * 不传参/传 undefined 时读取模块级已加载包；显式传 null（或空聚合）只剩中性默认词。
+ */
+export function explosionTriggerWords(packs) {
+  return [...new Set([...NEUTRAL_TRIGGER_WORDS, ...packsAsSkillTriggerWords(packs)])];
+}
+
+/** 触发判定正则；`i` 不区分大小写（含英文大小写）语义与改造前一致。 */
+const TRIGGER = new RegExp(`(${explosionTriggerWords().map(escapeRegExpLiteral).join('|')})`, 'i');
+
+/** 生效触发正则的源码文本（判据用：公开集不得含作品专属词）。 */
+export function explosionTriggerSource() {
+  return TRIGGER.source;
+}
 
 export function isExplosionRequest(text) {
   const source = String(text ?? '');

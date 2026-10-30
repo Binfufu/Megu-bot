@@ -21,7 +21,10 @@ const GOLDEN = {
   condition: '79401ddfbce419eeeadd443b2dd394c6f167d929fd25a2673ab14fd6943dd330',
   selfcare: '0b598d12c38de372a2a90d8e5f2346f4bbd8da990e9c5ff5fd3870455d3e6cd9',
   company: 'f2c90cde7403075caf6c3fba348a5dd046ef933fafb7cfc294d1dbc89d97e2b0',
-  explosion: 'a2b62f7e5f05a12979b9eda6a2cda8b746b806dc0f167f6deb853adec846bb75',
+  // 2026-10-30：explosion 指纹随「技能触发词外提」更新——模块新增非函数导出
+  // NEUTRAL_TRIGGER_WORDS（公开中性默认词表），属于有意的序列化形状变化；玩法数值/行为
+  // 未变，仍由下方「无 C 数值投影与有 C 一致」对照钉住。
+  explosion: '8d34e40a71e378cccef4d95437e5e31b2b54aa46bf93342c2aebc47b564fa78c',
   narration: '5398510e83b4b083fac8ed8f9e888d1c77ea70812bdf3e8684edee9e1bc89ec5',
   narrationBoundary: '8ae29a8e2dd050329f478e8d4bce01d41b0c019dd379aaabd46853df46950cd5',
 }; // 2026-10-29：以上在任何玩法源码修改前实跑 --freeze 取得。
@@ -222,7 +225,7 @@ function rejection(text, message = 'local gameplay content: invalid schema') {
   assert.ok(!result.stderr.includes(badFile), '不得泄露内容文件路径');
 }
 try {
-  copyTree('src'); copyTree('content/local');
+  copyTree('src'); copyTree('content/local'); copyTree('content/worlds'); copyTree('content/packs');
   copyTree('src', publicFixture, true);
   for (const dir of [fixture, publicFixture]) fs.writeFileSync(path.join(dir, 'package.json'), '{"type":"module"}');
   const before = run();

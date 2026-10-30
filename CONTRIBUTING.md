@@ -33,7 +33,7 @@ node scripts/selftest-public.js
 
 #### 公开 CI 覆盖清单（与入口同步，增删套件必须同一 PR 改这里）
 
-`node scripts/selftest-public.js` 当前注册 10 个套件、389 例：
+`node scripts/selftest-public.js` 当前注册 12 个套件、401 例：
 
 | 套件 | 例数 | 覆盖什么 | 明确不覆盖 |
 | --- | --- | --- | --- |
@@ -41,16 +41,18 @@ node scripts/selftest-public.js
 | meitu-lines | 10 | 默认句库/覆盖合并/注入读取 | 真实句库文件 |
 | engine-tools | 8 | own 引擎工具循环：两步闭环/预算/坏参数/快照 | 真实模型调用 |
 | meitu-service | 52 | 搬图服务层：白名单/冷却/降档/结算/失败回话 | 真实图源、真实 QQ 上传 |
-| content-pack | 16 | 内容包加载/校验：合法包原样、缺目录回退 null、坏 JSON/坏 schema/未知 id 抛错、可选参数段白名单 | 真实 `content/` 内容、官方内容包、安装/升级生命周期 |
+| content-pack | 26 | 内容包加载/校验：合法包原样、缺目录回退 null、坏 JSON/坏 schema/未知 id 抛错、可选参数/skill/order 段 | 真实 `content/` 内容、官方内容包、安装/升级生命周期 |
 | world-pack | 18 | 世界包加载/校验：目录发现、严格 schema、坏 JSON/坏 schema/未知版本/未知 id/多 default 抛错、激活规则（`QQBOT_WORLD`/唯一 `default`）、三段聚合、注入面取数、可选参数段白名单、公开示例包校验 | 真实 `content/` 内容、官方世界包、安装/升级/卸载生命周期、真实 QQ/模型 |
 | play | 26 | 玩法内核/模拟器：钓鱼与委托三段闭环的纯函数状态机 | 真实 QQ 群、真实模型、内容文案细节 |
 | params | 158 | 类型化注册表：各类型/边界/覆盖层/来源链/未知项/危险对象/脱敏错误 | 真实环境变量、真实配置文件 |
 | config-params | 16 | 主配置目录与既有默认/旧 env/空串/派生路径/文件→env 覆盖 | 真实 `.env`、真实实例数据 |
 | model-params | 35 | 模型槽五字段来源链/非法 env 拒绝/热覆盖保旧/秘密边界 | 真实 key、DPAPI、真实模型调用 |
-| **合计** | **389** | — | 面板/酒馆/后台/私库全量/真实网络/真实 QQ 发送 |
+| contract-public | 1 | 边界契约公开视图：只核公开集存在的锚点、页面与渲染同步、公开页无内部决策号 | 面板/账号等不在公开集的边界锚点 |
+| command-doc-public | 1 | 命令表公开视图：渲染层中性化内部决策号、生成页与数据同步 | 运行时 `/help` 文案、真实 QQ 链路 |
+| **合计** | **401** | — | 面板/酒馆/后台/私库全量/真实网络/真实 QQ 发送 |
 
-公开 CI 的四个组合（Ubuntu/Windows × Node 22/24）只证明这 389 例在这四个环境绿，不证明未列出的模块、真实图源或 QQ 链路可用；也不等于私库全量回归。
-content-pack 套件只用合成包验证加载器契约，不读取真实 `content/` 目录，也不证明任何官方内容包存在或可安装。world-pack 套件只用合成夹具与公开中性示例包验证加载器契约，不证明官方世界包存在、可安装或已迁移。params/config-params/model-params 三个套件只用合成环境变量与临时目录，不读取真实 `.env`、密钥或实例数据库。
+公开 CI 的四个组合（Ubuntu/Windows × Node 22/24）只证明这 401 例在这四个环境绿，不证明未列出的模块、真实图源或 QQ 链路可用；也不等于私库全量回归。
+content-pack 套件只用合成包验证加载器契约，不读取真实 `content/` 目录，也不证明任何官方内容包存在或可安装。world-pack 套件只用合成夹具与公开中性示例包验证加载器契约，不证明官方世界包存在、可安装或已迁移。params/config-params/model-params 三个套件只用合成环境变量与临时目录，不读取真实 `.env`、密钥或实例数据库。contract-public / command-doc-public 只证明公开视图可渲染、可核对、无内部决策号，不证明私有全量页或运行时文案。
 
 ### 完整回归（另行授权的维护环境）
 

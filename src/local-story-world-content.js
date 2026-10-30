@@ -121,17 +121,29 @@ function mergeRoleSections(legacyContent, sections) {
  * @param {object|null} [worldSections] 世界包世界段；null = 世界包未激活
  * @param {object|null} [roleSections] 内容包角色段；null = 没有内容包
  */
+/** 旧快照的聚合键序（structural：保证迁移到世界包后导出形状与旧快照同序）。 */
+function orderAggregate(content) {
+  const out = {};
+  for (const key of fields) if (Object.hasOwn(content, key)) out[key] = content[key];
+  for (const key of Object.keys(content)) if (!Object.hasOwn(out, key)) out[key] = content[key];
+  return out;
+}
+
 export function composeStoryWorldContent(
   legacyContent,
   worldSections = null,
   roleSections = packsAsStoryRoleSections(PACKS),
 ) {
-  let content = legacyContent ?? null;
+  if (!legacyContent) {
+    // 官方安装已迁移：没有旧快照时，世界段来自世界包、角色段来自内容包。
+    if (!worldSections) return null;
+    return orderAggregate(mergeRoleSections({ schemaVersion: 1, ...worldSections }, roleSections));
+  }
+  let content = legacyContent;
   if (worldSections) {
-    content = { ...(content ?? {}) };
+    content = { ...content };
     for (const [key, value] of Object.entries(worldSections)) content[key] = value;
   }
-  if (!content) return null;
   return mergeRoleSections(content, roleSections);
 }
 

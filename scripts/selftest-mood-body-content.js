@@ -12,6 +12,11 @@ const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const SELF = fileURLToPath(import.meta.url);
 const CONTENT_URL = new URL('../content/local/mood-body.json', import.meta.url);
 const TURN_CONTENT_URL = new URL('../content/local/turn-lines.json', import.meta.url);
+// 官方世界包迁移后：世界级 config/ruleLabels 来自 content/worlds/official/world.json，
+// mood/body 角色段来自 content/packs；旧 content/local 快照已删除。
+const OFFICIAL_WORLD_URL = new URL('../content/worlds/official/world.json', import.meta.url);
+const WORLDS_DIR_URL = new URL('../content/worlds/', import.meta.url);
+const PACKS_DIR_URL = new URL('../content/packs/', import.meta.url);
 const readCounts = { moodBody: 0, turnLines: 0 };
 const savedEnv = { ...process.env };
 for (const key of Object.keys(process.env)) if (/^(QQBOT_|QQ_)/.test(key)) delete process.env[key];
@@ -19,22 +24,43 @@ for (const key of Object.keys(process.env)) if (/^(QQBOT_|QQ_)/.test(key)) delet
 process.env.QQBOT_ENV_FILE = fileURLToPath(new URL('../content/local/__mood_body_test_missing__.env', import.meta.url));
 process.env.QQ_APP_ID = 'fixture'; process.env.QQ_CLIENT_SECRET = 'fixture';
 process.env.QQBOT_LLM_KEY = 'fixture'; process.env.QQBOT_ENGINE = 'own';
+// 负对照/neutral 用注入式 fs 读取，绝不改/复制源码与 content 文件。
+// neutral 模拟 **public 树形状**：无 content/local 旧快照、无 content/packs，且 content/worlds
+// 里不许有 official（example default:false 可以留）。
 if (neutral || arg('--fault')) {
   const read = fs.readFileSync;
+  const readdir = fs.readdirSync;
+  if (neutral) {
+    fs.readdirSync = function (dir, ...options) {
+      if (String(dir) === String(PACKS_DIR_URL)) {
+        const error = new Error('missing fixture'); error.code = 'ENOENT'; throw error;
+      }
+      if (String(dir) === String(WORLDS_DIR_URL)) {
+        const entries = readdir.call(this, dir, ...options);
+        return entries.filter((entry) => (typeof entry === 'string' ? entry : entry.name) !== 'official');
+      }
+      return readdir.call(this, dir, ...options);
+    };
+  }
   fs.readFileSync = function (file, ...options) {
     if (neutral && String(file) === String(TURN_CONTENT_URL)) {
       readCounts.turnLines += 1;
       const e = new Error('missing fixture'); e.code = 'ENOENT'; throw e;
     }
     if (String(file) === String(CONTENT_URL)) {
+      // 旧快照按迁移设计已删除：只用于确认读取器不再依赖它（实读一次必 ENOENT）。
       readCounts.moodBody += 1;
+      const e = new Error('missing fixture'); e.code = 'ENOENT'; throw e;
+    }
+    if (String(file) === String(OFFICIAL_WORLD_URL)) {
       if (neutral) { const e = new Error('missing fixture'); e.code = 'ENOENT'; throw e; }
       if (arg('--fault') === 'json') return '{ private payload';
       const value = JSON.parse(read.call(this, file, ...options));
-      if (arg('--fault') === 'section') delete value.body;
-      else if (arg('--fault') === 'order') value.mood.megumin.interjections.chuni.reverse();
-      else if (arg('--fault') === 'label') value.ruleLabels.biological += 'changed';
-      else throw new Error('unknown boundary fault');
+      if (arg('--fault') === 'section') delete value.moodWorld.ruleLabels;
+      else if (arg('--fault') === 'order') value.moodWorld.config.groupKeywords.reverse();
+      else if (arg('--fault') === 'label') value.moodWorld.ruleLabels.biological += 'changed';
+      else if (arg('--fault')) throw new Error('unknown boundary fault');
+      else return read.call(this, file, ...options);
       return JSON.stringify(value);
     }
     return read.call(this, file, ...options);

@@ -27,6 +27,29 @@ const keysAre = (value, required, optional = []) => isObject(value)
   && Object.keys(value).every((key) => required.includes(key) || optional.includes(key));
 const uniqueTexts = (value) => isTexts(value) && new Set(value).size === value.length;
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/;
+
+/**
+ * 聚合展示顺序：可选顶层 `order`（非负安全整数，缺省视为最大）优先，其次包 id 升序。
+ * `PACKS.ids` 本身保持目录发现序；只有聚合导出用这个顺序（保住旧展示顺序）。
+ */
+const packOrder = (pack) => Object.hasOwn(pack, 'order') ? pack.order : Number.MAX_SAFE_INTEGER;
+function orderedPackIds(packs) {
+  return [...packs.ids].sort((left, right) => {
+    const delta = packOrder(packs.packs[left]) - packOrder(packs.packs[right]);
+    return delta !== 0 ? delta : (left < right ? -1 : left > right ? 1 : 0);
+  });
+}
+
+/**
+ * 可选 `skill` 段：只声明**字面**技能触发词，不提供正则、阈值或权限。
+ * 形状固定为 `{ triggerWords: [非空字符串…] }`：非空、互不重复、不含控制字符。
+ */
+function validSkill(skill) {
+  return exactKeys(skill, ['triggerWords'])
+    && uniqueTexts(skill.triggerWords)
+    && skill.triggerWords.every((word) => !CONTROL_CHARS.test(word));
+}
 
 function validEvent(event) {
   return exactKeys(event, ['id', 'setup', 'branches']) && isText(event.id) && isText(event.setup)
@@ -90,12 +113,17 @@ function validCharacterDays(days) {
     && Number.isInteger(row.day) && row.day >= 1 && row.day <= 31 && isText(row.label) && isText(row.source));
 }
 
-/** 校验一个已解析的包对象；返回错误码字符串或 null。 */
+/**
+ * 校验一个已解析的包对象；返回错误码字符串或 null。
+ * 可选段：`params`（白名单表现参数）、`skill`（字面技能触发词）、`order`（聚合展示顺序）。
+ */
 export function validatePack(value) {
-  if (!keysAre(value, ['schemaVersion', 'id', 'role', 'themes', 'mood', 'body', 'style', 'story', 'companion', 'characterDays'], ['params'])) return 'schema';
+  if (!keysAre(value, ['schemaVersion', 'id', 'role', 'themes', 'mood', 'body', 'style', 'story', 'companion', 'characterDays'], ['params', 'skill', 'order'])) return 'schema';
   if (Object.hasOwn(value, 'params')) {
     try { validatePackParams(value.params); } catch { return 'params'; }
   }
+  if (Object.hasOwn(value, 'skill') && !validSkill(value.skill)) return 'skill';
+  if (Object.hasOwn(value, 'order') && !(Number.isSafeInteger(value.order) && value.order >= 0)) return 'order';
   if (value.schemaVersion !== 1) return 'schema-version';
   if (!isText(value.id) || !/^[a-z0-9][a-z0-9_-]*$/.test(value.id)) return 'id';
   if (!exactKeys(value.role, ['label']) || !isText(value.role.label)) return 'role';
@@ -189,7 +217,7 @@ export function packsAsMoodBodyContent(packs = PACKS) {
   if (!packs) return null;
   const mood = {};
   const body = {};
-  for (const id of packs.ids) {
+  for (const id of orderedPackIds(packs)) {
     const pack = packs.packs[id];
     mood[pack.themes.mood] ??= {
       label: pack.mood.label,
@@ -208,11 +236,25 @@ export function packsAsMoodBodyContent(packs = PACKS) {
 export function packsAsStyleNudges(packs = PACKS) {
   if (!packs) return null;
   const styleNudges = {};
-  for (const id of packs.ids) {
+  for (const id of orderedPackIds(packs)) {
     const pack = packs.packs[id];
     styleNudges[pack.themes.style] ??= pack.style.nudges;
   }
   return { styleNudges };
+}
+
+/**
+ * 包 → 技能触发词字面并集（按聚合展示顺序，重复词只保留一次）。
+ * 没有包（公开集）→ 空数组；没有 `skill` 段的包不贡献触发词。
+ */
+export function packsAsSkillTriggerWords(packs = PACKS) {
+  if (!packs) return [];
+  const words = [];
+  for (const id of orderedPackIds(packs)) {
+    const skill = packs.packs[id].skill;
+    if (skill) words.push(...skill.triggerWords);
+  }
+  return [...new Set(words)];
 }
 
 /**
@@ -225,7 +267,7 @@ export function packsAsStoryRoleSections(packs = PACKS) {
   const companionsById = {};
   const characterDays = {};
   const phrasesByRole = {};
-  for (const id of packs.ids) {
+  for (const id of orderedPackIds(packs)) {
     const pack = packs.packs[id];
     storyPacks[id] = pack.story.pack;
     characterDays[id] = pack.characterDays;

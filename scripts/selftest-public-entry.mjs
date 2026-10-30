@@ -119,6 +119,8 @@ try {
       'src/index.js', 'src/config.js', 'src/llm-settings.js',
       // 阶段 2：本地内容读取器现在依赖内容包加载器（无 content/packs 目录时走旧回退）
       'src/content-pack.js',
+      // 挂账A：pack suite 也 import 触发词判定（公开集为中性默认词表，无 content/local 时走中性回退）
+      'src/explosion.js', 'src/local-gameplay-content.js',
       // 阶段 3：参数系统三个套件及其闭包（纯注册表 / 主配置接线 / 模型槽）
       'scripts/selftest-params.js', 'scripts/selftest-config-params.js', 'scripts/selftest-model-params.js',
       'src/params.js', 'src/pack-params.js', 'src/config-params.js', 'src/model-slots.js',
@@ -126,13 +128,20 @@ try {
       'src/world-pack.js', 'scripts/selftest-world-pack.js', 'content/worlds/example/world.json',
       'src/burst.js', 'src/meitu-gallery.js', 'src/meitu-search.js', 'src/mood.js',
       'src/morning.js', 'src/social.js', 'src/style.js', 'src/warmup.js',
+      // 挂账B：边界契约公开视图 + 命令表公开视图两个公开套件及其闭包
+      'scripts/selftest-contract.js', 'scripts/command-index.js',
+      'src/boundary-contract.js', 'src/anchored-page.js', 'src/public-doc-text.js',
+      'src/commands.js', 'src/local-story-world-content.js',
+      // 上面两个套件会 fs 读这些源码当锚点 / 生成页(只读文本,不在夹具里 import)
+      'src/memory-archive.js', 'src/player-world.js', 'src/quest-take.js',
+      'docs/16-边界契约-公开版.md', 'docs/命令与关键字.md',
     ]) copy(relative);
     assert.equal(fs.existsSync(path.join(temp, 'resources')), false);
     assert.equal(fs.existsSync(path.join(temp, 'data')), false);
     const result = run(['--public']);
     assert.equal(result.status, 0, result.stdout + result.stderr);
     assert.match(result.stdout, /PUBLIC SUBSET ONLY/);
-    assert.match(result.stdout, /10 suites，\d+ registered cases/);
+    assert.match(result.stdout, /12 suites，\d+ registered cases/);
     assert.match(result.stdout, /\d+ passed, 0 failed/);
   });
   test('公开 --out 以仓库根解析相对路径，skip 单独计数不冒充 passed', () => {
@@ -145,7 +154,7 @@ try {
     assert.ok(Number(summary[3]) >= 50, `skip 要有单独计数(实际 ${summary[3]})`);
     const registered = result.stdout.match(/公开覆盖：(\d+) suites，(\d+) registered cases/);
     assert.ok(registered, result.stdout);
-    assert.equal(Number(registered[1]), 10, '公开套件数必须与登记一致');
+    assert.equal(Number(registered[1]), 12, '公开套件数必须与登记一致');
     assert.equal(Number(summary[1]) + Number(summary[3]), Number(registered[2]), 'passed + skipped 必须等于注册总数(skip 不能冒充 passed)');
     const output = fs.readFileSync(path.join(temp, 'entry-output.log'), 'utf8');
     assert.match(output, /PUBLIC SUBSET ONLY/);

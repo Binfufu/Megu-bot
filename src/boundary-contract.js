@@ -20,6 +20,7 @@
  * ⚠️ 1.106.7(D179):"锚点校验 + 渲染表格"的实现抽到 `src\anchored-page.js`,本文件只留自己的行与渲染。
  */
 import { checkAnchors, countOccurrences, describeAnchor, renderTable } from './anchored-page.js';
+import { neutralizeDecisionRefs } from './public-doc-text.js';
 
 /**
  * 契约的每一行。
@@ -32,6 +33,13 @@ import { checkAnchors, countOccurrences, describeAnchor, renderTable } from './a
  * @property {string} how         **怎么交回**(落成什么)
  * @property {string} [note]      ⚠️ 最容易搞错的那一句
  * @property {Array<{file: string, must?: string[], match?: string[], flags?: string, count?: number}>} anchors
+ * @property {boolean} [publicView]  `false` = 依赖网页面板模块、公开集里没有锚点可核,公开视图**不列**这一行。
+ *                                  (2026-10-30 发布公开视图时调查:12 行里有 3 行的锚点落在 noPublish 面板模块。)
+ * @property {Array<{file: string, must?: string[], match?: string[], flags?: string, count?: number}>} [publicAnchors]
+ *                                  公开视图只核这几条(缺省用 `anchors`)。用于"一行里有一条锚属于私有模块"的情况,
+ *                                  ⚠️ 只**少核**,不**伪造**——少核的那一条要在公开页里写出来。
+ * @property {{owner?: string, trigger?: string, how?: string, note?: string}} [publicText]
+ *                                  公开视图对这行文案的替换(去掉网页能力等公开集没有的内容)。
  */
 export const CONTRACT_ROWS = Object.freeze([
   {
@@ -93,6 +101,7 @@ export const CONTRACT_ROWS = Object.freeze([
   },
   {
     id: 'home',
+    publicView: false, // 锚点在 noPublish 的 src\panel-actions.js:公开树里没这条锚可核
     boundary: '家园(家具 / 收进去的东西)',
     owner: '**共享**:`home:shared` —— 一个大家一起互动的家,不是每人一个',
     trigger: '`home.put` / `home.take` 两种动作',
@@ -113,9 +122,14 @@ export const CONTRACT_ROWS = Object.freeze([
       { file: 'src/quest-take.js', must: ["export const QUEST_BOARD_KEY_PREFIX = 'quest_board:';"] },
       { file: 'src/panel-actions.js', must: ['const QUEST_RUN_RE = /^quest:(quest_board:'] },
     ],
+    // 公开视图只核 QQ 侧那条;面板那条锚在 noPublish 模块里,不核也不冒充已核。
+    publicAnchors: [
+      { file: 'src/quest-take.js', must: ["export const QUEST_BOARD_KEY_PREFIX = 'quest_board:';"] },
+    ],
   },
   {
     id: 'accounts',
+    publicView: false, // 锚点在 noPublish 的 src\panel.js / src\panel-actions.js
     boundary: '网页世界的账号与互动闸门',
     owner: '`player` 表 + 邀请码(`scripts\\account.js invite-new`);闸门在 `src\\panel.js`',
     trigger: '注册(要邀请码)/ 登录 / 每次带非零 `nonce` 的写动作',
@@ -137,6 +151,10 @@ export const CONTRACT_ROWS = Object.freeze([
       { file: 'src/index.js', must: ['function conversationKeyFor(message)'] },
       { file: 'src/memory-archive.js', must: ['qqbot-group-<openid> / qqbot-c2c-<openid>'] },
     ],
+    // 公开集没有网页:网页会话键那半句不在公开视图里出现。
+    publicText: {
+      owner: '`conversationKeyFor(message)`(`src\\index.js`)—— `qqbot-c2c-<openid>` / `qqbot-group-<群id>`',
+    },
   },
   {
     id: 'restart',
@@ -160,9 +178,14 @@ export const CONTRACT_ROWS = Object.freeze([
       { file: 'src/index.js', must: ['const MAX_PASSIVE_SEQ = 5;'] },
       { file: 'src/mood.js', must: ['export function splitSpokenLines', 'CHAT_TRAILING_PUNCT'] },
     ],
+    // 公开集没有网页:分条规划的"同一份"里去掉网页那半句。
+    publicText: {
+      how: '`planSpokenLines()` 统一分条(答话/合并/早安/自发同一份),`sendSpokenLines()` 每段一条并**接续 `msg_seq`**;普通发言超量的段**并进最后一段**(不截断、不转主动配额),只有显式启用的特殊分段动作超限才走主动配额(20/分钟、1000/天)',
+    },
   },
   {
     id: 'panel-actions',
+    publicView: false, // 锚点在 noPublish 的 src\panel-actions.js / src\panel-view.js
     boundary: '面板能做什么(动作词表)',
     owner: '**真相在 `src\\panel-actions.js`**(`PANEL_ACTION_KINDS`);`src\\panel-view.js` 只是"前端投影"',
     trigger: '页面上按下一个按钮(`POST /api/actions`)',
@@ -179,6 +202,30 @@ export const CONTRACT_ROWS = Object.freeze([
 export const REQUIRED_FIELDS = Object.freeze(['id', 'boundary', 'owner', 'trigger', 'how']);
 
 /**
+ * 公开集里**能真的核对**的契约行(2026-10-30)。
+ *
+ * 调查结论:12 行里有 3 行(`home` / `accounts` / `panel-actions`)的锚点在 noPublish 的网页/面板模块,
+ * 公开树里没有那些文件 —— 它们整行不进公开视图;`quest` 行只有一条侧锚落在面板模块,用 `publicAnchors` 少核那一条。
+ *
+ * @param {readonly ContractRow[]} [rows]
+ * @returns {readonly ContractRow[]}
+ */
+export function publicContractRows(rows = CONTRACT_ROWS) {
+  return rows.filter((row) => row.publicView !== false);
+}
+
+/** 公开视图里每行的锚:有 `publicAnchors` 就用它(少核的那几条不许假装核过)。 */
+function anchorsForPublic(row) {
+  return row.publicAnchors ?? row.anchors ?? [];
+}
+
+/** 公开视图的文案:原字段 + 这行的 `publicText` 替换,最后统一去掉内部决策号。 */
+function publicField(row, field) {
+  const override = row.publicText?.[field];
+  return neutralizeDecisionRefs(override ?? row[field] ?? '');
+}
+
+/**
  * 把契约渲染成**那一页**(markdown,确定性输出 —— 不含时间戳,否则每次生成都不一样)。
  *
  * @param {readonly ContractRow[]} [rows]
@@ -193,6 +240,7 @@ export function renderContractPage(rows = CONTRACT_ROWS) {
   lines.push('>');
   lines.push('> **用途**：说明共享与隔离边界、状态权威和交回机制；用真实源码锚点核对，不把模型叙述当状态证据。');
   lines.push('> 本页保留完整工程契约，包括网页相关行；网页不属于节点 A 公开能力，公开裁剪树缺少相关模块时不能声称完整锚检查通过。');
+  lines.push('> 公开集可读的裁剪视图见 `docs\\16-边界契约-公开版.md`(`node scripts\\contract.js --public --write`),只列公开集里能真的核的边界。');
   lines.push('');
   lines.push(...renderTable(
     ['边界', '谁拥有(权威)', '交回触发', '怎么交回'],
@@ -216,6 +264,66 @@ export function renderContractPage(rows = CONTRACT_ROWS) {
 }
 
 /**
+ * 把契约渲染成**公开集视图**(2026-10-30)。
+ *
+ * 与私有全量页同一个数据源(`CONTRACT_ROWS`),区别只有三处:
+ * ① 依赖网页/面板模块锚点的行整行不列(在「公开视图口径」里点名,不藏);
+ * ② `quest` 这类"一条侧锚在私有模块"的行只核公开侧,并写明少核了哪半;
+ * ③ 文案去掉内部决策号与公开集没有的网页能力(`publicText` + `neutralizeDecisionRefs`)。
+ *
+ * ⚠️ 公开树里跑 `node scripts\\contract.js --public --check` 就是按这个口径核;不核的行不冒充已核。
+ *
+ * @param {readonly ContractRow[]} [rows]
+ * @returns {string}
+ */
+export function renderPublicContractPage(rows = CONTRACT_ROWS) {
+  const visible = publicContractRows(rows);
+  const excluded = rows.filter((row) => row.publicView === false);
+  const trimmed = visible.filter((row) => row.publicAnchors);
+  const lines = [];
+  lines.push('# 16 · 边界契约(公开集视图) —— 谁拥有 / 什么时候交回 / 怎么交回');
+  lines.push('');
+  lines.push('> ⚠️ **本页由 `node scripts\\contract.js --public --write` 生成,别手改**(数据在 `src\\boundary-contract.js`;');
+  lines.push('> 改数据 → 重新生成 → `node scripts\\contract.js --public --check`;页与数据不同步时公开自测会变红)。');
+  lines.push('>');
+  lines.push('> **用途**：说明公开集里的共享与隔离边界、状态权威和交回机制；用真实源码锚点核对，不把模型叙述当状态证据。');
+  lines.push('> 公开视图只渲染**公开集里能真的核对**的边界行；完整工程契约(含网页相关行)是私有全量页 `docs\\16-边界契约.md`,不随公开集分发。');
+  lines.push('');
+  lines.push(...renderTable(
+    ['边界', '谁拥有(权威)', '交回触发', '怎么交回'],
+    visible.map((row) => [
+      publicField(row, 'boundary'), publicField(row, 'owner'), publicField(row, 'trigger'), publicField(row, 'how'),
+    ]),
+  ));
+  lines.push('');
+  lines.push('## 公开视图口径(为什么少了几条)');
+  lines.push('');
+  lines.push('- 公开集不含网页面板/网页模块。以下三条边界**不在公开集**,其源码锚点也在面板模块里(公开树没有那些文件) —— 因此不列入本页,也**不做**锚点核对(不冒充"已核"):');
+  for (const row of excluded) lines.push(`  - ${row.boundary}`);
+  lines.push('- 完整口径见 `docs\\37-公开架构说明.md` §6「明确不在公开范围的东西」。');
+  if (trimmed.length > 0) {
+    lines.push(`- 下面这些行的锚点有一部分落在面板模块上:${trimmed.map((row) => `「${row.boundary}」`).join('、')}；本页**只核公开集里那条**,面板侧不核。`);
+  }
+  lines.push('- 内部决策号不在公开页出现；要追溯完整记录请回私有全量页。');
+  lines.push('');
+  lines.push('## 逐条:容易搞错的那一句 + 凭什么这么写(锚)');
+  lines.push('');
+  for (const row of visible) {
+    const note = publicField(row, 'note');
+    lines.push(`### ${publicField(row, 'boundary')}`);
+    if (note) lines.push(`- ${note}`);
+    for (const anchor of anchorsForPublic(row)) lines.push(`- ${describeAnchor(anchor)}`);
+    lines.push('');
+  }
+  lines.push('## 这一页**不**管什么(免得被当万灵药)');
+  lines.push('');
+  lines.push('- 它不替代实现代码与专项测试，只记录**边界与权威**。');
+  lines.push('- 它不保证"两个玩家玩起来是好的":共享钱包/共用体力**是口径问题,不是 bug**(要改就得动 `stats` 的分身,影响面大)。');
+  lines.push('- `restart` 行中的进程内状态恢复仍是**缺口**，不能因为进程重新启动就认定状态已恢复。');
+  return `${lines.join('\n')}\n`;
+}
+
+/**
  * 按 `anchors` 去真源码里核(**纯函数**:读文件由调用方注入,方便单测喂假数据)。
  *
  * ⚠️ 实现只有一份 —— 在 `src\anchored-page.js`(1.106.7/D179 抽出来,通道策略表也用它)。
@@ -226,6 +334,18 @@ export function renderContractPage(rows = CONTRACT_ROWS) {
  */
 export function checkContract(rows, io) {
   return checkAnchors(rows, io, { requiredFields: REQUIRED_FIELDS });
+}
+
+/**
+ * 公开视图的锚点校验:只核公开集里真的存在的锚(`publicAnchors` 优先),**不伪造**。
+ *
+ * @param {readonly ContractRow[]} rows
+ * @param {{readFile: (relativePath: string) => string}} io
+ * @returns {{ok: boolean, problems: string[]}}
+ */
+export function checkPublicContract(rows, io) {
+  const projected = publicContractRows(rows).map((row) => ({ ...row, anchors: anchorsForPublic(row) }));
+  return checkContract(projected, io);
 }
 
 export { countOccurrences };

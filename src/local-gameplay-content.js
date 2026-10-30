@@ -89,7 +89,9 @@ export const DEFAULT_GAMEPLAY_CONTENT = {
   baitLabels: { lure: '旧假饵', explosion_ash: '燃烧后的灰', aqua_bottle: '旧空瓶', yuuyuu_charm: '手制护符', kazuma_sock: '旧袜子', chomusuke_fur: '动物掉的毛', crimson_thread: '红线头' },
   explosion: {
     chants: chantIds.map((id, index) => ({ id, source: '原创通用技能示例', length: chantLengths[index], zh: ['光芒聚拢，准备完成。', '让这份力量向前绽放！'] })),
-    finishers: Array.from({ length: 20 }, () => 'Explosion！'),
+    // 公开集默认（无 content/local 时的回退）：中性技能收势词，不含作品专属技能名。
+    // 官方实例的真实收势词仍来自私有 C 区 content/local/gameplay.json。
+    finishers: Array.from({ length: 20 }, () => '技能发动！'),
   },
   narration: {
     examples: ['练习场亮起一道光，旁边的纸风车转了两圈，观众鼓起掌来。', '靶标旁扬起少量尘土，记录员认真画了一颗星。', '技能演示结束，大家收好道具，准备休息。'],
