@@ -79,7 +79,7 @@ const NEUTRAL_BODY_TEXT = {
   }
 };
 function localBodyTheme(id) {
-  const text = LOCAL_MOOD_BODY_CONTENT?.body[id] ?? NEUTRAL_BODY_TEXT;
+  const text = LOCAL_MOOD_BODY_CONTENT?.body?.[id] ?? NEUTRAL_BODY_TEXT;
   return { id, label: text.label, values: Object.fromEntries(VALUE_KEYS.map((key) => [key, {
     short: text.values[key].short, long: text.values[key].long,
     states: BODY_VALUE_LIMITS[key].map((limit, index) => [limit, text.values[key].states[index]]),

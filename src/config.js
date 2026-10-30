@@ -6,6 +6,9 @@ import { resolveParams } from './params.js';
 import { CONFIG_DEFAULTS, CONFIG_DERIVED_DEFAULTS, CONFIG_KNOWN_ENV, createConfigParamDefinitions } from './config-params.js';
 import { packParamsForTheme } from './content-pack.js';
 import { validatePackParams } from './pack-params.js';
+// The optional world pack is a content-owned tuning layer below the character pack.
+// Importing the loader is a single module-singleton read; loadConfig adds no per-call IO.
+import { activeWorldParams } from './world-pack.js';
 import { DEFAULT_MEAL_WINDOWS, WARMUP_MODES, parseMealWindows, parseSleepWindow } from './warmup.js';
 import { parseMorningTime } from './morning.js';
 import { MOOD_THEME_NAMES } from './mood.js';
@@ -508,7 +511,7 @@ export const CONFIG_PARAM_DEFINITIONS = createConfigParamDefinitions({
  * Build the validated runtime configuration. Throws one aggregated error listing
  * every problem, so a misconfigured start fails loudly instead of half-working.
  */
-export function loadConfig({ rootDir, params = {}, packParams } = {}) {
+export function loadConfig({ rootDir, params = {}, packParams, worldParams } = {}) {
   const previous = activeParams;
   activeParams = null;
   try {
@@ -541,13 +544,18 @@ export function loadConfig({ rootDir, params = {}, packParams } = {}) {
     }
     // Validate before spreading: never invoke accessors in injected data.
     resolveParams(CONFIG_PARAM_DEFINITIONS, { configFile: params });
+    // Optional world-pack tuning, validated on its own BEFORE any higher layer is
+    // applied: an invalid low layer must stay fatal even when config/env are valid.
+    // Without an active world pack this is {}, so the phase-3 layering is unchanged.
+    const worldContent = worldParams === undefined ? activeWorldParams() : worldParams;
+    resolveParams(CONFIG_PARAM_DEFINITIONS, { worldPack: worldContent });
     const configFile = { ...jsonParams, ...params };
     const layers = { configFile, envFile: effectiveFileInputs, env, knownEnv: CONFIG_KNOWN_ENV };
     const withoutPack = resolveParams(CONFIG_PARAM_DEFINITIONS, layers);
     const contentPack = packParams === undefined
       ? packParamsForTheme(withoutPack.values.QQBOT_MOOD_THEME) : packParams;
     validatePackParams(contentPack);
-    const resolved = resolveParams(CONFIG_PARAM_DEFINITIONS, { ...layers, contentPack });
+    const resolved = resolveParams(CONFIG_PARAM_DEFINITIONS, { ...layers, worldPack: worldContent, contentPack });
     activeParams = resolved;
     let config;
     try { config = buildRuntimeConfig({ rootDir, envFile, loadedEnvFile }); }

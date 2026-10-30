@@ -18,12 +18,12 @@ import { MONEY_POOR } from './stats.js';
  * which is what keeps the character from being a one-note chuunibyou.
  */
 function localMoodDefinition(theme, id, policy) {
-  const text = LOCAL_MOOD_BODY_CONTENT?.mood[theme].moods[id];
+  const text = LOCAL_MOOD_BODY_CONTENT?.mood?.[theme]?.moods?.[id];
   return { label: text?.label ?? '平静交流', ...policy,
     directive: text?.directive ?? '用简短自然的句子直接回应，不使用固定口头禅或角色设定。' };
 }
 function localTopicDefinition(theme, id, weights) {
-  const text = LOCAL_MOOD_BODY_CONTENT?.mood[theme].topics[id];
+  const text = LOCAL_MOOD_BODY_CONTENT?.mood?.[theme]?.topics?.[id];
   return { id, label: text?.label ?? '一般话题', keywords: text?.keywords ?? [], weights };
 }
 export const MOODS = {
@@ -169,11 +169,11 @@ export const TOPIC_OVERRIDES = [
  * measurably does not work (the card listed six kaomoji and three ever
  * appeared).
  */
-export const INTERJECTIONS = LOCAL_MOOD_BODY_CONTENT?.mood.megumin.interjections
+export const INTERJECTIONS = LOCAL_MOOD_BODY_CONTENT?.mood?.megumin?.interjections
   ?? Object.fromEntries(Object.keys(MOODS).map((id) => [id, []]));
 
 /** Optional expression text is local; tags keep selection aligned with the mood. */
-export const KAOMOJI = LOCAL_MOOD_BODY_CONTENT?.mood.megumin.kaomoji ?? [];
+export const KAOMOJI = LOCAL_MOOD_BODY_CONTENT?.mood?.megumin?.kaomoji ?? [];
 
 /** How many recent picks to avoid repeating. */
 export const RECENT_INTERJECTIONS = 4;
@@ -229,21 +229,21 @@ export const ARIS_TOPIC_OVERRIDES = [
 ];
 
 /** Local display content is separate from the unchanged runtime policy. */
-export const ARIS_INTERJECTIONS = LOCAL_MOOD_BODY_CONTENT?.mood.aris.interjections
+export const ARIS_INTERJECTIONS = LOCAL_MOOD_BODY_CONTENT?.mood?.aris?.interjections
   ?? Object.fromEntries(Object.keys(ARIS_MOODS).map((id) => [id, []]));
 
 /** Local display content is separate from the unchanged runtime policy. */
-export const ARIS_INTERJECTION_TOPIC_GATE = LOCAL_MOOD_BODY_CONTENT?.mood.aris.interjectionTopicGate ?? {};
+export const ARIS_INTERJECTION_TOPIC_GATE = LOCAL_MOOD_BODY_CONTENT?.mood?.aris?.interjectionTopicGate ?? {};
 
 /** Local expressions are filtered by tags; the existing fallback handles unmatched tags. */
-export const ARIS_KAOMOJI = LOCAL_MOOD_BODY_CONTENT?.mood.aris.kaomoji ?? [];
+export const ARIS_KAOMOJI = LOCAL_MOOD_BODY_CONTENT?.mood?.aris?.kaomoji ?? [];
 
 /** Local display content is separate from the unchanged runtime policy. */
 
 /** Local display content is separate from the unchanged runtime policy. */
 export const MEGUMIN_THEME = {
   id: 'megumin',
-  label: LOCAL_MOOD_BODY_CONTENT?.mood.megumin.label ?? '中性交流主题',
+  label: LOCAL_MOOD_BODY_CONTENT?.mood?.megumin?.label ?? '中性交流主题',
   moods: MOODS,
   basePool: BASE_POOL,
   topicOverrides: TOPIC_OVERRIDES,
@@ -261,7 +261,7 @@ export const MEGUMIN_THEME = {
 /** Local display content is separate from the unchanged runtime policy. */
 export const ARIS_THEME = {
   id: 'aris',
-  label: LOCAL_MOOD_BODY_CONTENT?.mood.aris.label ?? '中性交流主题',
+  label: LOCAL_MOOD_BODY_CONTENT?.mood?.aris?.label ?? '中性交流主题',
   moods: ARIS_MOODS,
   basePool: ARIS_BASE_POOL,
   topicOverrides: ARIS_TOPIC_OVERRIDES,

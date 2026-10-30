@@ -1,6 +1,7 @@
 /** One optional fixed-schema local content document; no runtime data or package discovery. */
 import fs from 'node:fs';
 import { PACKS, packsAsStoryRoleSections } from './content-pack.js';
+import { WORLD_PACKS, worldAsStoryWorldSections } from './world-pack.js';
 
 const fields = [
   'schemaVersion', 'storyEvents', 'storyPacks', 'storyClosingWords', 'storyClosingExamples',
@@ -92,8 +93,7 @@ function mergeKeyed(base, overrides) {
  * characterDays / arisPhrases），世界级段原样保留。合并**保持旧键顺序**：
  * 既有键原位替换、新角色追加，避免因包目录排序改变展示顺序。
  */
-function mergeRoleSections(legacyContent) {
-  const sections = packsAsStoryRoleSections(PACKS);
+function mergeRoleSections(legacyContent, sections) {
   if (!legacyContent || !sections) return legacyContent;
   const storyPacks = mergeKeyed(legacyContent.storyPacks, sections.storyPacks);
   const characterDays = mergeKeyed(legacyContent.characterDays, sections.characterDays);
@@ -110,4 +110,33 @@ function mergeRoleSections(legacyContent) {
   return { ...legacyContent, storyPacks, companions, characterDays, arisPhrases };
 }
 
-export const LOCAL_STORY_WORLD = mergeRoleSections(load());
+/**
+ * 世界段 + 角色段的合成（阶段 4）：
+ * - 世界包激活时，15 个世界段 = `worldAsStoryWorldSections(active)`；
+ * - 角色段仍走内容包优先 / 旧快照回退（与阶段 2 完全一致）；
+ * - 没有世界包时走旧路径，导出与改造前逐字段一致（只读旧快照 + 角色包合并）。
+ * 合并**保持旧键顺序**：既有键原位替换、新键追加。
+ *
+ * @param {object|null} legacyContent 旧快照（可缺省）
+ * @param {object|null} [worldSections] 世界包世界段；null = 世界包未激活
+ * @param {object|null} [roleSections] 内容包角色段；null = 没有内容包
+ */
+export function composeStoryWorldContent(
+  legacyContent,
+  worldSections = null,
+  roleSections = packsAsStoryRoleSections(PACKS),
+) {
+  let content = legacyContent ?? null;
+  if (worldSections) {
+    content = { ...(content ?? {}) };
+    for (const [key, value] of Object.entries(worldSections)) content[key] = value;
+  }
+  if (!content) return null;
+  return mergeRoleSections(content, roleSections);
+}
+
+const activeWorld = WORLD_PACKS?.active ?? null;
+export const LOCAL_STORY_WORLD = composeStoryWorldContent(
+  load(),
+  activeWorld ? worldAsStoryWorldSections(activeWorld) : null,
+);
