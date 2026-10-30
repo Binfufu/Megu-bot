@@ -1,6 +1,6 @@
 # Megu-bot
 
-Megu-bot 是一个接入腾讯 QQ 开放平台的聊天机器人，用 Node.js 编写，没有第三方 npm 依赖，运行在你自己的机器上。本仓库 [Binfufu/Megu-bot](https://github.com/Binfufu/Megu-bot) 是它的公开 v1 版本，由维护仓库筛选出的公开部分组成，不是完整的私有项目。
+Megu-bot 是一个接入腾讯 QQ 开放平台的聊天机器人，用 Node.js 编写，没有第三方 npm 依赖，运行在你自己的机器上。下游逻辑只消费统一的 `message` 结构，设计上 QQ 只是平台适配器之一，但当前只有 QQ 一个实现。本仓库 [Binfufu/Megu-bot](https://github.com/Binfufu/Megu-bot) 是它的公开 v1 版本，由维护仓库筛选出的公开部分组成，不是完整的私有项目。
 
 ## 能做什么，不能做什么
 
