@@ -335,9 +335,26 @@ export const CATEGORY_RANDOM_WORDS = [
 
 const CATEGORY_RANDOM_SET = new Set(CATEGORY_RANDOM_WORDS);
 
-/** 这个词是不是**类目词**(泛称)?是 → 服务层按模糊请求随机挑角色,不回「未登记」。 */
+/**
+ * 类目词识别，并接受「小 + 类目词」的常见口语写法（2026-10-30 主人：
+ * 「小萝莉」要和「萝莉」一样按类目处理）。只剥**一个**前导「小」：
+ * `小萝莉`→`萝莉`、`小正太`→`正太`、`小妹妹`→`妹妹`。
+ * `小` 后面不是类目词（「小野」「小姐姐」之外的生词）照旧当普通词 ——
+ * 与类目表「全等匹配」的旧口径一致，不做子串/模糊猜测。
+ * @returns {string|null} 命中的类目词；不是类目 = null。
+ */
+export function categoryWordOf(word) {
+  const text = String(word ?? '').trim();
+  if (!text) return null;
+  if (CATEGORY_RANDOM_SET.has(text)) return text;
+  if (text.length > 1 && text.startsWith('小') && CATEGORY_RANDOM_SET.has(text.slice(1))) return text.slice(1);
+  return null;
+}
+
+/** 这个词是不是**类目词**(泛称)?是 → 服务层按模糊请求随机挑角色,不回「未登记」。
+ * 「小×」类目写法（「小萝莉」）也算 —— 识别口径只有 `categoryWordOf` 一份。 */
 export function isCategoryRandomWord(word) {
-  return CATEGORY_RANDOM_SET.has(String(word ?? '').trim());
+  return categoryWordOf(word) !== null;
 }
 
 /** 标签保留上限:图源查询里角色本身已经占一个位置(来源限制)。 */
@@ -491,7 +508,8 @@ function classifyWord(raw) {
   // 类目词(1.198.0):**不进 tags 也不当角色名**,与 VAGUE_WORDS 同为跳过 ——
   // ⚠️ 必须排在下面那行 tag 形状判断**之前**:ASCII 类目词(NTR/NTS/NTL)不加这道闸
   //    会被 `/^[a-z0-9_()]+$/i` 吃成 tag 去查询 → 图源 0 结果 → 用户扑空。
-  if (CATEGORY_RANDOM_SET.has(word) || CATEGORY_RANDOM_SET.has(trimmed)) return { kind: 'skip' };
+  // 2026-10-30:「小萝莉」这类「小+类目词」写法按同一类目处理(categoryWordOf)。
+  if (categoryWordOf(word) || categoryWordOf(trimmed)) return { kind: 'skip' };
   if (/^[a-z0-9_()]+$/i.test(word)) return { kind: 'tag', tag: word };
   if (VAGUE_WORDS.has(word) || VAGUE_WORDS.has(trimmed)) return { kind: 'skip' };
   return { kind: 'plain', word };
@@ -557,7 +575,8 @@ function splitModifierRun(text) {
     if (hit) { items.push({ kind: 'tag', tag: hit.tag }); rest = rest.slice(hit.word.length); continue; }
     // 类目词(1.198.0):「随机萝莉图」的「萝莉图」整段是类目,静默吞掉 —— 不当修饰也不当角色,
     // 随机标记已在前面摘掉,吞完这段 = 纯随机(与 classifyWord 的 skip 同一语义,只是词尾可带「图」)。
-    if (CATEGORY_RANDOM_SET.has(rest) || CATEGORY_RANDOM_SET.has(stripWordSuffix(rest))) break;
+    // 2026-10-30:「小萝莉图」同样命中(经 categoryWordOf)。
+    if (categoryWordOf(rest) || categoryWordOf(stripWordSuffix(rest))) break;
     items.push(emphasizedModifierOf(rest) ?? { kind: 'plain', word: rest.trim() });
     break;
   }
@@ -746,7 +765,8 @@ function parseFlexRest(rest) {
       return;
     }
     // 类目只认完整 chunk(含既有尾巴剥除),不把「熟女仙子」之类未知名吞成随机。
-    if (CATEGORY_RANDOM_SET.has(word) || CATEGORY_RANDOM_SET.has(stripWordSuffix(word))) {
+    // 2026-10-30:「小萝莉」这类「小+类目词」也算类目。
+    if (categoryWordOf(word) || categoryWordOf(stripWordSuffix(word))) {
       characterSlotOpen = false;
     }
     applyItem(characterSlotOpen ? classifyWord(word) : classifyModifierWord(word));

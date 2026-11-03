@@ -64,6 +64,7 @@ export function validateStylePack(value) {
   if (Object.keys(value.data).some((key) => !DATA_KEYS.includes(key))) return 'data';
   if (!uniqueTexts(value.data.standingNotes)) return 'standing-notes';
   if (!validMoodLength(value.data.moodLength)) return 'mood-length';
+  // preserve=false 只清普通句末的单个中文句号；true 连句号也保留，不影响其它标点。
   if (!exactKeys(value.data.punctuation, ['preserve'])
     || typeof value.data.punctuation.preserve !== 'boolean') return 'punctuation';
   if (!exactKeys(value.data.split, ['enabled', 'maxLinesPerTurn'])

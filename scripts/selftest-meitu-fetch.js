@@ -75,6 +75,13 @@ test('meitu-search:Danbooru URL —— 没有修饰时默认 rating:questionable
   assert.equal(bare.searchParams.get('tags'), 'demo_b');
 });
 
+test('meitu-search:通用检索(无角色)URL —— 只带 tag,不拼空角色(2026-10-30 A)', () => {
+  const dan = new URL(buildDanbooruUrl({ charTag: '', tags: ['cat_girl'] }));
+  assert.equal(dan.searchParams.get('tags'), 'cat_girl');
+  const safe = new URL(buildSafebooruUrl({ charTag: '', tags: ['cat_girl'] }));
+  assert.equal(safe.searchParams.get('tags'), 'cat_girl sort:score');
+});
+
 test('meitu-search:Safebooru URL —— char + tags + sort:score,pid 从 0 起', () => {
   const url = new URL(buildSafebooruUrl({ charTag: 'demo_a', tags: ['feet', 'rating:questionable'], pid: 3 }));
   assert.equal(url.origin + url.pathname, 'https://safebooru.org/index.php');

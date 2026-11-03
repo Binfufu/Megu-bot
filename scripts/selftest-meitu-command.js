@@ -402,6 +402,11 @@ test('meitu-command:模糊量词「点/些」+ 类目词 —— 类目词就地�
   assert.deepEqual(parseMeituCommand('来点萝莉图'), expect({ random: true }));
   assert.deepEqual(parseMeituCommand('来张随机萝莉图'), expect({ random: true }), '随机标记+类目词=纯随机');
   assert.deepEqual(parseMeituCommand('来点萝莉美图'), expect({ random: true }));
+  // 2026-10-30 主人:「小萝莉」这类「小+类目词」写法与类目词同口径(「小萝莉」→「萝莉」)。
+  assert.deepEqual(parseMeituCommand('来点小萝莉图'), expect({ random: true }));
+  assert.deepEqual(parseMeituCommand('来2张随机小萝莉图'), expect({ count: 2, random: true }));
+  // 完整指令把角色位原样留给服务层判类目(与「萝莉」同一条路,不在解析层查表)。
+  assert.deepEqual(parseMeituCommand('来2张小萝莉美图'), expect({ count: 2, character: '小萝莉' }));
   // 「点/些」+ 具名角色:量词放宽对正常写法零影响。
   assert.deepEqual(parseMeituCommand('发点合成名丁图'), expect({ character: '合成名丁' }));
   assert.deepEqual(parseMeituCommand('找些合成角色甲图'), expect({ character: '合成角色甲' }));
@@ -436,6 +441,14 @@ test('meitu-command:类目词表 —— 词形识别的唯一一份,具名角色
   }
   // 复合目录名「御姐，人妻」拆的是词 —— 原样整串不算类目。
   assert.equal(isCategoryRandomWord('御姐，人妻'), false);
+  // 2026-10-30 主人:「小×」类目写法与类目词对应(「小萝莉」→「萝莉」);只剥一个前导「小」。
+  assert.equal(isCategoryRandomWord('小萝莉'), true);
+  assert.equal(isCategoryRandomWord('小正太'), true);
+  assert.equal(isCategoryRandomWord('小妹妹'), true);
+  assert.equal(isCategoryRandomWord('小姐姐'), true, '本身就是类目词,不受前缀规则影响');
+  assert.equal(isCategoryRandomWord('小'), false, '只有一个「小」不算');
+  assert.equal(isCategoryRandomWord('小野'), false, '「小」后面不是类目词就不算');
+  assert.equal(isCategoryRandomWord('小合成名乙'), false, '「小」+具名角色不算类目');
 });
 
 test('meitu-command:类目词在解析层只跳过 —— 不进 tags 不当角色名,ASCII 类目词不被吃成 tag', () => {

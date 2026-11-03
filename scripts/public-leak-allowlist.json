@@ -1,7 +1,17 @@
 {
   "schemaVersion": 1,
-  "note": "命中逐条人工判定：以下仅为人工确认的合成 fixture（明文字面量不是真实凭据/ID/内网资产）。放行按 (path,id) 精确匹配，不豁免同文件其他模式。",
+  "note": "命中逐条人工判定：以下仅为人工确认的合成 fixture 或保留地址拒绝表（明文字面量不是真实凭据/ID/内网资产）。放行按 (path,id) 精确匹配，不豁免同文件其他模式。",
   "entries": [
+    {
+      "path": "src/feed-fetch.js",
+      "id": "internal-ip",
+      "reason": "固定信息源请求器的拒绝网段表枚举 RFC1918 等保留地址段，不是真实内网资产或连接目标"
+    },
+    {
+      "path": "scripts/selftest-feed-fetch.mjs",
+      "id": "internal-ip",
+      "reason": "DNS 私网/元数据拒绝测试的合成地址枚举，不是真实内网资产"
+    },
     {
       "path": "scripts/selftest-body-rules.js",
       "id": "internal-ip",

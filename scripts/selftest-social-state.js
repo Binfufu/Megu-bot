@@ -259,13 +259,11 @@ test('Y4:自发闸只挡没被叫的那条路,@/关键词/私聊不进这条闸'
   const gate = source.slice(gateAt, gateAt + 900);
   assert.match(gate, /if \(social\.self <= 0\)/, 'Y4:退场档必须真的 return(不是只记日志)');
   assert.match(gate, /if \(social\.self < 1 && Math\.random\(\) >= social\.self\)/, 'Y4:观望/试探档必须真的按概率拦');
-  // 互动(戳一戳/表情)是另一条自发侧闸:不经过"被叫"判定。
-  // ⚠️ 2026-10-28 主人拍板「戳一戳跟 @ 一样高」:戳一戳与被叫同级、**不吃状态档**
-  //    (socialFactor 只对 face 取 interact);纯表情照旧按 interact 打折。
-  assert.match(source, /const socialFactor = kind === 'poke' \? 1 : social\.interact;/,
-    'Y4:戳一戳与 @ 同级(不吃状态档),纯表情仍按 interact 档打折');
-  assert.match(source, /const chance = Math\.min\(1, \(inWindow \? base \* cfg\.windowMultiplier : base\) \* socialFactor\);/,
-    'Y4:互动反应的概率乘的是 socialFactor(poke=1,face=interact)');
+  // 互动(戳一戳/表情)是另一条自发侧闸:乘 interact,不经过"被叫"判定。
+  // ⚠️ 2026-11-03（1.208.6):10-28 的「戳一戳=@ 同级」已撤回 —— 双击头像平台不推送,
+  //    这条路径只是大表情/互动表情,所以两种手势都照旧按 interact 打折。
+  assert.match(source, /const chance = Math\.min\(1, \(inWindow \? base \* cfg\.windowMultiplier : base\) \* social\.interact\);/,
+    'Y4:互动反应按 interact 档打折,与被叫无关');
   // @ 事件走 handleMessage 的独立分支,不该出现在状态机调制里
   const mentionAt = source.indexOf('if (message.isMention) {');
   assert.ok(mentionAt > 0, 'Y4:@ 必须有独立分支');
