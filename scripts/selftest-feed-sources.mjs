@@ -109,6 +109,17 @@ test('real DeepSeek date + release h3 yields separate factual items', () => {
   assert.ok(items[1].url.endsWith('#deepseek-v41-flash-1017-update'));
   assert.notEqual(items[0].key, items[1].key);
 });
+test('HTML noise removal is a single scan: nested comment opener and split tag never reach item text', () => {
+  // Pins the observable contract after the CodeQL hardening (chained replace() -> one scanner):
+  // markup is consumed once, so a comment containing another opener, or a tag name split by
+  // another tag, cannot survive as text; plain '<' outside a tag stays text.
+  const payload = '<!-- <!-- --> <scr<script>ipt>alert(1)</script> 2 &lt; 3 Facts.';
+  const items = parse('deepseek', wrap(`<h2>Date: 2026-06-01</h2><h3>Hardening</h3><p>${payload}</p>`));
+  const summary = items.find(i => i.url.includes('hardening'))?.summary ?? items[0].summary;
+  assert.ok(!summary.includes('<scr'), 'split tag start must not survive');
+  assert.ok(!/<\/?script/i.test(summary), 'no script tag text survives');
+  assert.ok(summary.includes('2 < 3 Facts.') || summary.includes('2 < 3'), 'lone decoded < is text, not markup');
+});
 test('HTML navigation/TOC/footer/script/style changes leave entries identical', () => {
   assert.deepEqual(parse('deepseek', wrap()), parse('deepseek', wrap(deepBody, '<h2>Date: 2099-01-01</h2><h3>Fake update</h3>')));
   assert.deepEqual(parse('deepseek', wrap()), parse('deepseek', wrap(deepBody.replace('<p>DeepSeek&#x27;', '<script>bad</script><style>bad</style><p>DeepSeek&#x27;'))));

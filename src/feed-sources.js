@@ -32,10 +32,56 @@ function entities(text) {
     return n > 0 && n <= 0x10ffff && !(n >= 0xd800 && n <= 0xdfff) ? String.fromCodePoint(n) : '\ufffd';
   });
 }
-function stripNoise(html) {
-  return html.replace(/<!--[\s\S]*?-->/g, '').replace(/<(script|style|nav|footer|aside)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '');
+const DROPPED_ELEMENTS = new Set(['script', 'style', 'nav', 'footer', 'aside']);
+const TAG_AT = /^<\/?([a-z][\w:-]*)\b(?:"[^"]*"|'[^']*'|[^'">])*>/i;
+// One left-to-right scan per call: markup is consumed and never re-interpreted, so a tag
+// split by another tag, a nested comment opener, or an unterminated sequence cannot
+// re-emerge as markup. With keepTags=false this is the only HTML-to-text path; it replaces
+// one-pass `replace()` chains that were provably bypassable (CodeQL
+// js/incomplete-multi-character-sanitization).
+function scanMarkup(html, keepTags) {
+  const out = [];
+  let i = 0;
+  let dropped = '';
+  while (i < html.length) {
+    if (html.startsWith('<!--', i)) {
+      const end = html.indexOf('-->', i + 4);
+      if (end < 0) break; // unterminated comment: never guess a boundary, drop the remainder
+      i = end + 3;
+      continue;
+    }
+    if (html[i] !== '<') {
+      const next = html.indexOf('<', i);
+      const stop = next < 0 ? html.length : next;
+      if (!dropped) out.push(html.slice(i, stop));
+      i = stop;
+      continue;
+    }
+    const tag = TAG_AT.exec(html.slice(i));
+    if (!tag) {
+      if (!dropped) out.push('<'); // a lone '<' is text, not a tag start
+      i += 1;
+      continue;
+    }
+    const name = tag[1].toLowerCase();
+    const closing = tag[0][1] === '/';
+    const selfClosing = /\/\s*>$/.test(tag[0]);
+    i += tag[0].length;
+    if (dropped) {
+      if (closing && name === dropped) dropped = '';
+      continue;
+    }
+    if (!closing && !selfClosing && DROPPED_ELEMENTS.has(name)) {
+      dropped = name;
+      continue;
+    }
+    if (keepTags) out.push(tag[0]);
+    else out.push(' '); // tags separate words instead of gluing neighbouring text
+  }
+  return out.join('');
 }
-const htmlText = html => compact(entities(stripNoise(html).replace(/<[^>]*>/g, ' ')));
+const stripNoise = html => scanMarkup(html, true);
+const htmlText = html => compact(entities(scanMarkup(html, false)));
 function attr(tag, name) {
   const m = tag.match(new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, 'i'));
   return m ? entities(m[1] ?? m[2]) : null;
