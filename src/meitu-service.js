@@ -72,6 +72,14 @@ const SILENT_LOG = { info() {}, warn() {}, debug() {}, error() {} };
  */
 const PASSIVE_SEQ_MAX = 5;
 
+/**
+ * 通用检索（不指定角色）的落盘桶名（2026-10-30 主人拍板 A）。
+ * 没有具名角色、但有可检索修饰时，只按 tag 查图源；落盘仍要有个目录，
+ * **按角色名分库**的旧口径对这一类不适用，统一收进 `<根>\r13\通用\` / `<根>\r18\通用\`。
+ * 抽成常量是因为 service / 抓取器 / 图库分类多处要认这同一个名字。
+ */
+const GENERIC_FOLDER = '通用';
+
 /** 每个群一条串行队列 + 上次开始时间。进程内有效(重启即清,冷却本来也不必持久)。 */
 const GROUP_QUEUES = new Map();
 
@@ -387,11 +395,13 @@ export async function handleMeituCommand({ message, parsed, deps = {} }) {
           originText: String(message?.content ?? '').slice(0, 40),
           requested: parsed?.count ?? 0,
           resolved: selected ? {
-            character: selected.characterName ?? null,
-            tag: selected.resolved?.tag ?? null,
+            // 通用检索没有角色身份（只是按 tag 查的通用图），如实记 null + generic 标记。
+            character: selected.generic ? null : (selected.characterName ?? null),
+            tag: selected.generic ? null : (selected.resolved?.tag ?? null),
             tier: selected.tier ?? parsed?.tier ?? null,
             tags: selected.tags ?? [],
             random: Boolean(selected.random),
+            generic: Boolean(selected.generic),
           } : null,
           status,
           reason: result?.reason ?? null,
@@ -411,6 +421,9 @@ export async function handleMeituCommand({ message, parsed, deps = {} }) {
       if (error) log.warn(`美图：${error}(先用默认别名表)`);
 
       // 同一套角色选择供确定性解析和单次模型恢复共用；不递归调用服务，避免重复冷却/调用模型。
+      // 2026-10-30 主人拍板 A（**不限 IP**）：没有具名角色就**不再从登记名册随机**，一律走
+      // 「无角色通用检索」——有可检索 tag 就只按 tag 查（结果来自任意作品）；连 tag 都没有
+      // （类目词/纯「随机」）就走热门安全图（`--hot`）。1.184.0 的「随机挑登记角色」退休。
       const selectRequest = (request) => {
         let name = request.character;
         const slot = !request.random && name
@@ -419,10 +432,10 @@ export async function handleMeituCommand({ message, parsed, deps = {} }) {
         if (slot) name = slot.character;
         const modifiers = applyCharacterSlot(request, slot);
         const resolved = resolveCharacterTag(name, aliases);
-        // 具名优先；类目和纯修饰仍走原有随机机制，不发明新的类目 tag。
+        // 具名优先；没有具名角色（类目词/纯修饰/显式随机/空角色）→ 通用检索。
         const random = Boolean(request.random || slot?.random || !name
           || (!resolved.ok && isCategoryRandomWord(name)));
-        return { characterName: name, ...modifiers, resolved, random };
+        return { characterName: name, ...modifiers, resolved, random, generic: random };
       };
       let selected = selectRequest(parsed);
       if (!selected.random && !selected.resolved.ok && typeof deps.interpretCommand === 'function') {
@@ -440,6 +453,7 @@ export async function handleMeituCommand({ message, parsed, deps = {} }) {
           return finish({ ok: false, reason: 'interpret_failed' });
         }
         // 数量/档位只信原指令，不允许模型扩大数量或升档。
+        // 模型给 character:null（泛称/随机）→ 走通用检索 / 热门检索（主人 2026-10-30 A 不限 IP）。
         selected = selectRequest({ ...recovered.parsed, count: parsed.count, tier: parsed.tier });
         // resolveCharacterTag 允许用户直写英文 tag，但模型不能借这条路创造新角色。
         const registeredTags = new Set(Object.values(aliases));
@@ -447,27 +461,25 @@ export async function handleMeituCommand({ message, parsed, deps = {} }) {
           await reply(pickLine('interpretFailed', lines));
           return finish({ ok: false, reason: 'interpret_failed' });
         }
-        log.info(`美图：单次模型理解已恢复指令（角色=${selected.random ? '(随机)' : selected.characterName}`
+        log.info(`美图：单次模型理解已恢复指令（角色=${selected.generic ? '(通用)' : selected.characterName}`
           + ` tags=${selected.tags.join(',') || '(无)'} tier=${selected.tier} count=${parsed.count}）`);
       }
 
       let { characterName, resolved } = selected;
       const { tags: finalTags, tier: finalTier } = selected;
-      if (selected.random) {
-        const keys = Object.keys(aliases);
-        if (keys.length === 0) {
-          log.warn('美图：随机模式但别名表一个角色都没有');
-          await reply(pickLine('unregistered', lines));
-          return finish({ ok: false, reason: 'unregistered' });
-        }
-        const rng = typeof deps.rng === 'function' ? deps.rng : Math.random;
-        characterName = keys[Math.min(keys.length - 1, Math.max(0, Math.floor(rng() * keys.length)))];
-        resolved = resolveCharacterTag(characterName, aliases);
-        // T2:随机选角结果回写 selected —— finish 的 task.resolved 才能拿到真实角色。
-        Object.assign(selected, { characterName, resolved, random: true });
-        log.info(`美图：模糊请求 → 随机挑了「${characterName}」(${resolved.tag ?? '?'})`);
-      }
-      if (!resolved.ok) {
+      // 没有具名角色 → 通用检索（不限 IP）：有可检索 tag 按 tag 查；连 tag 都没有 → 热门安全图。
+      const generic = Boolean(selected.generic);
+      const hot = generic && finalTags.length === 0;
+      if (generic) {
+        // 通用检索:不发明角色，用固定桶名落盘；resolved.tag 留空（抓取器省略 --char）。
+        characterName = GENERIC_FOLDER;
+        resolved = { ok: true, tag: '' };
+        Object.assign(selected, { characterName, resolved, generic: true, hot, random: false });
+        log.info(
+          `美图：${hot ? '通用热门检索（不指定角色/标签）' : `通用检索（不指定角色）tags=${finalTags.join(',')}`}`
+          + ` tier=${finalTier} × ${parsed.count}`,
+        );
+      } else if (!resolved.ok) {
         log.warn(`美图：角色「${characterName}」没有登记别名(${aliasPath})`);
         await reply(pickLine('unregistered', lines));
         return finish({ ok: false, reason: 'unregistered' });
@@ -480,38 +492,8 @@ export async function handleMeituCommand({ message, parsed, deps = {} }) {
         await reply(pickLine('internal', lines));
         return finish({ ok: false, reason: 'no_root' });
       }
-      const target = await ensureCharDir(meitu.root, characterName, { tier: finalTier });
-      log.info(
-        `美图：${characterName}(${resolved.tag}) × ${parsed.count} tier=${finalTier}`
-        + ` tags=${finalTags.join(',') || '(无)'} → ${target.dir}`,
-      );
-
-      // ⑤' 历史目录(1.184.3):旧结构存量 `<根>\<角色>` + 另一档同角色目录 ——
-      //     重建索引时并入它们的 md5,存量图与跨档同图不会被重复下载。
       const storeRoot = path.resolve(String(meitu.root));
-      const charFolder = sanitizeCharFolder(characterName);
       const otherTier = finalTier === 'meitu' ? 'seitu' : 'meitu';
-      const extraDirs = [
-        path.join(storeRoot, charFolder),
-        path.join(storeRoot, tierDirName(otherTier), charFolder),
-      ];
-
-      // ⑥ spawn 抓取器(代理只走环境变量:Node 24 的 fetch 认 NODE_USE_ENV_PROXY)。
-      const args = [
-        FETCH_SCRIPT,
-        '--char', resolved.tag,
-        '--tags', finalTags.join(','),
-        '--count', String(parsed.count),
-        '--out', target.dir,
-        '--source', String(meitu.source ?? 'auto'),
-        '--max-bytes', String(meitu.maxBytes ?? 10_485_760),
-        // 检索档位:meitu=全年龄唯美(g/s);seitu=擦边(s/q)。解析层定,这里只传话。
-        '--tier', finalTier === 'meitu' ? 'meitu' : 'seitu',
-      ];
-      // 按群去重(2026-10-28 主人拍板):把群 id 传给抓取器 —— 发送账里"这个群看过的"
-      // 不再出,库里已有文件的直接复用,不重复下载。`perGroup:false`(env QQBOT_MEITU_PER_GROUP=0)
-      // 回退旧全库口径。抓取器侧库打不开时会自行退回全库口径并 warn(宁少给,不重发)。
-      if (meitu.perGroup !== false) args.push('--group', groupId);
       // 展览处元数据落库:库跟本实例状态库同级(`data\aris\state.db` → `data\aris\meitu.db`);
       // 显式配置优先。抓取子进程按这个路径 upsert meitu_meta(展览处刀 1)。
       // 推不出来就不传 —— 抓取器自己也会从 env 推,推不出就跳过落库。
@@ -522,24 +504,67 @@ export async function handleMeituCommand({ message, parsed, deps = {} }) {
         const stateDb = config.policy?.stats?.dbFile ?? config.stats?.dbFile;
         return stateDb ? path.join(path.dirname(String(stateDb)), 'meitu.db') : '';
       })();
-      if (metaDbPath) args.push('--db', metaDbPath);
-      // 历史目录(1.184.3):旧结构存量 + 另一档同角色 —— 抓取器重建索引时并入其 md5。
-      for (const dir of extraDirs) args.push('--extra-dir', dir);
-      const env = { ...process.env };
-      if (meitu.proxy) {
-        args.push('--proxy', String(meitu.proxy));
-        env.NODE_USE_ENV_PROXY = '1';
-        env.HTTPS_PROXY = String(meitu.proxy);
-        env.HTTP_PROXY = String(meitu.proxy);
-        // 1.199.0(2026-10-25 现场,白云机 21:37 重启后代理进程没了 →「图源连不上」):
-        // NODE_USE_ENV_PROXY 是**进程级**的 —— 代理一死,Safebooru 的直连兜底也被拖去撞
-        // 死代理,两个源一起挂 → `source_down`(三组对照实测:加 NO_PROXY 后 Safebooru
-        // 直连 100 条过筛 97,代理活着时 Danbooru 照旧优先)。Safebooru 本来就不需要代理。
-        env.NO_PROXY = 'safebooru.org';
-      }
       // 第一次抓取与降档补抓共用同一个硬超时。
       const fetchTimeoutMs = Number.isFinite(Number(meitu.timeoutMs)) ? Number(meitu.timeoutMs) : 90_000;
 
+      /**
+       * 按**当前**角色/通用模式准备一次抓取(目录/tags/群去重/元数据/代理一起拼)。
+       * 参数拼装只此一份(D159)。
+       */
+      const buildAttempt = async () => {
+        const target = await ensureCharDir(meitu.root, characterName, { tier: finalTier });
+        log.info(
+          `美图：${generic ? '通用检索' : `${characterName}(${resolved.tag})`} × ${parsed.count} tier=${finalTier}`
+          + ` tags=${finalTags.join(',') || '(无)'} → ${target.dir}`,
+        );
+        // ⑤' 历史目录(1.184.3):旧结构存量 `<根>\<角色>` + 另一档同角色目录 ——
+        //     重建索引时并入它们的 md5,存量图与跨档同图不会被重复下载。
+        const charFolder = sanitizeCharFolder(characterName);
+        const extraDirs = [
+          path.join(storeRoot, charFolder),
+          path.join(storeRoot, tierDirName(otherTier), charFolder),
+        ];
+        // ⑥ spawn 抓取器(代理只走环境变量:Node 24 的 fetch 认 NODE_USE_ENV_PROXY)。
+        // 通用检索**不带 --char**：有 tag 时按 tag 查；无 tag 的「热门」模式带 --hot 兜 rating-only rung。
+        const attemptArgs = [FETCH_SCRIPT];
+        if (generic) {
+          if (hot) attemptArgs.push('--hot');
+        } else {
+          attemptArgs.push('--char', resolved.tag);
+        }
+        attemptArgs.push(
+          '--tags', finalTags.join(','),
+          '--count', String(parsed.count),
+          '--out', target.dir,
+          '--source', String(meitu.source ?? 'auto'),
+          '--max-bytes', String(meitu.maxBytes ?? 10_485_760),
+          // 检索档位:meitu=全年龄唯美(g/s);seitu=擦边(s/q)。解析层定,这里只传话。
+          '--tier', finalTier === 'meitu' ? 'meitu' : 'seitu',
+        );
+        // 按群去重(2026-10-28 主人拍板):把群 id 传给抓取器 —— 发送账里"这个群看过的"
+        // 不再出,库里已有文件的直接复用,不重复下载。`perGroup:false`(env QQBOT_MEITU_PER_GROUP=0)
+        // 回退旧全库口径。抓取器侧库打不开时会自行退回全库口径并 warn(宁少给,不重发)。
+        if (meitu.perGroup !== false) attemptArgs.push('--group', groupId);
+        if (metaDbPath) attemptArgs.push('--db', metaDbPath);
+        // 历史目录(1.184.3):旧结构存量 + 另一档同角色 —— 抓取器重建索引时并入其 md5。
+        for (const dir of extraDirs) attemptArgs.push('--extra-dir', dir);
+        const env = { ...process.env };
+        if (meitu.proxy) {
+          attemptArgs.push('--proxy', String(meitu.proxy));
+          env.NODE_USE_ENV_PROXY = '1';
+          env.HTTPS_PROXY = String(meitu.proxy);
+          env.HTTP_PROXY = String(meitu.proxy);
+          // 1.199.0(2026-10-25 现场,白云机 21:37 重启后代理进程没了 →「图源连不上」):
+          // NODE_USE_ENV_PROXY 是**进程级**的 —— 代理一死,Safebooru 的直连兜底也被拖去撞
+          // 死代理,两个源一起挂 → `source_down`(三组对照实测:加 NO_PROXY 后 Safebooru
+          // 直连 100 条过筛 97,代理活着时 Danbooru 照旧优先)。Safebooru 本来就不需要代理。
+          env.NO_PROXY = 'safebooru.org';
+        }
+        return { args: attemptArgs, env: env };
+      };
+
+      // 2026-10-30 主人拍板 A（不限 IP）：没有具名角色就不抽登记角色；通用检索失败了也不换角。
+      const { args, env } = await buildAttempt();
       const fetched = await runFetch({
         args,
         env,
@@ -674,9 +699,12 @@ export async function handleMeituCommand({ message, parsed, deps = {} }) {
  */
 export function describeMeituTask(task) {
   if (!task || typeof task !== 'object') return null;
+  const tags = Array.isArray(task.resolved?.tags) ? task.resolved.tags.filter(Boolean) : [];
   const who = task.resolved?.character
     ? `${task.resolved.character}${task.resolved.tag ? `(${task.resolved.tag})` : ''}`
-    : null;
+    : task.resolved?.generic
+      ? `通用检索${tags.length > 0 ? ` ${tags.join(' ')}` : ''}`
+      : null;
   const asked = typeof task.originText === 'string' && task.originText.trim() !== ''
     ? `应「${task.originText.trim()}」` : '';
   if (task.status === 'running') return `正在找图${asked ? `：${task.originText.trim()}` : ''}`;

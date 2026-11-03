@@ -37,8 +37,41 @@ const KNOWLEDGE_STRONG_RE = /是什么|什么意思|啥意思|什么原理|的�
 /** 弱知识词:**要配疑问形状**(「为什么你又这样说」是闲聊,不是求知)。 */
 const KNOWLEDGE_WEAK_RE = /为什么|为啥|如何|怎么|有何|有哪些|多久|多少钱|几个|哪种|哪个/;
 
-/** 办事:动作动词。命中即按 task 给权限(仍然只是"可以说完")。 */
-const TASK_RE = /帮我|帮忙|给我|替我|列出|列举|罗列|写一(个|段|份|遍|下)|做个|做一(个|份)|分析|排查|修理|修复|解决|步骤|方案|代码|报错|异常|配置|对比|比较|总结|整理|翻译|计算|推导|设计|实现|优化|重构|调试|部署|规划|评估|检查|核对|梳理|拆解|给出|说明白|讲清楚|改成|换成|转成|转换为/;
+/**
+ * 办事:两类信号,证据强度不同(P1 收紧,2026-11-02 主人拍板)。
+ *
+ * · **强动作词**(`TASK_STRONG_RE`)—— 本身指向**可交付物**的动词/落点(修好、查清、写出来的
+ *   东西、翻译结果…)。单独命中即 `task`,与旧行为一致:这类请求本来就要步骤与结构。
+ * · **弱信号**(`TASK_WEAK_RE`)—— 只是**请求姿态**(帮我/帮忙/给我/替我/做个),不是办事证据。
+ *   「在水里帮我卢一下」「帮我笑一个」也长这个样子,却是一次调情/玩笑。
+ *
+ * ## 为什么弱信号不再单独判 task(拍板依据)
+ *
+ * 旧行为只要出现"帮我"就判 task,于是一次性关掉字数上限、随机风格、群聊短句三层约束,
+ * 把一句调情写成小作文(P1 现场形状)。主人 2026-11-02 拍板:**短请求默认 chat,宁可少说**。
+ * 取舍是明确的 —— 误判成 chat 的代价只是**少说两句**;而误判成 task 的代价是把闲聊写成办事。
+ * 所以弱信号必须再有**第二条证据**才升级(见 `TASK_WEAK_LENGTH_MIN` 与 `detectTurnMode`)。
+ *
+ * **强动作词一条都不许降级**:既有能力保持不动,也是唯一愿意为"可能误判"多说的方向。
+ */
+const TASK_STRONG_RE = /列出|列举|罗列|写一(个|段|份|遍|下)|分析|排查|修理|修复|重启|解决|步骤|方案|代码|报错|异常|配置|对比|比较|总结|整理|翻译|计算|推导|设计|实现|优化|重构|调试|部署|规划|评估|检查|核对|梳理|拆解|给出|说明白|讲清楚|改成|换成|转成|转换为/;
+
+/** 弱信号:只是请求姿态,单独出现**不等于**办事(必须另有第二条证据,见下)。 */
+const TASK_WEAK_RE = /帮我|帮忙|给我|替我|做个|做一下|做一(个|份)/;
+
+/**
+ * 弱信号升级成 task 的**第二条证据**(任一即成立):
+ *
+ * ① 正文长度 ≥ `TASK_WEAK_LENGTH_MIN` 字;
+ * ② 疑问形状(`QUESTION_SHAPE`:问号或句末 吗/呢/么/嘛);
+ * ③ 结构信号(`STRUCTURE_RE` / `STRUCTURE_KEYWORDS`:代码/链接/JSON/表/列表,交付要保真);
+ * ④ 同一句还命中强动作词。
+ *
+ * ⚠️ 长度门槛取 **9 字**(即 >8),不是计划里字面的 8:判据矩阵里「在水里帮我卢一下」与
+ *    「帮我重启一下服务」都正好 8 字 —— 用「≥8」没法把前者留在 chat、把后者升成 task。
+ *    故长度证据取 >8,并把「重启」归入强动作词(它本来就指向可交付操作)。
+ */
+const TASK_WEAK_LENGTH_MIN = 9;
 
 /**
  * 结构信号:**只标记"这一轮要保真交付"**,不再单独授予 task/knowledge(F2,2026-10-30)。
@@ -72,10 +105,18 @@ export function detectTurnMode(text, { previous = 'chat' } = {}) {
 
   // 结构信号只标记保真需求(F2):不再因为它就把这一轮判成 task。
   const structural = STRUCTURE_RE.test(source) || STRUCTURE_KEYWORDS.test(source);
-  if (TASK_RE.test(source)) {
+  if (TASK_STRONG_RE.test(source)) {
+    // 强动作词:单独命中即 task(既有能力,保持不动)。
     return { mode: 'task', reason: 'action-verb', followUp: false, structural };
   }
   const questionish = QUESTION_SHAPE.test(source);
+  if (TASK_WEAK_RE.test(source)) {
+    // 弱信号:必须再有第二条证据才升级(长度/疑问/结构;同句有强动作词的已走上面那条)。
+    // 证据全落空就**不在这里 return**,继续往下按 knowledge/追问/默认 chat 判 —— 宁可少说。
+    if (source.length >= TASK_WEAK_LENGTH_MIN || questionish || structural) {
+      return { mode: 'task', reason: 'weak-signal-evidence', followUp: false, structural };
+    }
+  }
   if (KNOWLEDGE_STRONG_RE.test(source) || (questionish && KNOWLEDGE_WEAK_RE.test(source))) {
     return { mode: 'knowledge', reason: 'knowledge-question', followUp: false, structural };
   }
@@ -313,6 +354,9 @@ export function composeModeNote(mode) {
       '· 这一轮不受角色卡里「不超过两句话」「不列点」「不写小作文」的限制 ——',
       '  需要分步、列表、代码块、对比、链接时照用；格式跟着内容需要走。',
       '· 仍然是你的口吻与自称，但不要为了人设故意装不懂、也不要先反问再回答。',
+      // T1.2 边界:放宽的**只是**长度与格式,不改变"图是共同上下文、接话优先"。
+      '· 放宽的只是长度与格式：图还是共同上下文，接住他真正想说的；',
+      '  他在调侃/开玩笑时，别把这轮转成画面说明或梗义解释。',
     ].join('\n');
   }
   if (mode === 'knowledge') {

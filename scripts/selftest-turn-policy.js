@@ -9,9 +9,14 @@
  *   · 权限矩阵:task/knowledge 必须**关掉**字数、随机风格、固定口语要求,并要求保真;
  *   · 与严肃话题的正交:知识题不许被"短而真诚地安慰"顶掉;
  *   · wiring:index.js 真接线了,kb 的"不要列点"矛盾真的消掉了(扫源码)。
+ *
+ * P1 收紧(2026-11-02 主人拍板):弱信号(帮我/帮忙/给我/替我/做个)不再是单独命中即 task;
+ * 判据矩阵钉在下面第二组,`node scripts/selftest-turn-policy.js` 可独立跑全量(exit 0/1)。
  */
+import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import { DIRECT_RESPONSE_NOTES } from '../src/style.js';
 import { splitSpokenLines } from '../src/mood.js';
@@ -66,6 +71,32 @@ export function registerTurnPolicyTests({ test, assert }) {
     assert.deepEqual([...TURN_MODES], ['chat', 'task', 'knowledge']);
   });
 
+  test('P1 判据矩阵(2026-11-02 拍板):弱信号「帮我」单独出现不再判 task,短请求默认 chat', () => {
+    // 期望由主人拍板给定(宁可少说);allowed 多于一个 = 只要不是 chat 即可。
+    const matrix = [
+      ['在水里帮我卢一下', ['chat']],
+      ['帮我卢一下', ['chat']],
+      ['帮我笑一个', ['chat']],
+      ['帮我看看这图什么意思', ['task', 'knowledge']],
+      ['帮我看看这段代码报错', ['task']],
+      ['帮我重启一下服务', ['task']],
+      ['把这段翻译成英文', ['task']],
+      ['解释一下这个梗', ['knowledge']],
+      ['这是什么', ['knowledge']],
+      ['帮我查下', ['chat']], // 4 字;按拍板允许"少说"
+    ];
+    for (const [text, allowed] of matrix) {
+      const { mode } = detectTurnMode(text);
+      assert.ok(allowed.includes(mode), `「${text}」期望 ${allowed.join(' 或 ')}，实际 ${mode}`);
+    }
+    // 反证形状:弱信号 + 证据仍必须能升 task(收紧不是把能力关掉)。
+    assert.equal(detectTurnMode('帮我重启一下服务').reason, 'action-verb');
+    // 弱信号 + 疑问形状(无长度保底)也升 task。
+    assert.equal(detectTurnMode('能帮我看下吗').mode, 'task');
+    // 证据全落空 = 维持默认 chat(不是"弱信号=chat",也不是"弱信号=task")。
+    assert.equal(detectTurnMode('帮我查下').reason, 'default');
+  });
+
   test('追问继承:上一轮在办事/讲知识，「第二步呢」不许被拉回闲聊', () => {
     assert.equal(detectTurnMode('第二步呢', { previous: 'task' }).mode, 'task');
     assert.equal(detectTurnMode('然后呢', { previous: 'knowledge' }).mode, 'knowledge');
@@ -106,6 +137,15 @@ export function registerTurnPolicyTests({ test, assert }) {
     }
     assert.match(composeModeNote('task'), /不受角色卡里「不超过两句话」「不列点」/);
     assert.match(composeModeNote('knowledge'), /不要编/);
+    // T1.2 边界:task 放宽的**只是**长度与格式,不改变"图是共同上下文、接话优先";
+    // 对方调侃/开玩笑时不许把这轮转成画面说明或梗义解释(消费端六条仍由
+    // scripts/selftest-direct-response.js 的 task+image 矩阵守住)。
+    const taskNote = composeModeNote('task');
+    assert.match(taskNote, /图还是共同上下文/, 'T1.2:图仍是共同上下文');
+    assert.match(taskNote, /调侃|开玩笑/, 'T1.2:调侃/开玩笑场景要写明');
+    assert.match(taskNote, /画面说明|梗义解释/, 'T1.2:不许转成画面说明或梗义解释');
+    const boundary = taskNote.split('\n').filter((line) => /共同上下文|调侃|画面说明|梗义/.test(line)).join('\n');
+    assert.doesNotMatch(boundary, /\d/, 'T1.2 边界句不新增任何数字硬指标');
   });
 
   test('与严肃话题正交:知识题不被"短而真诚地安慰"顶掉，真正的闲聊安慰照旧', () => {
@@ -370,4 +410,24 @@ export function registerTurnPolicyTests({ test, assert }) {
     assert.doesNotMatch(comfort, /本轮口径/);
     assert.doesNotMatch(comfort, /MOOD-STUB/, '严肃闲聊本来就该压掉情绪字数(D80)');
   });
+}
+
+/**
+ * 独立入口(验收命令 `node scripts/selftest-turn-policy.js`):跑本文件注册的**全部**判据。
+ * 兼容 selftest-private / chat-style-baseline 的注册方式 —— 被它们 import 时不会自动跑。
+ * 切片读 `src/index.js` 用相对路径,所以入口处把 cwd 定到仓根,不依赖调用目录。
+ */
+const invokedDirectly = process.argv[1]
+  && path.resolve(process.argv[1]).toLowerCase() === fileURLToPath(import.meta.url).toLowerCase();
+if (invokedDirectly) {
+  process.chdir(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'));
+  const tests = [];
+  registerTurnPolicyTests({ test: (name, fn) => tests.push({ name, fn }), assert });
+  let failed = 0;
+  for (const { name, fn } of tests) {
+    try { await fn(); process.stdout.write(`  ok  ${name}\n`); }
+    catch (error) { failed += 1; process.stdout.write(`FAIL  ${name}\n${error?.stack ?? error}\n`); }
+  }
+  process.stdout.write(`\n${tests.length - failed}/${tests.length} passed\n`);
+  process.exitCode = failed ? 1 : 0;
 }

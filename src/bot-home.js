@@ -26,7 +26,7 @@
  * 与三个点文件全部 junction 进来 —— 那是"给 DSH 子进程用的共享面"。桥不再 spawn 任何 DSH
  * 子进程之后，这些链接是**纯冗余**，而且是桥与全局 `~\.dsh` 之间唯一的硬连接。
  * **既有的链接一律不删**（保守：不碰 DSH 侧、也不动历史现场），只是不再新建 ——
- * 见下面 `prepareBotHome()` 里那个 `linkTypeOf(...) === 'missing' → continue`。
+ * `prepareBotHome()` 只验证私有 sessions，不再读取/校验全局 home 的其他条目。
  *
  * 为什么当初用链接而不是复制：`profiles` 里是装好的插件、`storages` 里是注册表/派生缓存、
  * 凭据改了要立刻生效 —— **复制会分叉**（改一处另一处不动，正是这个项目最怕的那种 bug）。
@@ -46,7 +46,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-/** 真 home（默认 `~/.dsh`）：`sessions` 之外的一切都还要从这里共享。 */
+/** 历史 Harness home（默认 `~/.dsh`）：仅作工具兜底与隔离边界，不是 own 的共享依赖。 */
 export function realHarnessHome(env = process.env) {
   const explicit = env.QQBOT_HOME && env.QQBOT_HOME.trim();
   return explicit ? path.resolve(explicit) : path.join(os.homedir(), '.dsh');
@@ -59,7 +59,7 @@ export function realHarnessHome(env = process.env) {
 function realHomeFor(botHome) {
   const env = (process.env.QQBOT_HOME ?? '').trim();
   const fallback = path.join(os.homedir(), '.dsh');
-  if (env && path.resolve(env) !== path.resolve(botHome)) return path.resolve(env);
+  if (env && path.relative(path.resolve(env), path.resolve(botHome)) !== '') return path.resolve(env);
   return fallback;
 }
 
@@ -120,44 +120,28 @@ export function resolveBotHome(from) {
   return botHomeFromRoot(rootDir) || realHarnessHome();
 }
 
-/** 这些条目不进链接：`sessions` 本身，以及紧挨着它的备份/隔离目录（那是给我们排查用的）。 */
-function shouldSkip(name) {
-  return name === 'sessions' || /^sessions[-.]/i.test(name);
-}
-
-/** junction 的 readlink 有时带 `\\?\` 前缀，比较前去掉。 */
-function normalizeLink(target) {
-  return path.resolve(String(target).replace(/^\\\\\?\\/, ''));
-}
-
 function linkTypeOf(target) {
   try {
     const stat = fs.lstatSync(target);
     if (stat.isSymbolicLink()) return 'symlink';
     if (stat.isDirectory()) return 'dir';
     return 'file';
-  } catch {
-    return 'missing';
+  } catch (error) {
+    if (error.code === 'ENOENT') return 'missing';
+    throw error; // 访问失败不是缺失，更不能算已隔离。
   }
 }
 
-function createLink(source, target, isDirectory) {
-  if (isDirectory) {
-    fs.symlinkSync(source, target, 'junction');
-    return 'junction';
-  }
-  try {
-    fs.symlinkSync(source, target, 'file');
-    return 'symlink';
-  } catch {
-    fs.linkSync(source, target); // 同卷兜底：硬链接（跨卷会抛，交给上层报错）
-    return 'hardlink';
-  }
+// path.relative 遵循平台路径语义（Windows 大小写不敏感），不误伤同名前缀的兄弟目录。
+function sameOrNested(parent, child) {
+  const relative = path.relative(parent, child);
+  return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`));
 }
 
 /**
- * 确保私有 home 存在、`sessions` 是真实目录、其余条目都链到真 home。
- * @param {{envFile?: string, rootDir?: string, home?: string}} options
+ * 仅确保私有 home 存在且 `sessions` 是真实目录。own 不消费全局 profiles 等共享面；
+ * 其他既有实体/链接一律不检查、不删除、不修复，也不要求全局 home 存在。
+ * @param {{envFile?: string, rootDir?: string, home?: string, dryRun?: boolean}} options
  * @returns {{home: string|null, created: string[], ok: string[], problems: string[]}}
  */
 export function prepareBotHome({ envFile = '', rootDir = '', home = '', dryRun = false } = {}) {
@@ -172,78 +156,32 @@ export function prepareBotHome({ envFile = '', rootDir = '', home = '', dryRun =
   const created = [];
   const ok = [];
 
-  if (path.resolve(realHome) === botHome) {
+  if (path.relative(realHome, botHome) === '') {
     return { home: botHome, created, ok, problems: ['QQBOT_HOME 与真 home 相同 —— 没有隔离，请把 .env 的 QQBOT_HOME 指到一个独立目录'], ready: false };
   }
-  if (botHome.startsWith(`${realHome}${path.sep}`) || realHome.startsWith(`${botHome}${path.sep}`)) {
-    return { home: botHome, created, ok, problems: ['私有 home 与真 home 互相嵌套 —— 拒绝继续（会链接成环）'], ready: false };
+  if (sameOrNested(realHome, botHome) || sameOrNested(botHome, realHome)) {
+    return { home: botHome, created, ok, problems: ['私有 home 与真 home 互相嵌套 —— 拒绝继续（会话根没有独立隔离）'], ready: false };
   }
 
-  if (!dryRun) fs.mkdirSync(botHome, { recursive: true });
   const sessionsDir = path.join(botHome, 'sessions');
-  if (linkTypeOf(sessionsDir) === 'missing') {
-    if (dryRun) created.push('sessions/（待建，真实目录）');
-    else {
-      fs.mkdirSync(sessionsDir, { recursive: true });
-      created.push('sessions/（真实目录）');
-    }
-  } else if (linkTypeOf(sessionsDir) === 'symlink') {
-    problems.push(`sessions 竟然是链接（${fs.readlinkSync(sessionsDir)}）—— 会话日志就没隔离了`);
-  } else {
-    ok.push('sessions/');
-  }
-
-  let entries = [];
   try {
-    entries = fs.readdirSync(realHome, { withFileTypes: true });
-  } catch (error) {
-    problems.push(`读不到真 home ${realHome}：${error.message}`);
-    return { home: botHome, created, ok, problems, ready: false };
-  }
-
-  for (const entry of entries) {
-    const name = entry.name;
-    if (shouldSkip(name)) continue;
-    // ⚠️ 2026-10-16(1.150.87,6B 第二刀):**own 模式不再新建共享链接**。
-    //    以前这里会把真 home 的 profiles/storages/skills/dsh-runtimes/cache/attachments/
-    //    llm-deepseek 与三个点文件全部 junction 进私有 home —— 那是"给 DSH 子进程用的共享面"。
-    //    现在桥不spawn任何 DSH 子进程了 ⇒ 这些链接是纯冗余（而且是桥与全局 `~\.dsh` 之间
-    //    唯一的硬连接）。**已存在的链接一律不删**（保守：不碰 DSH 侧、也不动历史现场），
-    //    只是不再新建；真要清掉请手工确认后删（docs\22 退役清单里有说明）。
-    if (linkTypeOf(path.join(botHome, name)) === 'missing') continue;
-    const source = path.join(realHome, name);
-    const target = path.join(botHome, name);
-    const isDirectory = entry.isDirectory();
-    const kind = linkTypeOf(target);
-
+    if (!dryRun) fs.mkdirSync(botHome, { recursive: true });
+    const kind = linkTypeOf(sessionsDir);
     if (kind === 'missing') {
-      if (dryRun) {
-        created.push(`${name}（待建链接）`);
-        continue;
+      if (dryRun) created.push('sessions/（待建，真实目录）');
+      else {
+        fs.mkdirSync(sessionsDir, { recursive: true });
+        created.push('sessions/（真实目录）');
       }
-      try {
-        const made = createLink(source, target, isDirectory);
-        created.push(`${name}（${made === 'junction' ? 'junction' : made}）`);
-      } catch (error) {
-        problems.push(`${name} 链接失败：${error.message}`);
-      }
-      continue;
+    } else if (kind === 'symlink') {
+      problems.push(`sessions 竟然是链接（${fs.readlinkSync(sessionsDir)}）—— 会话日志就没隔离了`);
+    } else if (kind !== 'dir') {
+      problems.push('sessions 是文件，不是私有真实目录 —— 拒绝继续，请保留现场核查');
+    } else {
+      ok.push('sessions/');
     }
-    if (kind === 'symlink') {
-      let linked = '';
-      try {
-        linked = normalizeLink(fs.readlinkSync(target));
-      } catch {
-        linked = '';
-      }
-      if (linked === path.resolve(source)) {
-        ok.push(name);
-      } else {
-        problems.push(`${name} 链接指向 ${linked}，应为 ${path.resolve(source)}`);
-      }
-      continue;
-    }
-    problems.push(`${name} 在私有 home 里是真实 ${kind}（不是链接）—— 两边会分叉，建议手工确认后删除它再跑一次`);
+  } catch (error) {
+    problems.push(`私有 sessions 无法检查或准备：${error.message}`);
   }
 
   return {
@@ -263,7 +201,6 @@ export function checkBotHome(options = {}) {
 
 /** 私有 home 是否已经建好（用于"没配就什么都不做"的分支）。 */
 export function botHomeExists(rootDir) {
-  const home = botHomeFromRoot(rootDir);
-  if (!home) return '';
-  return fs.existsSync(path.join(home, 'sessions')) ? home : '';
+  const result = checkBotHome({ rootDir });
+  return result.ready ? result.home : '';
 }

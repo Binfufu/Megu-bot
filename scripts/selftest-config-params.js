@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, loadEnvFile, CONFIG_PARAM_DEFINITIONS, DEFAULT_GROUP_KEYWORDS } from '../src/config.js';
-import { CONFIG_DERIVED_DEFAULTS, CONFIG_KNOWN_ENV } from '../src/config-params.js';
+import { CONFIG_DERIVED_DEFAULTS, CONFIG_KNOWN_ENV, SUPERVISOR_CHILD_ENV_KEYS, buildSupervisorChildEnv } from '../src/config-params.js';
 import { resolveParams } from '../src/params.js';
 
 // Same-volume synthetic files only. Never inspect the checkout's .env or any DB.
@@ -44,7 +44,7 @@ export function registerConfigParamsTests({ test, assert }) {
     const defaults = resolveParams(CONFIG_PARAM_DEFINITIONS);
     assert.deepEqual(defaults.inputs, {});
     assert.equal(defaults.values.QQBOT_MOOD_TTL_MS, 600000);
-    assert.equal(defaults.values.QQBOT_POKE_REPLY_CHANCE, 1);
+    assert.equal(defaults.values.QQBOT_POKE_REPLY_CHANCE, 0.35);
     assert.deepEqual(defaults.values.QQBOT_GROUP_KEYWORDS, DEFAULT_GROUP_KEYWORDS);
     assert.ok(CONFIG_DERIVED_DEFAULTS.QQBOT_MEITU_DB.includes('explicit QQBOT_STATE_DB'));
     assert.ok(CONFIG_DERIVED_DEFAULTS.QQBOT_MEMORY_DB.includes('QQBOT_MOOD_THEME'));
@@ -346,6 +346,29 @@ export function registerConfigParamsTests({ test, assert }) {
     assert.equal(JSON.stringify(warned.paramWarnings).includes('QQBOT_UNREGISTERED_FIXTURE'), false);
     assert.equal(JSON.stringify(warned.paramWarnings).includes('fixture-secret'), false);
   }));
+
+  test('config params: 守护注入给子进程的 QQBOT_ 键必须全部已登记/已知（幽灵告警防复发）', () => {
+    // 不读源码文件：只看 `buildSupervisorChildEnv()` 的真实输出 —— 这条套件也会在
+    // 「公开最小树」夹具里跑，那里没有 src/supervisor.js（2026-10-30 踩过：ENOENT 把
+    // public-entry 与公开子集一起带红）。单一来源 = 这个函数 + 下面那个列表。
+    const registered = new Set(CONFIG_PARAM_DEFINITIONS.map((def) => def.id));
+    const known = new Set(CONFIG_KNOWN_ENV);
+    const unknown = (keys) => keys.filter((key) => !registered.has(key) && !known.has(key));
+
+    const built = buildSupervisorChildEnv({}, { envFile: 'bots/x/.env', dshHome: 'E:/fixture-home' });
+    const injected = Object.keys(built).filter((key) => key.startsWith('QQBOT_'));
+    assert.deepEqual(unknown(injected), [],
+      `守护注入的键必须已登记或列入 CONFIG_KNOWN_ENV：${unknown(injected).join(',')}`);
+    // 列表与实现不许各写一份：列表里的键必须在真实输出里全部出现。
+    for (const key of SUPERVISOR_CHILD_ENV_KEYS) {
+      assert.ok(Object.hasOwn(built, key), `SUPERVISOR_CHILD_ENV_KEYS 里的 ${key} 必须真的被注入`);
+    }
+    // 没有 dshHome 时不注 QQBOT_HOME（否则会拿覆盖去掩盖 .env 的值）。
+    const noHome = buildSupervisorChildEnv({}, { envFile: 'bots/x/.env' });
+    assert.equal(Object.hasOwn(noHome, 'QQBOT_HOME'), false);
+    // 负对照：同一套判定必须能咬出合成幽灵键（不是恒真）。
+    assert.deepEqual(unknown([...injected, 'QQBOT_SYNTHETIC_GHOST']), ['QQBOT_SYNTHETIC_GHOST']);
+  });
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

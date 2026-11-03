@@ -25,7 +25,37 @@ export const CONFIG_KNOWN_ENV = Object.freeze([
   'QQBOT_EMBED_CHECK_MS', 'QQBOT_REPAIR_TOOLS', 'QQBOT_APP_ID', 'QQBOT_SELFTEST_SKIP',
   'QQBOT_RELAY', 'QQBOT_RELAY_CONFIRM', 'QQBOT_RELAY_DENY', 'QQBOT_RELAY_EXPECT_NAMES',
   'QQBOT_RELAY_FROM', 'QQBOT_RELAY_TO', 'QQBOT_RELAY_VERIFY_NAMES', 'QQBOT_WORLD',
+  // 守护进程注入给子进程的内部旗标（`src/supervisor.js` 的 spawn env），由 `bots/*/run.cmd`
+  // 读:定义了就不在窗口末尾 `pause`。它是**进程间旗标，不是用户参数**，所以不进参数目录；
+  // 但必须列在这里 —— 否则每次启动都报一句 PARAM_UNKNOWN_ENV 的幽灵告警（2026-10-30 实测：
+  // 两只 bot 的 .env 一个未知键都没有，告警却每轮都在，根因就是漏登记这一条）。
+  'QQBOT_NO_PAUSE',
 ]);
+
+/**
+ * **守护进程注入给子进程的环境键** —— 唯一来源。
+ *
+ * `src/supervisor.js` 用 `buildSupervisorChildEnv()` 拼 spawn env，判据只核对这一个列表，
+ * 于是"代码真注入的键"与"参数层认可的键"不可能各写一份而悄悄漂移（2026-10-30 的幽灵告警
+ * 就是漏了这里的一条：`QQBOT_NO_PAUSE` 每轮都被判成未知环境项）。
+ */
+export const SUPERVISOR_CHILD_ENV_KEYS = Object.freeze(['QQBOT_ENV_FILE', 'QQBOT_HOME', 'QQBOT_NO_PAUSE']);
+
+/**
+ * 拼守护给子进程的环境：继承父进程的，再覆盖以下三项。
+ * @param {Record<string, string|undefined>} baseEnv 通常是 `process.env`
+ * @param {{envFile?: string, dshHome?: string|null}} options
+ */
+export function buildSupervisorChildEnv(baseEnv = {}, { envFile, dshHome = null } = {}) {
+  const env = { ...baseEnv };
+  if (envFile) env.QQBOT_ENV_FILE = envFile;
+  // 隔离（2026-10-08）：显式把机器人私有 home 传下去。launch.js 自己还会再同步一次
+  // （它会读 .env），这里是双保险 —— 万一 launch 那步没生效，也不会又写回共享根。
+  if (dshHome) env.QQBOT_HOME = dshHome;
+  // 失败时干净退出，别在无人值守的窗口里停在"按任意键"（`bots/*/run.cmd` 读它）。
+  env.QQBOT_NO_PAUSE = '1';
+  return env;
+}
 
 export const CONFIG_DERIVED_DEFAULTS = Object.freeze({
   QQBOT_OWN_INPUT_TOKEN_LIMIT: 'null: no input token limit',
@@ -203,7 +233,7 @@ export function createConfigParamDefinitions(parsers) {
   positive('QQBOT_MEMORY_RECENCY_WEIGHT_X10', 5);
   nonnegative('QQBOT_KAOMOJI_BREAK_WIDTH', 32);
   boolean('QQBOT_POKE', true);
-  ratio('QQBOT_POKE_REPLY_CHANCE', 1);
+  ratio('QQBOT_POKE_REPLY_CHANCE', 0.35);
   boolean('QQBOT_FACE', true);
   ratio('QQBOT_FACE_REPLY_CHANCE', 0.15);
   nonnegative('QQBOT_INTERACTION_COOLDOWN_MS', 180_000);

@@ -26,25 +26,48 @@ export const SERIOUS_CATEGORIES = Object.freeze({
   /** 重病 —— 用户点名要加的那一类。 */
   illness: ['癌症', '肿瘤', '化疗', '放疗', '确诊', '住院', '手术', 'ICU', '重症', '病危', '晚期',
     '白血病', '中风', '心梗', '脑梗', '抢救', '绝症', '瘫痪', '失明', '截肢', '尿毒症', '肝移植', '透析'],
-  /** 死亡 / 丧亲 / 自伤。 */
-  death: ['去世', '走了', '过世', '葬礼', '出殡', '自杀', '想死', '不想活', '活不下去', '轻生', '遗书'],
-  /** 灾难与社会事件 —— 用户举的 911、大地震。 */
-  disaster: ['地震', '海啸', '洪水', '台风', '龙卷风', '泥石流', '山火', '火灾', '爆炸', '塌了',
-    '坠机', '空难', '车祸', '撞车', '战争', '开战', '空袭', '枪击', '恐怖袭击', '911', '疫情', '封城', '逃难'],
+/** 死亡 / 丧亲 / 自伤。⚠️ 2026-11-03 收紧：删掉"走了"（"我先走了"是最常见的日常句，误伤率太高）。 */
+  death: ['去世', '过世', '葬礼', '出殡', '自杀', '想死', '不想活', '活不下去', '轻生', '遗书'],
+  /** 灾难与社会事件。⚠️ 2026-11-03 收紧：删掉"爆炸/塌了/台风/龙卷风/撞车/开战/疫情/封城"
+   *  —— 它们在玩梗、游戏、天气闲聊里的误伤率远高于真事件（主人："这个几乎用不上，可以更严"）。 */
+  disaster: ['地震', '海啸', '洪水', '泥石流', '山火', '火灾', '坠机', '空难', '车祸',
+    '战争', '空袭', '枪击', '恐怖袭击', '911', '逃难'],
 });
 
 /** 同一类里只要命中一个就够 —— 命中多个也只算一次(档位取最重的那个)。 */
 const CATEGORY_WEIGHT = { illness: 'critical', death: 'critical', disaster: 'serious' };
 
 /**
+ * **玩笑 / 否认 / 非真实**语境（2026-11-03 新增）。
+ *
+ * 现场：「这是动漫里的爆炸，不是真事」被当成严肃话题，把轻松接话拉成了沉重说教。
+ * 命中这一组就**整轮不判严肃**：当事人自己已经声明"不是真的 / 在开玩笑"。
+ */
+const JOKE_OR_NEGATION_RE = /不是真事|不是真的|不是事实|开玩笑|玩梗|梗图|表情包|打个比方|比喻一下|梦到|做梦|梦里|假的|编的|夸张|演一下/;
+
+/**
+ * **虚构作品**语境（动漫/游戏/影视/小说/同人）。
+ *
+ * 只用来**压掉 disaster 那一档**（"动漫里的火灾""游戏剧情里的地震"不该让语气变沉重）；
+ * 重病/丧亲两类不压 —— 「我妈住院了，我在游戏里…」这种句子不能因为出现"游戏"就不安慰。
+ */
+const FICTION_RE = /动漫|动画|漫画|二次元|番剧|电影|电视剧|小说|游戏|剧情|角色|同人|cosplay|cos|虚拟|模拟|设定里|图里|画面/;
+
+/**
  * 这句话是不是严肃话题?**纯函数**。
+ *
+ * 2026-11-03 口径（主人）：**宁可不判，也不要误伤**。真严肃场景很少，误判一次会把
+ * 一段日常调侃写成沉重说教。所以先过两道排除：玩笑/否认语境 → 整轮不判；
+ * 虚构语境 → 只压 disaster。后续可考虑把"要不要认真"整个交给模型判断（见 TODO）。
  *
  * @param {string} text 这一轮的人话
  * @returns {{level: 'critical'|'serious'|null, categories: string[], matched: string[]}}
  */
 export function detectSerious(text) {
   const source = String(text ?? '');
-  if (source === '') return { level: null, categories: [], matched: [] };
+  const empty = { level: null, categories: [], matched: [] };
+  if (source === '') return empty;
+  if (JOKE_OR_NEGATION_RE.test(source)) return empty;
   const categories = [];
   const matched = [];
   for (const [category, words] of Object.entries(SERIOUS_CATEGORIES)) {
@@ -53,8 +76,12 @@ export function detectSerious(text) {
     categories.push(category);
     matched.push(...hit);
   }
-  if (categories.length === 0) return { level: null, categories: [], matched: [] };
+  if (categories.length === 0) return empty;
   const level = categories.some((category) => CATEGORY_WEIGHT[category] === 'critical') ? 'critical' : 'serious';
+  // 只有 disaster 这一档被虚构语境压掉；重病/丧亲不压。
+  if (level === 'serious' && categories.every((category) => category === 'disaster') && FICTION_RE.test(source)) {
+    return empty;
+  }
   return { level, categories, matched };
 }
 

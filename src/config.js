@@ -1334,15 +1334,22 @@ function buildRuntimeConfig({ rootDir, envFile, loadedEnvFile }) {
             return parsed;
           })(),
         },
-        // Small gestures aimed at the bot — a poke (double-tap on its avatar) or
-        // a bare 表情. Both deserve a reaction *sometimes*: a human does not
-        // answer every one. The platform does not say who a gesture was aimed at,
-        // so a low rate doubles as the safety valve (see D25).
+        // Small gestures aimed at the bot — a `[戳一戳]` placeholder payload
+        // (QQ 大表情/互动表情) or a bare 表情. Both deserve a reaction *sometimes*:
+        // a human does not answer every one. The platform does not say who a
+        // gesture was aimed at, so a low rate doubles as the safety valve (see D25).
+        //
+        // ⚠️ 2026-11-03 复核（1.208.6）：双击头像的「戳了戳」**不进 bot 的入站事件流**
+        //   —— 生产实测与官方事件文档都只有 GROUP_AT_MESSAGE_CREATE /
+        //   GROUP_MESSAGE_CREATE，没有戳一戳事件。群里带 `[戳一戳]` 占位句的入站
+        //   实际只来自大表情/互动表情，所以不能把它当"有人戳了我"提到 @ 级；
+        //   10-28 的 1 已撤回（见 docs/03 2026-11-03 条与 TODO 的戳一戳项）。
         interaction: {
           pokeEnabled: asBool('QQBOT_POKE', true),
-          // A poke is a direct "I'm poking you": answered at the same level as an
-          // @ (主人 2026-10-28 拍板「戳一戳跟 @ 一样高」)。每群冷却(下)仍防连戳刷屏。
-          pokeChance: asRatio('QQBOT_POKE_REPLY_CHANCE', 1),
+          // A `[戳一戳]`-marked inbound is a big-emoji / interactive-emoji payload,
+          // not the double-tap poke (that one never reaches us). Keep the low rate
+          // and the per-group cooldown.
+          pokeChance: asRatio('QQBOT_POKE_REPLY_CHANCE', 0.35),
           faceEnabled: asBool('QQBOT_FACE', true),
           // A bare emoji is a much weaker signal — usually just a reaction.
           faceChance: asRatio('QQBOT_FACE_REPLY_CHANCE', 0.15),

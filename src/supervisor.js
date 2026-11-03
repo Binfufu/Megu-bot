@@ -4,6 +4,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { isProcessAlive, readLock, runningPid } from './lock.js';
+import { buildSupervisorChildEnv } from './config-params.js';
 import { sessionDirName } from './memory-archive.js';
 import { DEFAULT_RETENTION_DAYS, formatBytes, sweepWorkspace } from './session-retention.js';
 
@@ -560,15 +561,7 @@ export async function runSupervisor({
     try {
       child = spawn(process.execPath, [path.join(rootDir, 'scripts', 'launch.js')], {
         cwd: rootDir,
-        env: {
-          ...process.env,
-          QQBOT_ENV_FILE: spec.envFile,
-          // 隔离（2026-10-08）：显式把机器人私有 home 传下去。launch.js 自己还会再同步一次
-          // （它会读 .env），这里是双保险 —— 万一 launch 那步没生效，也不会又写回共享根。
-          ...(spec.dshHome ? { QQBOT_HOME: spec.dshHome } : {}),
-          // 失败时干净退出,别在无人值守的窗口里停在"按任意键"
-          QQBOT_NO_PAUSE: '1',
-        },
+        env: buildSupervisorChildEnv(process.env, { envFile: spec.envFile, dshHome: spec.dshHome }),
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
       });

@@ -13,8 +13,10 @@
  *       --out %TEMP%\meitu-probe --source auto --proxy http://127.0.0.1:7890 --dry
  *
  * 参数:
- *   --char <tag>          角色 tag(必填;中文名由别名表在上层翻好)
+ *   --char <tag>          角色 tag(中文名由别名表在上层翻好;**通用检索可省**,省时必须给 --tags 或 --hot)
  *   --tags <t1,t2>        修饰 tag(最多取前 2 个,实际查询按 rung 只带第一个)
+ *   --hot                 热门检索(2026-10-30 主人 A「不限 IP」):不挂角色也不加 tag,
+ *                         只按档位 rating + 图源热度排序取图;**与 --char 互斥时以 --char 为准**。
  *   --count N             要几张(默认 1)
  *   --out <dir>           落盘目录(下载必填;`--dry` 可不填)
  *   --source auto|danbooru|safebooru  (默认 auto)
@@ -123,6 +125,7 @@ function parseArgs(argv) {
     extraDirs: [],
     pages: PAGES_PER_RUNG,
     group: '',
+    hot: false,
     dry: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -147,6 +150,7 @@ function parseArgs(argv) {
       case '--extra-dir': options.extraDirs.push(next().trim()); break;
       case '--pages': options.pages = Number.parseInt(next(), 10); break;
       case '--group': options.group = next().trim(); break;
+      case '--hot': options.hot = true; break;
       case '--dry': options.dry = true; break;
       default:
         log(`忽略不认识的参数:${arg}`);
@@ -342,10 +346,16 @@ async function main() {
     + ` proxy=${options.proxy || '(env)'} proxyReady=${proxyReady ? 'yes' : 'no'}`,
   );
 
-  if (!options.char) return fail('no_character', '缺少 --char', []);
+  // 2026-10-30 主人拍板 A（不限 IP）：允许「无角色」的通用检索 ——
+  //   · 有 --tags → 只按 tag 查（不挂角色，结果来自任意作品）；
+  //   · 连 tag 都没有 → 必须显式 --hot（热门安全图，同样不挂角色）。
+  //   三者都没有（无 char、无 tags、无 --hot）没有意义，照旧明确失败。
+  if (!options.char && tags.length === 0 && !options.hot) {
+    return fail('no_character', '缺少 --char（通用检索至少要一个 --tags；热门检索用 --hot）', []);
+  }
   if (!options.dry && !options.out) return fail('download_failed', '缺少 --out', []);
 
-  const rungs = buildRungs({
+  let rungs = buildRungs({
     charTag: options.char,
     tags,
     source: options.source,
@@ -353,6 +363,11 @@ async function main() {
     ratingOverride: options.ratingAllow.length > 0 ? options.ratingAllow : undefined,
     tier: options.tier,
   });
+  // 通用检索(无角色)只接受带**具体 tag** 的 rung；`--hot` 例外 —— 热门模式要的正是纯 rating 兜底 rung。
+  // 否则纯 rating 兜底会变成「随机热门图」，和用户要的修饰不符(2026-10-30 A)。角色检索的兜底行为不变。
+  if (!options.char && !options.hot) {
+    rungs = rungs.filter((rung) => rung.tags.some((tag) => !/^rating:/iu.test(String(tag))));
+  }
   if (rungs.length === 0) return fail('source_down', '没有可用的图源', []);
 
   const outDir = options.out ? path.resolve(options.out) : '';

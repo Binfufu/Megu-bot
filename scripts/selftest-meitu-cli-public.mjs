@@ -103,10 +103,12 @@ globalThis.fetch = async (input) => {
   if (!dan && !safe) throw new Error('offline fixture forbids non-search/download URL');
   const tags = (url.searchParams.get('tags') || '').split(/\\s+/u);
   const char = tags[0];
-  if (!['demo_a', 'demo_unknown_8246'].includes(char)) throw new Error('unexpected synthetic character');
+  // --hot（2026-10-30 A 不限 IP）：无角色无 tag 的热门检索，首项就是 rating:* 元标签。
+  const hot = /^rating:/u.test(char ?? '');
+  if (!hot && !['demo_a', 'demo_unknown_8246', 'cat_girl', 'empty_tag'].includes(char)) throw new Error('unexpected synthetic character');
   const rating = dan ? (tags.includes('rating:general') ? 'g' : 's')
     : (tags.includes('rating:questionable') ? 'questionable' : 'safe');
-  const posts = char === 'demo_unknown_8246' ? [] : [701, 702].map((id, i) => ({
+  const posts = !hot && ['demo_unknown_8246', 'empty_tag'].includes(char) ? [] : [701, 702].map((id, i) => ({
     id, rating, tag_string: 'demo_a landscape blue solo', tags: 'demo_a landscape blue solo',
     file_url: 'https://synthetic.invalid/' + id + '.jpg', file_ext: 'jpg',
     md5: i ? '900150983cd24fb0d6963f7d28e17f72' : '5d41402abc4b2a76b9719d911017c592',
@@ -189,10 +191,42 @@ test('缺 C 与运行期表时真实公开 alias 默认空表，未知名称不�
   assert.deepEqual(probe.calls, []);
 });
 
-test('真实 CLI 缺 --char：末行 no_character JSON、退出 0、零 fetch', () => {
+test('真实 CLI 缺 --char 且无 --tags/--hot：末行 no_character JSON、退出 0、零 fetch', () => {
   const result = runCli('--dry');
-  assert.deepEqual(result.json, { ok: false, reason: 'no_character', detail: '缺少 --char', rungs: [] });
+  assert.deepEqual(result.json, { ok: false, reason: 'no_character', detail: '缺少 --char（通用检索至少要一个 --tags；热门检索用 --hot）', rungs: [] });
   assert.deepEqual(result.calls, []);
+});
+
+test('真实 CLI --hot：无角色无 tag 的热门检索，只按 rating + 热度排序查(2026-10-30 A)', () => {
+  const result = runCli('--hot', '--dry');
+  assert.equal(result.json.ok, true);
+  assert.deepEqual(result.json.candidates.map((post) => post.id), [701, 702]);
+  assert.equal(result.calls.length, 1);
+  const url = new URL(result.calls[0]);
+  assert.equal(url.origin, 'https://safebooru.org');
+  assert.equal(url.searchParams.get('tags'), 'rating:questionable sort:score');
+  assert.equal(url.searchParams.get('pid'), '0');
+});
+
+test('真实 CLI 无 --char + 有 --tags：通用检索照查,URL 首项是 tag 不是空角色(2026-10-30 A)', () => {
+  const result = runCli('--tags', 'cat_girl', '--dry');
+  assert.equal(result.json.ok, true);
+  assert.equal(result.json.dry, true);
+  assert.deepEqual(result.json.candidates.map((post) => post.id), [701, 702]);
+  assert.equal(result.calls.length, 1);
+  const url = new URL(result.calls[0]);
+  assert.equal(url.searchParams.get('tags'), 'cat_girl rating:questionable sort:score');
+  assert.equal(url.searchParams.get('pid'), '0');
+});
+
+test('真实 CLI 通用检索无结果:不退化到纯 rating 兜底,只查带 tag 那一档(2026-10-30 A)', () => {
+  const result = runCli('--tags', 'empty_tag', '--dry');
+  assert.equal(result.json.ok, false);
+  assert.equal(result.json.reason, 'no_result');
+  assert.equal(result.calls.length, 1, '通用检索不许查「随机热门图」兜底档');
+  assert.equal(result.json.rungs.length, 1);
+  const url = new URL(result.calls[0]);
+  assert.equal(url.searchParams.get('tags'), 'empty_tag rating:questionable sort:score');
 });
 
 test('真实 CLI 下载模式缺 --out：download_failed JSON、退出 0、零 fetch', () => {

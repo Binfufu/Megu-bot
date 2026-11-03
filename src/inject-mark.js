@@ -37,7 +37,7 @@ export const INJECT_CLOSE = '[[/bridge-inject]]';
 // ⚠️ `kb` = 知识库块(W3 / P2-B,2026-10-22):doc/doc_chunk 里"她在原作经历过"的资料,
 //    作为独立来源块注入(预算独立 ≤300 字)。照抄 insight 的登记形状 —— kind 不登记,
 //    wrapInject 当场抛,别等归档剥壳时静默漏掉。
-export const INJECT_KINDS = Object.freeze(['handoff', 'summary', 'recall', 'facts', 'notes', 'scene', 'insight', 'kb']);
+export const INJECT_KINDS = Object.freeze(['handoff', 'summary', 'recall', 'facts', 'notes', 'scene', 'insight', 'kb', 'lexicon']);
 
 const OPEN_RE = /^\[\[bridge-inject ([a-z0-9-]+)\]\][ \t]*$/;
 const CLOSE_RE = /^\[\[\/bridge-inject\]\][ \t]*$/;

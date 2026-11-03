@@ -43,10 +43,8 @@ if (!fs.existsSync(envFile)) {
   ]);
 }
 
-// ⚠️ 隔离（2026-10-08）：把这只机器人的 Harness home 指到**自己的 home** —— `sessions` 是
-//    私有真实目录，`profiles` / `storages` / 缓存 / 凭据全部用链接共享（原理与理由见
-//    `src\bot-home.js` 顶部那一大段：桌面版会遍历 `$QQBOT_HOME\sessions` 做身份校验，
-//    机器人那边一条脏日志就能把桌面版的 workspaceRegistry 整链拖停）。
+// 隔离：私有 home 的 sessions 必须是真实目录。own 不再消费全局 DSH profiles 等共享面，
+// 不要求它们是链接，也不删除/修补历史实体或链接（见 src\bot-home.js）。
 //
 //    为什么必须在这里**显式赋值**：`process.loadEnvFile` 不覆盖已经存在的环境变量（实测），
 //    所以"从某个 DSH 会话里启动"时，`.env` 里那行 `QQBOT_HOME` 会失效。
@@ -54,14 +52,15 @@ if (!fs.existsSync(envFile)) {
 const { prepareBotHome } = await import('../src/bot-home.js');
 const botHome = prepareBotHome({ envFile, rootDir: ROOT_DIR });
 if (botHome.home) {
+  if (!botHome.ready) {
+    bail('私有 home 未隔离，拒绝启动（保留现场，不自动删除或修补链接）', [
+      ...botHome.problems,
+      '只读排查：node scripts\\console.js --check',
+    ]);
+  }
   const inheritedHome = process.env.QQBOT_HOME;
   process.env.QQBOT_HOME = botHome.home;
   process.env.QQBOT_QQBOT_HOME = botHome.home;
-  if (botHome.problems.length) {
-    out(`  ⚠ 私有 home 有 ${botHome.problems.length} 个问题（启动继续，但会话可能又落回共享根）`);
-    for (const item of botHome.problems) out(`      · ${item}`);
-    out('      排查：node scripts\\console.js --check');
-  }
   out(`    QQBOT_HOME  : ${botHome.home}`
     + `${inheritedHome && inheritedHome !== botHome.home ? `　（进程原值 ${inheritedHome}，已覆盖）` : '　（机器人私有：会话日志与桌面版隔离）'}`);
 }

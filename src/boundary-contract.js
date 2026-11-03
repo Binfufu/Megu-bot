@@ -173,7 +173,7 @@ export const CONTRACT_ROWS = Object.freeze([
     owner: '**平台**(入站一条消息最多 5 条被动回复)+ **机器人的情绪上限**(普通发言分条发)',
     trigger: '每次要发多条时',
     how: '`planSpokenLines()` 统一分条(答话/合并/早安/自发/网页同一份,D288),`sendSpokenLines()` 每段一条并**接续 `msg_seq`**;普通发言超量的段**并进最后一段**(不截断、不转主动配额),只有显式启用的特殊分段动作超限才走主动配额(20/分钟、1000/天)',
-    note: '⚠️ 口语标点清理在**分条之后**(行尾剥 + 段内停顿标点变空格;`～` 保留,D288);段间节拍 = `spoken.baseDelayMs + 字数×perCharDelayMs`±15% 抖(【暂定】)',
+    note: '⚠️ 口语标点清理在**分条之后**(只剥普通句末单个 `。`；句中及其它语气标点、独立/连续句号保留);段间节拍 = `spoken.baseDelayMs + 字数×perCharDelayMs`±15% 抖(【暂定】)',
     anchors: [
       { file: 'src/index.js', must: ['const MAX_PASSIVE_SEQ = 5;'] },
       { file: 'src/mood.js', must: ['export function splitSpokenLines', 'CHAT_TRAILING_PUNCT'] },

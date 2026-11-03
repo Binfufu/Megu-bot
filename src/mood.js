@@ -654,7 +654,7 @@ export function truncateForMood(text, maxChars) {
  * @param {string} text 模型原文
  * @param {{maxChars?: number, maxLines?: number}} [options]
  * @param {boolean} [preservePunctuation=false] **S1 风格包 `punctuation.preserve`**:
- *   true 时**跳过** `cleanSpokenLine` 的行尾/停顿标点清理,标点原样保留;
+ *   true 时跳过普通句末中文句号清理，标点原样保留；false 也不删除其它标点。
  *   链接/代码保护、空段过滤、段数封顶、防碎段照旧。任务/知识轮的整条保真分支
  *   **不经过这里**(`planSpokenLines` 的 preserveFormatting 先返回)。
  *   ⚠️ 刻意放在第三个位置参数(而不是 options 里):保持既有签名/旧切片兼容。
@@ -686,7 +686,11 @@ export function splitSpokenLines(text, { maxChars = 0, maxLines = 5 } = {}, pres
   const source = plain
     .replace(/```[^\n]*\n[\s\S]*?\n?```|```[^\n]*```|```[\s\S]*$/g, protect)
     .replace(/https?:\/\/[^\s\u3000-\u303F\u4E00-\u9FFF\uF900-\uFAFF\uFF00-\uFFEF]+/g,
-      (hit) => protect(hit.replace(/[。，、；：！？…）)】」』.,;:!?\]]+$/, '')));
+      (hit) => {
+        const url = hit.replace(/[。，、；：！？…）)】」』.,;:!?\]]+$/, '');
+        // 摘出的句末标点仍是正文，不能随 URL 占位一起吞掉。
+        return protect(url) + hit.slice(url.length);
+      });
 
   // ① **句末标点(和换行)切句** —— 保留标点。⚠️ `……` 不算句末(那是喘口气,见 `truncateForMood`),
   //    它只在"这一段太长"时当软边界用(下面 `splitLongPiece`)。
@@ -699,7 +703,8 @@ export function splitSpokenLines(text, { maxChars = 0, maxLines = 5 } = {}, pres
     if (one !== '') pieces.push(one);
     buffer = '';
   };
-  for (const ch of source) {
+  const sourceChars = Array.from(source);
+  for (const [at, ch] of sourceChars.entries()) {
     if (ch === '\n') {
       // 换行只在**括号外**才是一道边界(括号没闭上就换行,内容还连着 —— 别把它切散)
       if (depth === 0) flush(); else buffer += ch;
@@ -710,7 +715,9 @@ export function splitSpokenLines(text, { maxChars = 0, maxLines = 5 } = {}, pres
     buffer += ch;
     // ⚠️ 括号深度 > 0 时标点**不是句末**(2026-10-12 现场:颜文字 `(￣ω￣;)` 里的 `;`
     //    被当句末,`)` 单独成了一条 —— 见 outbound #53/#54)
-    if (depth === 0 && '。！？!?；;'.includes(ch)) flush();
+    // 连续语气标点属于同一句（！！/？！/。。。），不能拆成标点碎泡。
+    if (depth === 0 && '。！？!?；;'.includes(ch)
+      && !'。！？!?；;'.includes(sourceChars[at + 1] ?? '\0')) flush();
   }
   flush();
 
@@ -736,8 +743,8 @@ export function splitSpokenLines(text, { maxChars = 0, maxLines = 5 } = {}, pres
     ? [...joined.slice(0, limitLines - 1), joined.slice(limitLines - 1).join('')]
     : joined;
 
-  // ④ **口语标点清理**(1.171.0 / D288;行尾剥 + 段内停顿标点变空格),然后**放回被保护的内容**。
-  //    整段只有标点时(`。。。` 这种)结果就是空串 → 过滤掉 = 一条都不发(不是发一条空的)。
+  // ④ 2026-10-31：只去普通句末的单个中文句号，其它标点不动。
+  //    独立句号或连续句号可能是无语表达，原样保留；最后放回链接/代码。
   //    ⚠️ S1 风格包 `punctuation.preserve=true` 时跳过清理 → 标点原样保留(仍 trim 空白,
   //       仍过滤空段,链接/代码仍在 restoreProtected 里原样放回)。
   return capped
@@ -749,28 +756,11 @@ export function splitSpokenLines(text, { maxChars = 0, maxLines = 5 } = {}, pres
 }
 
 /**
- * **聊天里不会打在结尾的标点**(1.106.3 / D175)。
- *
- * 用户 2026-10-10:「不用逗号收尾,句号也不用,现在的正常人发言都不会打句号和收尾的标点符号」。
- * ⚠️ 1.171.0 / D288 起,行尾清理**扩大**到 `！？…`(见 `CHAT_TRAILING_TONE`)——
- *    拟人化普及后"不带标点"是明确目标,情绪靠措辞表达;本常量保持原样,
- *    因为 `transcript.js` 的历史比对与测试仍引用它(它的语义 = D175 那一刀的口径)。
+ * 2026-10-31 主人收窄口径：只清普通聊天句末的中文句号。
+ * 逗号、问叹号、停顿与其它语气符号都是表达的一部分，不再删除或换空格。
+ * 独立句号/连续句号保留为可能的无语表达，见 cleanSpokenLine。
  */
-const CHAT_TRAILING_PUNCT = '。，、,;；:：';
-
-/** Local display content is separate from the unchanged runtime policy. */
-const CHAT_TRAILING_TONE = '！？!?.…';
-
-/** 行尾清理的完整集合(`CHAT_TRAILING_PUNCT` + 语气标点)。 */
-const SPOKEN_TRAILING_PUNCT = CHAT_TRAILING_PUNCT + CHAT_TRAILING_TONE;
-
-/**
- * **段内的停顿标点**(1.171.0 / D288):清理时换成**一个空格**(不是删掉 ——
- * 删了中文字会粘连)。⚠️ 只在**括号外**换:动作/颜文字里的标点原样留。
- * ⚠️ 1.171.2 / D290:**`，,` 按主人拍板退出这个集合** —— 句中逗号保留原样,
- * 只有行尾那一刀照旧剥(见 `CHAT_TRAILING_PUNCT`)。其余停顿标点(`。、;；:：`)照旧换空格。
- */
-const SPOKEN_PAUSE_PUNCT = '。、;；:：';
+const CHAT_TRAILING_PUNCT = '。';
 
 /**
  * **保护占位哨兵**(1.171.0 / D288 链接;1.171.1 / D289 起同时保护围栏代码块):
@@ -820,29 +810,19 @@ export function maybeSpokenEmoji({ chance = 0, random = Math.random, recent = []
 }
 
 /**
- * **一条的口语标点清理**(1.171.0 / D288;纯函数):
- *   ① 段内停顿标点(括号外)→ 一个空格 —— "去标点不粘连";
- *   ② 行尾标点(`SPOKEN_TRAILING_PUNCT`,连串 `!!!`/`。。。` 一起)剥到不见。
- * 颜文字/括号里的标点原样留(括号深度保护);链接此刻还是占位符,不受影响。
+ * 一条消息只剥正文末尾的单个 `。`，不碰句中标点或其它结尾符号。
+ * `。`/`。。。`/`好吧。。` 按无语表达保留，不根据正文猜测情绪。
+ * 括号/引号内部仍受深度保护；链接/代码此时为占位符。
  */
 function cleanSpokenLine(line) {
-  const chars = Array.from(String(line ?? ''));
-  let out = '';
+  const out = String(line ?? '').trim();
+  if (!out.endsWith('。') || out.endsWith('。。') || out === '。') return out;
   let depth = 0;
-  for (const [at, ch] of chars.entries()) {
+  for (const ch of out) {
     if (BRACKET_OPEN.includes(ch)) depth += 1;
     else if (BRACKET_CLOSE.includes(ch)) depth = Math.max(0, depth - 1);
-    // ⚠️ 两侧都是英文字母/数字的标点不是停顿(`12:30` / `1,000` —— 与软边界同一条护栏)
-    const prev = chars[at - 1] ?? '';
-    const next = chars[at + 1] ?? '';
-    const numeric = /[A-Za-z0-9]/.test(prev) && /[A-Za-z0-9]/.test(next);
-    out += depth === 0 && !numeric && SPOKEN_PAUSE_PUNCT.includes(ch) ? ' ' : ch;
   }
-  out = out.replace(/[ \t\u3000]{2,}/g, ' ').trim();
-  while (out !== '' && SPOKEN_TRAILING_PUNCT.includes(out[out.length - 1])) {
-    out = out.slice(0, -1).trimEnd();
-  }
-  return out;
+  return depth === 0 ? out.slice(0, -1).trimEnd() : out;
 }
 
 /**
@@ -860,16 +840,11 @@ function restoreProtected(line, parts) {
 }
 
 /**
- * **判据归一**(1.171.0 / D288;"除标点与空白外一个字不丢、不重排"):
- * 原文与切完拼回去的各跑一遍,结果必须相等。它**故意**跑的是一条与
- * `cleanSpokenLine` 不同的简单路径(只删不换),这样清理逻辑自己改坏了会被它咬住 ——
- * 判据不能与被判者同一份实现(D159 的精神)。`～` 两边都留,不影响相等性。
+ * 出站对账仅容忍中文句号与空白的差异，其它标点丢失也必须报错。
+ * 独立实现，不借用清理函数；精确的句号位置/无语表达另由回归数组断言。
  */
 export function normalizeSpokenForJudge(text) {
-  return String(text ?? '')
-    .replace(/https?:\/\/\S+/g, (hit) => hit.replace(/[。，、；：！？…）)】」』.,;:!?\]]+$/, ''))
-    .replace(new RegExp(`[${SPOKEN_TRAILING_PUNCT}${SPOKEN_PAUSE_PUNCT}～]`, 'gu'), '')
-    .replace(/\s+/g, '');
+  return String(text ?? '').replace(/。/gu, '').replace(/\s+/g, '');
 }
 
 /**
@@ -880,7 +855,7 @@ export function normalizeSpokenForJudge(text) {
 const BRACKET_OPEN = '（(「『【〔';
 const BRACKET_CLOSE = '）)」』】〕';
 
-/** 导出给测试与 transcript 比对用:D175 的行尾集合(语义保持那一刀的口径)。 */
+/** 导出当前可清理的普通句末符号集合，具体豁免由 cleanSpokenLine 决定。 */
 export { CHAT_TRAILING_PUNCT };
 
 /**

@@ -73,6 +73,12 @@ export function registerMeituInterpretTests({ test }) {
     assert.equal(body.messages[0].content.includes('INJECTION_USER_ONLY'), false);
     assert.match(body.messages[0].content, /不认识的人名/);
     assert.match(body.messages[0].content, /整体null/);
+    // 2026-10-30 兜底提示词放宽：泛称（含「小×」类目写法）允许 character:null；
+    // 「表达不了的修饰」忽略即可，不许因单个修饰映射不了就整体弃权。
+    assert.match(body.messages[0].content, /泛称/);
+    assert.match(body.messages[0].content, /小萝莉/);
+    assert.match(body.messages[0].content, /表达不了的修饰/);
+    assert.match(body.messages[0].content, /作品名都不算泛称/);
     const data = JSON.parse(body.messages[1].content);
     assert.equal(data.text, text);
     assert.deepEqual(data.candidates, [{ name: '合成名丁', tag: 'fixture_name_d' }, { name: '合成名戊', tag: 'fixture_name_e_(fixture:work_c)' }]);
@@ -83,6 +89,20 @@ export function registerMeituInterpretTests({ test }) {
     assert.equal('temperature' in body, false, 'no invented sampling defaults');
     assert.equal('max_tokens' in body, false, 'no invented token quota');
     assert.equal('tools' in body, false);
+  });
+
+  test('meitu-interpret:泛称+表达不了的修饰 → 模型仍可给「随机角色+可映射tag」，不被当失败', async () => {
+    // 现场 2026-10-30 21:47「来几张裸体围裙的小萝莉美图」：放宽后模型若给
+    // {"character":null,"tags":["apron"]}（「围裙」可映射、「裸体」「小萝莉」表达不了），
+    // 解释器就该收下并进既有随机链路，而不是像旧提示词那样整条弃权。
+    const f = fixture('{"character":null,"tags":["apron"]}');
+    const result = await createMeituInterpreter({ llm: f.client, log: SILENT })(input({ text: '来几张裸体围裙的小萝莉美图' }));
+    assert.equal(result.ok, true);
+    assert.equal(result.parsed.character, '');
+    assert.equal(result.parsed.random, true);
+    assert.deepEqual(result.parsed.tags, ['feet', 'apron'], '原 tag 保留,新增只从白名单取');
+    assert.equal(result.parsed.count, 3, '数量只信原指令');
+    assert.equal(result.parsed.tier, 'seitu', '档位只信原指令');
   });
 
   test('meitu-interpret:整体null失败，character:null确已理解泛称才随机；别名/tag均必须已登记', async () => {

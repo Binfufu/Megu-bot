@@ -29,6 +29,7 @@ import {
 import { describeTurnEnd, sanitizeSessionId } from './runner-contract.js';
 import { createOwnEngine } from './engine.js';
 import { COPYPASTA_FILE, copypastaTurn, loadCopypastaCorpus } from './copypasta.js';
+import { loadMemeLexicon, matchLexicon, lexiconNote } from './meme-lexicon.js';
 // P4 故事活动内容包(2026-10-28):机制通用、内容按角色;没有包 = 这类玩法入口关闭。
 import { storyPackFor, storyPackStatus } from './story-content.js';
 import { hasLeakedControlMarkup, stripLeakedControlMarkup } from './control-markup.js';
@@ -707,7 +708,7 @@ export async function main() {
     const style = config.policy.style.pack;
     log.info(
       `风格：${style.id}（拆条=${style.split.enabled ? 'on' : 'off'} ` +
-      `标点=${style.punctuation.preserve ? '保留' : '清理'} ` +
+      `标点=${style.punctuation.preserve ? '全部保留' : '仅清普通句末句号'} ` +
       `emoji≤${style.emoji.enabled ? style.emoji.chanceMax : 0}）`,
     );
   }
@@ -2118,6 +2119,24 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
   const copypasta = loadCopypastaCorpus(path.join(config.dsh.cwd, COPYPASTA_FILE), { log });
   if (copypasta.entries.length > 0) {
     log.info(`[梗库] 复制粘贴梗 ${copypasta.entries.length} 条(${copypasta.file})`);
+  }
+  // **语用词库**(T3,2026-11-03):群聊里的谐音/缩写/调侃,只让她"听得懂",不要求解释。
+  //   读 C 区 `content/meme-lexicon.json`(随 deploy-runtime 的 C 区覆盖一起走);
+  //   读不到/坏文件 = 空词库,**不影响启动**(与复制粘贴梗库同一条契约)。
+  //   回滚开关 = 删掉该文件/整份换回:命中不了就是零注入,不留第二套判据。
+  const memeLexicon = loadMemeLexicon(path.join(ROOT_DIR, 'content'), { log });
+  if (memeLexicon.entries.length > 0) {
+    log.info(`[语用词库] ${memeLexicon.entries.length} 条(${memeLexicon.file})`);
+  }
+  /**
+   * 这一轮有没有"听得懂"的语用线索。命中就注入一小块**事实**(不是命令、不写台词)。
+   * ⚠️ 与 copypasta 同栏:只 push 一个注入块,绝不改写用户原话(全局替换会闹笑话)。
+   */
+  function memeNote(message) {
+    const hit = matchLexicon(memeLexicon.entries, message?.content ?? '');
+    if (!hit) return null;
+    const body = lexiconNote(hit);
+    return body === '' ? null : wrapInject('lexicon', body);
   }
   // **故事活动内容包**(P4,2026-10-28):机制在 `story.js`,内容是**角色自己的**。
   // 没有内容包的角色 → story 类活动只报备"在干嘛",不抛钩子(不套用别人的事件表)。
@@ -5491,6 +5510,12 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
     // (W3 起 recallFor 三个通道共用;**F2 起在函数开头就算好**,不再等这次 await。)
     const longTerm = await longTermNote(recallFor);
     if (longTerm) notes.push(longTerm);
+    // **语用词库**(T3,2026-11-03):只在群里那个词真出现时给一小块"听得懂"的事实。
+    // ⚠️ typeof:turnNotes 会被切片进 vm 沙箱(那里没有 memeNote);生产里恒在。
+    if (typeof memeNote === 'function') {
+      const lexiconBlock = memeNote(message);
+      if (lexiconBlock) notes.push(lexiconBlock);
+    }
     // P2-A:记忆洞察(2026-10-22,方案 §4.4):最新 ≤3 条作为**独立小块**,预算独立
     // (maxPerRun × limitChars = 360 字,不与长期层那 300 字互抢),过 wrapInject('insight')
     // 自报家门(D177;kind 已在 INJECT_KINDS 登记)。配置关/表空 = 一字不加(回滚开关)。
@@ -8232,14 +8257,18 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
   }
 
   /**
-   * React to a small gesture — a 戳一戳 or a bare 表情 — sometimes, and never
-   * twice in a row.
+   * React to a small gesture — a `[戳一戳]` placeholder payload (QQ 大表情/
+   * 互动表情) or a bare 表情 — sometimes, and never twice in a row.
    *
-   * QQ does not tell us *who* a gesture was aimed at: a poke carries the poker
-   * and a custom action text, and the target is replaced by a placeholder
+   * QQ does not tell us *who* a gesture was aimed at: the payload carries the
+   * sender and an action text, and the target is replaced by a placeholder
    * (verified against a real payload — `msg_elements` is null). So this is
-   * deliberately probabilistic. A human does not answer every poke either, and a
+   * deliberately probabilistic. A human does not answer every one either, and a
    * low rate means a gesture aimed at somebody else only occasionally wakes her.
+   *
+   * ⚠️ 2026-11-03（1.208.6）：双击头像的「戳了戳」**不会到 bot** —— 平台不推送
+   * （实测无任何入站事件），这条路径实际只处理大表情/互动表情；别再把它按
+   * 「有人戳了我」提到 @ 级概率。
    *
    * @param {string} groupId
    * @param {object} message the triggering message, for its mood text.
@@ -8262,13 +8291,12 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
     const inWindow = groupContext.isWindowOpen(groupId);
     const base = kind === 'poke' ? cfg.pokeChance : cfg.faceChance;
     // 参与状态机(D277):互动反应的概率按状态档打折(退场=0 全静;活跃=1 现状)。
-    // ⚠️ 戳一戳例外(主人 2026-10-28 拍板「戳一戳跟 @ 一样高」):它是明确的"碰了她",
-    //    与 @ 同级,不吃状态档打折 —— 概率只由 pokeChance 与冷却管;纯表情照旧打折。
+    // ⚠️ 2026-11-03（1.208.6）：10-28 的「戳一戳与 @ 同级、不吃状态档」已撤回 ——
+    //    双击头像根本不到 bot，这条路径只是大表情/互动表情，照常按 interact 打折。
     const social = socialState.modulationFor(groupId);
-    const socialFactor = kind === 'poke' ? 1 : social.interact;
-    const chance = Math.min(1, (inWindow ? base * cfg.windowMultiplier : base) * socialFactor);
+    const chance = Math.min(1, (inWindow ? base * cfg.windowMultiplier : base) * social.interact);
     if (Math.random() >= chance) {
-      log.info(`${label}：群 ${groupId} 没中（概率 ${Math.round(chance * 100)}%${inWindow ? '，对话窗口开' : ''}${kind === 'face' && social.state !== 'active' ? `，状态 ${social.state}` : ''}），这次不理`);
+      log.info(`${label}：群 ${groupId} 没中（概率 ${Math.round(chance * 100)}%${inWindow ? '，对话窗口开' : ''}${social.state !== 'active' ? `，状态 ${social.state}` : ''}），这次不理`);
       return false;
     }
 

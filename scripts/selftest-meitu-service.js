@@ -665,10 +665,10 @@ test('meitu-service:被拦且降档也没补上(blocked_empty)同样不占冷却
 });
 
 // ---------------------------------------------------------------------------
-// ⑪ 残缺指令的随机角色 + 检索档位传参
+// ⑪ 无具名角色 → 通用检索（2026-10-30 主人 A「不限 IP」：不再从登记名册随机）
 // ---------------------------------------------------------------------------
 
-test('meitu-service:random 模式从别名表随机挑角色(--char ∈ 表值)', async () => {
+test('meitu-service:random 模式不再挑登记角色 → 通用热门检索(--hot,落盘「通用」)', async () => {
   await withTemp(async (dir) => {
     const file = makeImageFile(dir);
     const { deps, calls } = makeDeps({ dir, files: [file], groups: ['g-random'] });
@@ -679,29 +679,25 @@ test('meitu-service:random 模式从别名表随机挑角色(--char ∈ 表值)'
     );
     const result = await handleMeituCommand({
       message: message('g-random'),
-      parsed: { ...PARSED, character: '', random: true },
+      // 「来3张随机美图」解析层真实形状:character=''、random=true、tags=[]。
+      parsed: { ...PARSED, character: '', random: true, tags: [] },
       deps,
     });
     assert.equal(result.ok, true);
-    const at = (name) => calls.fetch[0].args[calls.fetch[0].args.indexOf(name) + 1];
-    const char = at('--char');
-    assert.ok(
-      ['fixture_name_b_(fixture_work_b)', 'fixture_name_c_(fixture_work_b)'].includes(char),
-      `随机角色要从别名表里挑(实际 ${char})`,
-    );
-    assert.ok(at('--out').endsWith('合成名乙') || at('--out').endsWith('合成名丙'), '落盘目录用挑中的中文名');
+    const args = calls.fetch[0].args;
+    const at = (name) => args[args.indexOf(name) + 1];
+    assert.equal(args.includes('--char'), false, '不限 IP:没有具名角色就不许抽登记角色');
+    assert.equal(args.includes('--hot'), true, '没有 tag 的随机走热门安全图');
+    assert.ok(at('--out').endsWith('通用'), '落盘进「通用」桶');
+    assert.equal(result.task.resolved.generic, true);
+    assert.equal(result.task.resolved.character, null);
   });
 });
 
-test('meitu-service:随机角色 + 修饰 —— --tags 照传,落盘目录仍用挑中的中文名(不是「随机」)', async () => {
+test('meitu-service:随机 + 修饰 → 通用 tag 检索(不挂角色,结果不限 IP)', async () => {
   await withTemp(async (dir) => {
     const file = makeImageFile(dir);
     const { deps, calls } = makeDeps({ dir, files: [file], groups: ['g-random-tags'] });
-    fs.writeFileSync(
-      path.join(dir, 'meitu-alias.json'),
-      JSON.stringify({ 合成名乙: 'fixture_name_b_(fixture_work_b)', 合成名丙: 'fixture_name_c_(fixture_work_b)' }),
-      'utf8',
-    );
     const result = await handleMeituCommand({
       message: message('g-random-tags'),
       // 解析器对「来3张随机白丝双马尾美图」的真实输出形状(1.184.0)。
@@ -709,47 +705,64 @@ test('meitu-service:随机角色 + 修饰 —— --tags 照传,落盘目录仍�
       deps,
     });
     assert.equal(result.ok, true);
-    const at = (name) => calls.fetch[0].args[calls.fetch[0].args.indexOf(name) + 1];
-    assert.equal(at('--tags'), 'thighhighs,twintails', '随机不影响修饰传参');
+    const args = calls.fetch[0].args;
+    const at = (name) => args[args.indexOf(name) + 1];
+    assert.equal(args.includes('--char'), false, '有 tag 也不挂角色');
+    assert.equal(args.includes('--hot'), false, '有 tag 就走 tag 检索,不退化热门');
+    assert.equal(at('--tags'), 'thighhighs,twintails');
     assert.equal(at('--tier'), 'meitu');
-    assert.ok(
-      ['fixture_name_b_(fixture_work_b)', 'fixture_name_c_(fixture_work_b)'].includes(at('--char')),
-      '随机角色要从别名表挑 tag',
-    );
-    // 主人的口径:随机也**按角色名记库分类** —— 目录必须是被挑中那个角色的中文名。
-    assert.ok(at('--out').endsWith('合成名乙') || at('--out').endsWith('合成名丙'), `落盘目录不对:${at('--out')}`);
-    assert.ok(!at('--out').includes('随机'), '不许出现「随机」目录');
+    assert.ok(at('--out').endsWith('通用'));
   });
 });
 
 // ---------------------------------------------------------------------------
-// ⑪' 类目词回落(1.197.0,主人 2026-10-25 报「来点萝莉图」「来张随机萝莉图」不能识别)
+// ⑪' 类目词 → 通用热门检索（2026-10-30 主人 A「不限 IP」，替代 1.197.0 随机登记角色）
 // ---------------------------------------------------------------------------
 
-test('meitu-service:类目词(「萝莉」)没登记 → 按类目随机挑角色,不回「未登记」', async () => {
+test('meitu-service:类目词(「萝莉」)→ 通用热门检索,不再随机 BA 角色', async () => {
   await withTemp(async (dir) => {
     const file = makeImageFile(dir);
     const { deps, calls } = makeDeps({ dir, files: [file], groups: ['g-category'] });
     fs.writeFileSync(
       path.join(dir, 'meitu-alias.json'),
-      JSON.stringify({ 合成名乙: 'fixture_name_b_(fixture_work_b)', 合成名丙: 'fixture_name_c_(fixture_work_b)' }),
+      JSON.stringify({ 合成名乙: 'fixture_name_b_(fixture_work_b)' }),
       'utf8',
     );
-    // 「来张随机萝莉图」解析层的真实输出形状:character='萝莉'、random=false 进服务层。
     const result = await handleMeituCommand({
       message: message('g-category'),
       parsed: { ...PARSED, character: '萝莉', tags: [], tier: 'meitu' },
       deps,
     });
-    assert.equal(result.ok, true, '类目词要落随机机制,不是失败');
+    assert.equal(result.ok, true, '类目词要落通用检索,不是失败');
     assert.equal(calls.fetch.length, 1, '要真去抓图');
-    const at = (name) => calls.fetch[0].args[calls.fetch[0].args.indexOf(name) + 1];
-    const char = at('--char');
-    assert.ok(
-      ['fixture_name_b_(fixture_work_b)', 'fixture_name_c_(fixture_work_b)'].includes(char),
-      `类目词要从别名表挑真角色(实际 ${char})`,
+    const args = calls.fetch[0].args;
+    const at = (name) => args[args.indexOf(name) + 1];
+    assert.equal(args.includes('--char'), false, '类目词不许再抽登记角色');
+    assert.equal(args.includes('--hot'), true, '类目词没有合法 tag → 热门安全图');
+    assert.ok(at('--out').endsWith('通用'));
+  });
+});
+
+test('meitu-service:类目词「小萝莉」→ 通用热门检索,且不调用解释器(2026-10-30 A)', async () => {
+  await withTemp(async (dir) => {
+    const file = makeImageFile(dir);
+    const { deps, calls } = makeDeps({ dir, files: [file], groups: ['g-category-small'] });
+    fs.writeFileSync(
+      path.join(dir, 'meitu-alias.json'),
+      JSON.stringify({ 合成名乙: 'fixture_name_b_(fixture_work_b)' }),
+      'utf8',
     );
-    assert.ok(!at('--out').includes('萝莉'), '落盘目录不许是「萝莉」—— 按挑中的角色名分库');
+    deps.interpretCommand = async () => { throw new Error('类目词不该调用解释器'); };
+    const result = await handleMeituCommand({
+      message: message('g-category-small'),
+      parsed: { ...PARSED, character: '小萝莉', tags: [], tier: 'meitu' },
+      deps,
+    });
+    assert.equal(result.ok, true, '「小萝莉」要落通用检索,不是失败');
+    assert.equal(calls.fetch.length, 1);
+    const args = calls.fetch[0].args;
+    assert.equal(args.includes('--char'), false);
+    assert.equal(args.includes('--hot'), true);
   });
 });
 
@@ -772,10 +785,10 @@ test('meitu-service:类目词在别名表登记过 → 具名优先,不进随机
   });
 });
 
-test('meitu-service:类目词 + 别名表为空 → 回「未登记」话术,不抓图', async () => {
+test('meitu-service:类目词 + 别名表为空 → 通用热门照常,不回「未登记」', async () => {
   await withTemp(async (dir) => {
-    const { deps, calls } = makeDeps({ dir, groups: ['g-category-empty'] });
-    // 不写别名文件 → loadMeituAliases 回**内置默认表**;默认表里有的角色不算空。
+    const file = makeImageFile(dir);
+    const { deps, calls } = makeDeps({ dir, files: [file], groups: ['g-category-empty'] });
     // 真空表只能靠 alias 指向一个空 JSON 文件。
     fs.writeFileSync(path.join(dir, 'meitu-alias.json'), JSON.stringify({}), 'utf8');
     const result = await handleMeituCommand({
@@ -783,32 +796,24 @@ test('meitu-service:类目词 + 别名表为空 → 回「未登记」话术,不
       parsed: { ...PARSED, character: '萝莉', tags: [], tier: 'meitu' },
       deps,
     });
-    assert.equal(result.reason, 'unregistered');
-    assertReplyIn(calls, 'unregistered');
-    assert.equal(calls.fetch.length, 0, '没角色可挑就不许抓图');
+    assert.equal(result.ok, true, '通用检索不需要别名表');
+    assert.ok(calls.fetch[0].args.includes('--hot'));
   });
 });
 
-test('meitu-service:R1 ASCII 类目词(NTR)同样按类目随机挑角色', async () => {
+test('meitu-service:R1 ASCII 类目词(NTR)同样走通用热门检索', async () => {
   await withTemp(async (dir) => {
     const file = makeImageFile(dir);
     const { deps, calls } = makeDeps({ dir, files: [file], groups: ['g-category-ntr'] });
-    fs.writeFileSync(
-      path.join(dir, 'meitu-alias.json'),
-      JSON.stringify({ 合成名乙: 'fixture_name_b_(fixture_work_b)', 合成名丙: 'fixture_name_c_(fixture_work_b)' }),
-      'utf8',
-    );
     const result = await handleMeituCommand({
       message: message('g-category-ntr'),
       parsed: { ...PARSED, character: 'NTR', tags: [], tier: 'meitu' },
       deps,
     });
     assert.equal(result.ok, true);
-    const at = (name) => calls.fetch[0].args[calls.fetch[0].args.indexOf(name) + 1];
-    assert.ok(
-      ['fixture_name_b_(fixture_work_b)', 'fixture_name_c_(fixture_work_b)'].includes(at('--char')),
-      `ASCII 类目词也要随机挑真角色(实际 ${at('--char')})`,
-    );
+    const args = calls.fetch[0].args;
+    assert.equal(args.includes('--char'), false);
+    assert.equal(args.includes('--hot'), true);
   });
 });
 
@@ -968,7 +973,7 @@ test('meitu-service:名字本身以修饰词结尾(合成雪)→ 原样优先,�
   });
 });
 
-test('meitu-service:角色位只剩修饰(裸足美图)→ 随机角色 + 该修饰', async () => {
+test('meitu-service:角色位只剩修饰(裸足美图)→ 通用检索:不挂角色,tags=barefoot,落盘「通用」', async () => {
   await withTemp(async (dir) => {
     const file = makeImageFile(dir);
     const { deps, calls } = makeDeps({ dir, files: [file], groups: ['g-bare'] });
@@ -979,11 +984,120 @@ test('meitu-service:角色位只剩修饰(裸足美图)→ 随机角色 + 该修
       deps: { ...deps, rng: () => 0 },
     });
     assert.equal(result.ok, true);
-    const at = (name) => calls.fetch[0].args[calls.fetch[0].args.indexOf(name) + 1];
-    assert.equal(at('--char'), 'fixture_name_e_(fixture:work_c)', 'rng=0 → 表里第一个角色');
+    const args = calls.fetch[0].args;
+    const at = (name) => args[args.indexOf(name) + 1];
+    assert.equal(args.includes('--char'), false, '通用检索不许发明角色');
     assert.equal(at('--tags'), 'barefoot');
-    assert.ok(at('--out').endsWith('合成名戊'));
+    assert.ok(at('--out').endsWith('通用'), `落盘目录要用通用桶:${at('--out')}`);
+    assert.equal(result.task.resolved.generic, true);
+    assert.equal(result.task.resolved.character, null);
+    assert.match(describeMeituTask(result.task), /通用检索 barefoot/u);
   });
+});
+
+test('meitu-service:纯修饰「猫娘」没点名角色 → 通用检索(无 --char),不再随机挑角色(2026-10-30 A)', async () => {
+  await withTemp(async (dir) => {
+    const file = makeImageFile(dir);
+    const { deps, calls } = makeDeps({ dir, files: [file], groups: ['g-generic-cat'] });
+    fs.writeFileSync(
+      path.join(dir, 'meitu-alias.json'),
+      JSON.stringify({ 合成名乙: 'fixture_name_b_(fixture_work_b)' }),
+      'utf8',
+    );
+    // 「来几张猫娘美图」解析层真实输出:character='猫娘'(未登记)、tags=[];服务层剥成纯修饰。
+    const result = await handleMeituCommand({
+      message: message('g-generic-cat'),
+      parsed: { ...PARSED, character: '猫娘', tags: [], tier: 'meitu' },
+      deps,
+    });
+    assert.equal(result.ok, true, '纯修饰要落通用检索,不是失败');
+    const args = calls.fetch[0].args;
+    const at = (name) => args[args.indexOf(name) + 1];
+    assert.equal(args.includes('--char'), false, '通用检索不许随机挑角色(BA 随机就是这里来的)');
+    assert.equal(at('--tags'), 'cat_girl');
+    assert.equal(at('--tier'), 'meitu');
+    assert.ok(at('--out').endsWith('通用'));
+    assert.equal(result.task.resolved.generic, true);
+    assert.equal(result.task.resolved.character, null);
+    assert.match(describeMeituTask(result.task), /通用检索 cat_girl/u);
+  });
+});
+
+test('meitu-service:显式「随机」+ 修饰 → 通用 tag 检索(不再挑登记角色,2026-10-30 A 不限 IP)', async () => {
+  await withTemp(async (dir) => {
+    const file = makeImageFile(dir);
+    const { deps, calls } = makeDeps({ dir, files: [file], groups: ['g-generic-explicit'] });
+    fs.writeFileSync(
+      path.join(dir, 'meitu-alias.json'),
+      JSON.stringify({ 合成名乙: 'fixture_name_b_(fixture_work_b)' }),
+      'utf8',
+    );
+    // 「来3张随机白丝美图」解析层真实输出:character=''、random=true、tags=[thighhighs]。
+    const result = await handleMeituCommand({
+      message: message('g-generic-explicit'),
+      parsed: { ...PARSED, character: '', random: true, tags: ['thighhighs'], tier: 'meitu' },
+      deps,
+    });
+    assert.equal(result.ok, true);
+    const args = calls.fetch[0].args;
+    const at = (name) => args[args.indexOf(name) + 1];
+    assert.equal(args.includes('--char'), false, '显式「随机」也不再挑登记角色');
+    assert.equal(at('--tags'), 'thighhighs');
+    assert.ok(at('--out').endsWith('通用'));
+  });
+});
+
+test('meitu-service:通用热门抓 no_result → 只抓一次如实回 noResult(不换角,不限 IP 后无随机池)', async () => {
+  await withTemp(async (dir) => {
+    let made = null;
+    made = makeDeps({
+      dir, files: [], groups: ['g-hot-empty'],
+      runFetch: async (input) => {
+        made.calls.fetch.push(input);
+        return { code: 0, stdout: JSON.stringify({
+          ok: false, reason: 'no_result', detail: '图源有响应,但没有符合条件的新图', rungs: [],
+        }), stderr: '' };
+      },
+    });
+    const { deps, calls } = made;
+    const result = await handleMeituCommand({
+      message: message('g-hot-empty'),
+      parsed: { ...PARSED, character: '小萝莉', tags: [], tier: 'meitu' },
+      deps,
+    });
+    assert.equal(result.reason, 'no_result');
+    assert.equal(calls.fetch.length, 1, '通用检索失败不换角重试');
+    assert.ok(calls.fetch[0].args.includes('--hot'));
+    assert.ok(calls.reply.length >= 1);
+  });
+});
+
+test('meitu-service:具名角色 / 通用检索 no_result 都只抓一次', async () => {
+  for (const [i, parsed] of [
+    { ...PARSED, character: '合成角色甲', tags: ['feet'], tier: 'meitu' },
+    { ...PARSED, character: '猫娘', tags: [], tier: 'meitu' },
+  ].entries()) {
+    await withTemp(async (dir) => {
+      let made = null;
+      made = makeDeps({
+        dir, files: [], groups: [`g-no-retry-${i}`],
+        runFetch: async (input) => {
+          made.calls.fetch.push(input);
+          return { code: 0, stdout: JSON.stringify({
+            ok: false, reason: 'no_result', detail: '图源有响应,但没有符合条件的新图', rungs: [],
+          }), stderr: '' };
+        },
+      });
+      const { deps, calls } = made;
+      const result = await handleMeituCommand({
+        message: message(`g-no-retry-${i}`),
+        parsed,
+        deps,
+      });
+      assert.equal(result.reason, 'no_result');
+      assert.equal(calls.fetch.length, 1, '一次抓取后如实收口');
+    });
+  }
 });
 
 test('meitu-service:既没登记也剥不出角色(路人甲裸足)→ 照旧回「没登记」', async () => {
@@ -1248,7 +1362,7 @@ test('meitu-service:合成短语甲原话未命中→模型一次→具体角色
   });
 });
 
-test('meitu-service:合成短语甲抽象解释→已登记随机角色，原数量和档位不变', async () => {
+test('meitu-service:抽象解释 character:null + 可映射 tags → 通用检索(不再随机挑角色);原数量和档位不变', async () => {
   await withTemp(async (dir) => {
     const text = '来几张合成短语甲涩图';
     const group = 'g-interpret-abstract';
@@ -1258,11 +1372,36 @@ test('meitu-service:合成短语甲抽象解释→已登记随机角色，原数
     const result = await handleMeituCommand({ message: message(group, { content: text }), parsed: parseMeituCommand(text), deps: input.deps });
     assert.equal(result.ok, true);
     assert.equal(input.requests.length, 1);
-    const at = (key) => input.calls.fetch[0].args[input.calls.fetch[0].args.indexOf(key) + 1];
-    assert.equal(at('--char'), 'fixture_character_a', '随机只从登记表取');
+    const args = input.calls.fetch[0].args;
+    const at = (key) => args[args.indexOf(key) + 1];
+    assert.equal(args.includes('--char'), false, '模型说没有具体角色 + 有可映射 tag → 通用检索');
     assert.equal(at('--count'), '5');
     assert.equal(at('--tier'), 'seitu');
     assert.equal(at('--tags'), 'large_breasts');
+    assert.equal(result.task.resolved.generic, true);
+  });
+});
+
+test('meitu-service:现场原话「裸体围裙的小萝莉」→ 解释成 character:null+apron → 通用检索 5 张', async () => {
+  await withTemp(async (dir) => {
+    const text = '@天童爱丽丝 来几张裸体围裙的小萝莉美图';
+    const group = 'g-interpret-apron';
+    const input = makeInterpretedDeps(makeDeps({ dir, files: [makeImageFile(dir)], groups: [group] }),
+      JSON.stringify({ character: null, tags: ['apron'] }));
+    const parsed = parseMeituCommand(text);
+    assert.equal(parsed.character, '裸体围裙的小萝莉', '解析层原样形状(2026-10-30 现场)');
+    assert.equal(parsed.count, 5);
+    const result = await handleMeituCommand({ message: message(group, { content: text }), parsed, deps: input.deps });
+    assert.equal(result.ok, true);
+    assert.equal(input.requests.length, 1);
+    const args = input.calls.fetch[0].args;
+    const at = (key) => args[args.indexOf(key) + 1];
+    assert.equal(args.includes('--char'), false);
+    assert.equal(at('--tags'), 'apron');
+    assert.equal(at('--tier'), 'meitu');
+    assert.equal(at('--count'), '5');
+    assert.ok(at('--out').endsWith('通用'));
+    assert.equal(result.task.resolved.generic, true);
   });
 });
 
