@@ -19,6 +19,9 @@
 import { placeById } from './world.js';
 import { CURRENCY } from './stats.js';
 import { GAMEPLAY_CONTENT, gameplayText } from './local-gameplay-content.js';
+// 病了 → 自己去诊疗所(求治疗既有内核在 `condition.js`,当值医生名册在内容层 `infra.json`)。
+import { healthTier, isIll } from './condition.js';
+import { doctorOnDuty, fillHealerPrompt } from './local-infra-content.js';
 
 /** 默认参数。放在代码里(D20 的教训:写进提示词的概率不会变成概率)。 */
 export const SELFCARE_DEFAULTS = {
@@ -301,12 +304,16 @@ export function isAsleepAt(hour, sleep) {
  * 现在该不该"她自己过日子"?**纯函数** —— 这是本模块的核心判据。
  *
  * @param {{now?: number, stats?: object, lastHumanAt?: number|null, lastProactiveAt?: number|null,
- *   sleep?: object|null, random?: () => number, options?: object, currentPlace?: string|null}} ctx
+ *   sleep?: object|null, random?: () => number, options?: object, currentPlace?: string|null,
+ *   condition?: object|null, health?: number}} ctx
  *   `lastHumanAt` = 最后一次**真人说话**的时刻(群里那条"读空气"用的是同一个概念);
  *   `lastProactiveAt` = 上一次**她自己主动开口**的时刻(配额闸门);
  *   `currentPlace` = **她此刻在哪个场所**(1.95.1 起:她挑中的活动不在那儿时,先走一趟)。
- * @returns {{action: 'eat', eatery: object}|{action: 'life', activity: object}
- *   |{action: 'travel', activity: object}|{action: 'arrive', arrival: object}|null}
+ *   `condition` = 库里的病态记录(见 `condition.js`;`null`/不传 = 没病 —— **默认不改变既有行为**);
+ *   `health` = 健康数值(只用来问 `healthTier(health).canSeekHelp`:养病中/累了这两档**不许**求医)。
+ * @returns {{action: 'eat', eatery: object}|{action: 'heal', clinic: object, doctor: object}
+ *   |{action: 'life', activity: object}|{action: 'travel', activity: object}
+ *   |{action: 'arrive', arrival: object}|null}
  */
 export function decideSelfCare({
   now = Date.now(),
@@ -317,6 +324,8 @@ export function decideSelfCare({
   random = Math.random,
   options = {},
   currentPlace = null,
+  condition = null,
+  health = 100,
 } = {}) {
   const cfg = { ...SELFCARE_DEFAULTS, ...options };
 
@@ -336,6 +345,22 @@ export function decideSelfCare({
   // ④ **饿了 → 去吃饭**(用户点名的那条,优先级最高)。
   const satiety = Number(stats.satiety) || 0;
   if (satiety < cfg.hungryBelow) return { action: 'eat', eatery: pickEatery(satiety) };
+
+  // ④-b **病了 → 自己去诊疗所**(排在"饿"之后、"过日子"之前)。
+  //   判据三件,缺一不动作:
+  //     ① 病还在(`isIll`;治好了/到期了都不再求医 —— `treated` 那一条由它管);
+  //     ② 这具身体的档位允许求医(`healthTier().canSeekHelp`:养病中/累了这两档**不许**再跑诊所);
+  //     ③ 世界里**认得出**诊疗所(`placeById('clinic')`)—— 认不出就 **fail closed 返回 null**:
+  //        宁可这一拍什么也不做,也不写一条"去了一个不存在的地方"的事实。
+  //   ⚠️ 当值医生按本地星期几确定性轮班(`doctorOnDuty`),名册坏了(理论上过不了内容层校验)
+  //      同样 fail closed —— 不猜一个医生出来。
+  if (isIll(condition, now) && healthTier(health).canSeekHelp) {
+    const clinic = placeById('clinic');
+    if (!clinic) return null;
+    const doctor = doctorOnDuty(now);
+    if (!doctor) return null;
+    return { action: 'heal', clinic, doctor };
+  }
 
   // ⑤ 不饿:偶尔冒个泡说说自己在干嘛,但比吃饭稀得多。
   //    ⚠️ **这一档的两道闸门(`lifeEveryMs` / `lifeChance`)现在也管"出门"** ——
@@ -362,17 +387,65 @@ export function decideSelfCare({
 }
 
 /**
+ * **她病了、自己去诊疗所**那一句该怎么跟她说(纯函数;D99 阶段 2 的求医分支)。
+ *
+ * 事实由**代码**给(去了哪个诊疗所、今天当值的是谁、得的什么病、治没治好),
+ * 台词仍然是她的。模板在内容层(`content/local/infra.json` 的 `healers.prompt`,
+ * 缺私有内容时用 `local-infra-content.js` 的中性默认),这里只做**具名占位替换**。
+ *
+ * ⚠️ 三条口径(与 `buildSelfCarePrompt` 同一族):
+ *   · **不许报数字/货币名**:诊金与数值结算在 `index.js`(唯一口径是 `AQUA_FEE`),
+ *     提示词只说"钱付过了、多少不用报"(有测试钉着模板里没有数字);
+ *   · **不是通知体**:要她像从诊疗所出来随口说一句,而不是"我已康复";
+ *   · 成功/失败两条模板分开 —— 失败(帮倒忙)要允许她抱怨,但病还没好这件事照实说。
+ *
+ * @param {{scene: 'c2c'|'group', placeName?: string|null, doctor?: object|null,
+ *   disease?: string, ok?: boolean, silentToken?: string}} ctx
+ * @returns {string} 空串 = 内容层模板缺失(调用方 fail closed,不许自己现编一段)
+ */
+export function buildHealPrompt({ scene, placeName = null, doctor = null, disease = '', ok = true, silentToken = '[跳过]' } = {}) {
+  const heard = scene === 'c2c' ? '[私聊]' : '[群聊]';
+  return fillHealerPrompt(ok ? 'success' : 'failure', {
+    heard,
+    place: placeName ?? '',
+    doctor: doctor?.name ?? '',
+    work: doctor?.work ?? '',
+    line: doctor?.line ?? '',
+    disease: String(disease ?? ''),
+    silentToken,
+  });
+}
+
+/**
  * 「她自己的这一轮」该怎么跟她说 —— 事实由**代码**给(吃了什么、花了多少、在忙什么),
  * 台词仍然是她的(角色卡说了算)。**纯函数**。
  *
- * ⚠️ 两条口径:
+ * ⚠️ 三条口径:
  *   · **报备要具体**:地点 + 吃了什么/在做什么 —— 否则"我去吃饭了"读起来像系统通知;
  *   · **钱不许报数字**(D42/D44):说"钱包又轻了"可以,说"花了 900 通用货币"不行。
  *
- * @param {{scene: 'c2c'|'group', action: 'eat'|'life', eatery?: object, activity?: object,
- *   cost?: number, currency?: string, silentToken?: string}} ctx
+ * ⚠️ `action === 'heal'` 时**统一走 `buildHealPrompt`**(提示词模板在 infra 内容层):
+ *    index.js 两条入口都能用,但真正调用的是 `buildHealPrompt`。
+ *
+ * @param {{scene: 'c2c'|'group', action: 'eat'|'life'|'heal', eatery?: object, activity?: object,
+ *   cost?: number, currency?: string, silentToken?: string,
+ *   clinic?: object|null, doctor?: object|null, disease?: string, ok?: boolean,
+ *   placeName?: string|null}} ctx
  */
-export function buildSelfCarePrompt({ scene, action, eatery, activity, cost = 0, currency = CURRENCY.name, silentToken = '[跳过]' }) {
+export function buildSelfCarePrompt({
+  scene, action, eatery, activity, cost = 0, currency = CURRENCY.name, silentToken = '[跳过]',
+  clinic = null, doctor = null, disease = '', ok = true, placeName = null,
+}) {
+  if (action === 'heal') {
+    return buildHealPrompt({
+      scene,
+      placeName: placeName ?? clinic?.name ?? null,
+      doctor,
+      disease,
+      ok,
+      silentToken,
+    });
+  }
   const heard = scene === 'c2c' ? '[私聊]' : '[群聊]';
   const text = GAMEPLAY_CONTENT.selfcareText;
   const facts = action === 'eat'

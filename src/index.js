@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, loadEnvFile, resolveEnvFile } from './config.js';
-import { HEALER_PATTERNS, INFRA_CONTENT, escapeRegExpLiteral, infraText } from './local-infra-content.js';
+import { HEALER_PATTERNS, INFRA_CONTENT, doctorOnDuty, escapeRegExpLiteral, infraText } from './local-infra-content.js';
 import { buildAnnounceDigest, latestRelease, listVersions } from './changelog.js';
 import {
   ANNOUNCE_USAGE,
@@ -36,9 +36,9 @@ import { hasLeakedControlMarkup, stripLeakedControlMarkup } from './control-mark
 import { QqApi, QqGateway, TokenManager, parseForeignBotIds, sanitizeOutgoingText } from './qq.js';
 import { fetchImageBlocks, localImageBlock } from './images.js';
 import { GroupContext, SILENT_TOKEN, isSilentReply, looksAddressedToBot, matchesKeywords } from './group-context.js';
-import { arrivalFreshnessMs, buildArrivalReportPrompt, buildSelfCarePrompt, buildTravelReportPrompt, decideArrivalReport, decideSelfCare, isStoryActivity, LIFE_ACTIVITIES, orderSelfCareGroups, pickReportScene, whereaboutsTtlMs } from './selfcare.js';
+import { arrivalFreshnessMs, buildArrivalReportPrompt, buildHealPrompt, buildSelfCarePrompt, buildTravelReportPrompt, decideArrivalReport, decideSelfCare, isStoryActivity, LIFE_ACTIVITIES, orderSelfCareGroups, pickReportScene, whereaboutsTtlMs } from './selfcare.js';
 import { WORLD_HER_KEY, herWhereabouts, placeById, settleTravel, whereaboutsFromAction, whereaboutsFromDecision } from './world.js';
-import { bodyCheckReply, catchDisease, detectBodyCheck, seekAqua } from './condition.js';
+import { bodyCheckReply, catchDisease, detectBodyCheck, isIll, seekAqua } from './condition.js';
 import { DISEASE_CAUSES } from './condition.js';
 import { applyAffinity, affinityTier, describeAffinity, describeAffinityList } from './affinity.js';
 // ⚠️ 钓鱼那一层(D105 内核 / D108 适配器)的实现**不在这里**了:
@@ -163,6 +163,10 @@ import { createMeituInterpreter } from './meitu-interpret.js';
 // 美图展览处(2026-10-23 / 展览处刀 1 数据层 + 刀 2 只读 API):
 // 元数据库 `data\<bot>\meitu.db` 与两档缩略图都由这里打开一次、注入服务层与面板。
 import { mimeForImagePath, openMeituGallery } from './meitu-gallery.js';
+// 异界新闻(2026-11-10):盯梢收件箱 `feed.db` 的**只读**投影 —— 网站世界地图页那块长横条板。
+import { createFeedNews } from './feed-news.js';
+// 盯梢 → QQ 私聊推送(2026-11-10):只读盯梢库 + 纯函数选条/排版;真正发送仍走 sendChunked 那道咽喉。
+import { createFeedPushReader, discoverC2cTarget, formatFeedPush, selectPushable } from './feed-push.js';
 import { describeError, log, openLogFile } from './log.js';
 import { describeUserError } from './user-error.js';
 import { isMergeable, mergeInstruction, renderBurst, rollTypingDelay } from './burst.js';
@@ -180,7 +184,10 @@ import { activeConversations, archiveDue, archiveOnStartup, backfillEmbeddings, 
 // P2-A:记忆洞察(2026-10-22,方案 §4.4)—— 生成/落库/渲染都在这一个模块里(memory 层零 HTTP)。
 import { INSIGHT_MIN_NOTES, appendInsights, buildInsights, insightsDue, latestInsightCreatedAt, latestInsights, recentInsightNotes, renderInsights } from './memory-insights.js';
 // P0 记忆作用域(2026-10-28):常驻块/洞察只在允许的会话里出现(口径一份,纯函数)。
-import { filterBlocksForAccess, filterInsightsForAccess, memoryAccessFor } from './memory-scope.js';
+import { filterBlocksForAccess, filterInsightsForAccess, memoryAccessForScene } from './memory-scope.js';
+// 跨通道私聊共享(2026-11-10 / D329):只有"网页账号已服务端验证绑定到某个 QQ"才并入
+// 那个 QQ 的私聊会话线;判定是纯函数,装配层只把两边绑定记录递进去。
+import { resolveTurnConversationKey } from './conversation-share.js';
 // P1 任务口径(2026-10-28):闲聊/办事/求知三态,平台无关;**只给权限不下命令**。
 // F2(2026-10-30):入口构造**一次不可变决策**(createTurnDecision),下游只消费不重判。
 import { composeModeNote, createTurnDecision, detectTurnMode, groupLinesForDelivery, noteGatesFor, outputPolicyFor } from './turn-policy.js';
@@ -2063,7 +2070,7 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
   }
 
   /** 记忆交接:返回要前置到提示词的文本,或 null(=这轮没有记忆)。 */
-  async function handoffFor(conversationKey) {
+  async function handoffFor(conversationKey, turnOptions = {}) {
     if (!handoffProvider) return null;
     // `/重置` 明确要求"清空重来",那就**不要**把记忆塞回去 —— 否则重置等于没重置。
     if (handoffSuppressed.delete(conversationKey)) {
@@ -2079,7 +2086,13 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       try {
         // **作用域守卫**(P0,2026-10-28):块是"全库一份",但**群聊不该看见私聊的派生内容**。
         // 口径只在 `src\memory-scope.js`(纯函数);这里只负责把过滤后的块交给渲染。
-        const access = memoryAccessFor(conversationKey, { ownerIds: config.policy.admin?.ids ?? null });
+        // ⚠️ 2026-11-10(D329):按**这一轮从哪来**取档 —— 共用 QQ 会话线的网页那一轮
+        //    不许白拿 c2c 档的私有块(网页账号不一定就是那个 QQ 的主人)。
+        const access = memoryAccessForScene({
+          scene: turnOptions?.scene ?? null,
+          conversationKey,
+          ownerIds: config.policy.admin?.ids ?? null,
+        });
         const visible = filterBlocksForAccess(getMemoryBlocks(memoryDb), access);
         blocksText = renderMemoryBlocks(memoryDb, { blocks: visible });
         if (visible.length === 0) {
@@ -2846,9 +2859,16 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       }
     }
 
+    // ⚠️ 身体状态只读**一次**:`health` 与 `stats` 必须是同一份快照(两份各读一次,
+    //    病情扣血那一刻会让"饿不饿"和"能不能求医"用两个不同版本的身体做决定)。
+    const stats = currentStats(now);
     const decision = decideSelfCare({
       now,
-      stats: currentStats(now),
+      stats,
+      // 病了 → 自己去诊疗所(D99 阶段 2 的求医分支):病态记录与健康档位一起给,
+      // 不传这两项时 `decideSelfCare` 的行为**逐字不变**(既有判据照旧)。
+      condition: readCondition(),
+      health: stats.health,
       lastHumanAt: lastHumanAtAll,
       lastProactiveAt: lastSelfCareAt,
       sleep: config.policy.warmup.sleep,
@@ -3018,6 +3038,8 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
     //    `life` 那一档**不结算数值** —— 它要么开"事件钩子"(事情抛出去了,结果要等回应,
     //    那一步才落账,D99 阶段 3),要么只是"她在干嘛"的一句报备(1.106.0 / D172)。
     let story = null;
+    /** 这一次看病的结算结果(doctor / disease / ok)—— 报备那句要用它,结算失败时为 null。 */
+    let heal = null;
     if (decision.action === 'arrive') {
       // ⚠️ **不结算任何数值、也不开事件钩子**(1.92.1):"她走到了"只值一句话 ——
       //    位置事实在 travelTick 里已经落好了;这一轮唯一的产出就是那句报备。
@@ -3036,6 +3058,38 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         );
       } catch (err) {
         log.warn(`她自己吃饭结算失败（不影响这一轮对话）: ${describeError(err)}`);
+      }
+    } else if (decision.action === 'heal') {
+      // **病了 → 自己去诊疗所**(求治疗既有内核;数值口径一律沿用 `seekAqua` 与 `AQUA_FEE`):
+      //   ① 先按病种掷成败(`seekAqua`:成功 treated + 心情 +3,失败心情 −2 —— 概率在 `condition.js`);
+      //   ② 结算走 `applyStoryResult({money:-AQUA_FEE, mood}, ..., {kind:'heal', disease, ok})`
+      //      (有封顶、有流水,`chronicleKinds` 早就有 heal);
+      //   ③ **成功才**把 `treated` 写回去;失败病还在,但**不重复结算**(一次 tick 只算一次)。
+      //   ⚠️ 认不出病(半路被治好 / 读不出来)→ **fail closed**:只记日志,这一拍不结算也不开口。
+      const condition = readCondition();
+      if (!condition || !isIll(condition, now)) {
+        log.info('她自己看病：这一拍读不到还在病的记录，跳过（不结算、不开口）');
+        return;
+      }
+      const doctor = decision.doctor ?? doctorOnDuty(now);
+      const result = seekAqua(condition, Math.random);
+      try {
+        const { stats } = stateStore.applyStoryResult(
+          { money: -AQUA_FEE, mood: result.moodDelta },
+          now,
+          { kind: 'heal', disease: condition.name, ok: result.ok },
+          { sleep: config.policy.warmup.sleep },
+        );
+        if (result.ok) writeCondition({ ...condition, treated: true });
+        heal = { doctor, disease: condition.name, ok: result.ok };
+        log.info(
+          `她自己去看病：${doctor?.name ?? '当值医生'} 当值 · ${condition.name} → ` +
+          `${result.ok ? '治好' : '帮倒忙'} · 诊金 ${AQUA_FEE} ${CURRENCY.name} · ` +
+          `钱 ${Math.round(stats.money)}、心情 ${Math.round(stats.mood)}`,
+        );
+      } catch (err) {
+        log.warn(`她自己看病的结算失败（这一轮不开口）: ${describeError(err)}`);
+        return;
       }
     } else if (isStoryActivity(decision.activity) && storyPack) {
       // ⚠️ **只有标了 `story` 的活动才抛钩子**(1.106.0 / D172;纯函数 `isStoryActivity`)。
@@ -3139,6 +3193,18 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
           silentToken: SILENT_TOKEN,
         });
         query = decision.eatery.line;
+      } else if (decision.action === 'heal') {
+        // ⚠️ 提示词走内容层的 `healers.prompt`(成功/失败两条),事实由代码给;
+        //    渠道不改 —— `pickReportScene` 只把 `life` 当自发,heal 自然沿用**报备→私聊优先**。
+        prompt = buildHealPrompt({
+          scene: target.scene,
+          placeName: decision.clinic?.name ?? null,
+          doctor: heal.doctor,
+          disease: heal.disease,
+          ok: heal.ok,
+          silentToken: SILENT_TOKEN,
+        });
+        query = `${heal.disease} · ${heal.doctor?.name ?? ''}`;
       } else if (story) {
         prompt = buildStoryOpenPrompt({ scene: target.scene, event: story.event, silentToken: SILENT_TOKEN });
         query = story.event.setup;
@@ -3563,6 +3629,14 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
    */
   let meituGallery = null;
 
+  /**
+   * **异界新闻的只读投影**(2026-11-10)。用 `let` 而不是 `const`:`shutdown()` 定义在前面,
+   * 关闭路径要能安全读到它(与 `meituGallery` 同一个理由 —— TDZ 不是玩笑)。
+   */
+  let feedNews = null;
+  /** **盯梢→QQ 私聊推送**的运行态(2026-11-10);同样为 shutdown 提前定义为 `let`。 */
+  let feedQQ = null;
+
   async function shutdown(code) {
     if (shuttingDown) return;
     shuttingDown = true;
@@ -3577,6 +3651,9 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
     if (panelServer) { try { await panelServer.close(); } catch { /* 关闭路径上不抛 */ } }
     // 美图库:关连接(派生数据,不关也能下次重开;但关了不留 WAL 尾巴)。
     if (meituGallery) { try { meituGallery.close(); } catch { /* 关闭路径上不抛 */ } }
+    // 盯梢只读连接(异界新闻板 / 私聊推送):关掉不留 WAL 尾巴,也不占着库。
+    if (feedNews) { try { feedNews.close(); } catch { /* 关闭路径上不抛 */ } }
+    if (feedQQ?.reader) { try { feedQQ.reader.close(); } catch { /* 关闭路径上不抛 */ } }
     gateway.stop();
     await runner.stop();
     process.exit(code);
@@ -5120,9 +5197,34 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
     }
   }
 
-  /** 一条入站消息对应的会话 key(`/状态` 那类桥内命令要用它记账/掷情绪)。 */
+  /**
+   * 一条入站消息对应的会话 key(`/状态` 那类桥内命令要用它记账/掷情绪)。
+   *
+   * ⚠️ **网页私聊只有"已验证绑定"时才并入 QQ 私聊线**(2026-11-10 / D329):
+   *    未绑定 / 绑定不一致 / 别的网页账号 / 群聊**一律保持原键** —— 网页访问者
+   *    不一定是 QQ 私聊那个人(用户明确提醒),不能拿"QQ 现在只有主人在私聊"
+   *    当共享理由。并入后两边读写同一段 `conversation_turn` 历史。
+   * ⚠️ 判定与键的拼法都在 `conversation-share.js`(纯函数):这里只负责把
+   *    `identityLinks` 的正/反两条记录递进去 —— **读不出绑定就不共享**。
+   */
   function conversationKeyFor(message) {
-    return sessionIdFor({ scene: message.scene, targetId: message.targetId });
+    return resolveTurnConversationKey({
+      message,
+      sessionIdFor,
+      lookupBinding: (rawPlayerId) => {
+        const playerId = Number(rawPlayerId);
+        try {
+          const binding = identityLinks.byPlayer(playerId);
+          // 反查必须一起给:只有正反两条都指回同一个人,才算"已验证绑定"。
+          const reverse = binding?.openid ? identityLinks.byOpenid(binding.openid) : null;
+          return { binding, reverse };
+        } catch (err) {
+          // 读不出来 = 这一轮各聊各的(fail closed),但要留一条会喊的日志。
+          log.warn(`共享私聊：身份绑定读不出来（这一轮各聊各的）: ${describeError(err)}`);
+          return { binding: null, reverse: null };
+        }
+      },
+    }).key;
   }
 
   /**
@@ -5368,7 +5470,7 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
     // recallFor 与"本轮决策"都必须在**这次 await 之前**定下来:
     // 旧实现是 await 长期记忆**之后**才判 mode 并写共享状态,同会话另一轮在 await 里
     // 跑完就能改写它 —— 先到的这一轮于是按别人的状态回答(F2 修的正是这个)。
-    const recallFor = recall ?? (message ? { conversation: conversationKeyFor(message), query: message.content } : null);
+    const recallFor = recall ?? (message ? { conversation: conversationKeyFor(message), query: message.content, scene: message.scene } : null);
     const policy = turnPolicyFor(message?.content ?? '', { enabled: config.policy.seriousGuard });
     /**
      * 兼容旧直调/旧切片沙箱:没有入口决策时按旧口径现场拼一份。
@@ -5526,8 +5628,13 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       try {
         // **作用域守卫**(P0,2026-10-28):洞察是"跨多条私聊笔记看出的模式",群聊一律不给。
         // ⚠️ typeof 守卫的理由与上面 memoryCfg 同一条:本函数会被切片进 vm 沙箱跑。
-        const access = typeof memoryAccessFor === 'function'
-          ? memoryAccessFor(recallFor?.conversation ?? '', { ownerIds: config.policy.admin?.ids ?? null })
+        // ⚠️ 2026-11-10(D329):按**这一轮从哪来**取档;共用 QQ 会话线的网页那一轮不给洞察。
+        const access = typeof memoryAccessForScene === 'function'
+          ? memoryAccessForScene({
+            scene: recallFor?.scene ?? null,
+            conversationKey: recallFor?.conversation ?? '',
+            ownerIds: config.policy.admin?.ids ?? null,
+          })
           : { insights: true };
         const insightText = renderInsights(memoryDb, {
           limit: memoryCfg.insights.maxPerRun,
@@ -7047,7 +7154,9 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
    *   (空文本 = 这一轮她没说话;`segments` 与 QQ 同一份规划,1.171.0 / D288)
    */
   async function runWebChatTurn(message) {
-    const conversationKey = sessionIdFor(message);
+    // ⚠️ D329:网页私聊只有"已验证绑定"时才走 QQ 私聊那条会话线;其余保持原键。
+    //    提示词里的"这一轮从网页来"仍由 `message.scene` 决定,不因并线而改口。
+    const conversationKey = conversationKeyFor(message);
     // D229:网页群聊已退役，此入口只处理按玩家隔离的网页私聊。
     const label = '网页聊天';
     const startedAt = Date.now();
@@ -7071,7 +7180,9 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         turnNoteList,
       );
       // **P3-b**:网页私聊也是 chat 用途(通道不决定能力),同样按实例装配带工具。
-      const result = await runner.runTurn(conversationKey, prompt, config.policy.replyTimeoutMs, null, buildToolContext(message, conversationKey));
+      // ⚠️ 第 6 个参数只把"这一轮从网页来"告诉引擎:记忆交接/洞察的作用域按它取档,
+      //    共用 QQ 会话线时也不许网页那一轮继承 c2c 的私有派生内容(D329)。
+      const result = await runner.runTurn(conversationKey, prompt, config.policy.replyTimeoutMs, null, buildToolContext(message, conversationKey), { scene: 'web' });
       recordTurnMetrics({ key: conversationKey, ms: Date.now() - startedAt, text: result.text, timedOut: result.timedOut });
       if (result.timedOut) {
         log.info(`${label}：这一轮超时（她没说话）会话=${conversationKey}`);
@@ -8811,6 +8922,62 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
   //      而结账仍然过绑定表(D102)、同一个 nonce 只执行一次(D110)。
   // ⚠️ 已通过入口依赖检查后的运行时失败仍不影响 QQ；缺件/坏件已在启动前大声拒绝。
   //    这里的装配包在 try 里，`startPanel()` 自己也会接 `error` 事件。
+  // —— 异界新闻(2026-11-10):盯梢收件箱的**只读**投影 ——
+  // 只在配了 QQBOT_FEED_DB、且 QQBOT_FEED_NEWS 没关时创建;库读不到时 latest() 返回 null,
+  // 页面整块不显示(fail closed);不影响 QQ、面板其它板块与任何写路径。
+  feedNews = config.policy.feed?.dbPath && config.policy.feed.news !== false
+    ? createFeedNews({
+      dbPath: config.policy.feed.dbPath,
+      limit: config.policy.feed.newsLimit,
+      log: (line) => log.info(line),
+    })
+    : null;
+  if (feedNews) log.info('异界新闻：开启（只读盯梢收件箱，网站世界地图页显示最近若干条）');
+
+  /**
+   * **盯梢新消息 → QQ 私聊推送**(2026-11-10;主人拍板:推给爱丽丝的私聊、只推 new 新条目
+   * + OpenRouter 价格大幅变动)。
+   *
+   * 四条边界(都不是"顺手加的"):
+   *   ① **只读**:`createFeedPushReader` 用 readOnly 连接,不写盯梢库、不碰 .env;
+   *   ② **默认关**:`QQBOT_FEED_QQ=1` 且配了库才启用 —— 旧安装行为一个字不变;
+   *   ③ **目标**:`QQBOT_FEED_QQ_C2C` 优先;没配就从记忆库"最近会话键"里找私聊
+   *      (本机只有主人一个私聊,所以这是可预测的;多个私聊时取最近活跃的那个);
+   *   ④ **cursor 落 state.db**:重启不重发;首次启用从"当前最新"开始,**不回补历史**
+   *      (否则第一次上线会把 268 条旧消息全推一遍)。
+   * 失败只记日志、下轮重试;不推进 cursor 的那条会保留(不丢消息,也不刷屏 —— 有退避)。
+   */
+  const FEED_QQ_CURSOR_KEY = 'feed_qq:cursor';
+  feedQQ = (() => {
+    const cfg = config.policy.feed ?? {};
+    if (!cfg.qq || !cfg.dbPath) return null;
+    let c2cTarget = cfg.qqC2cTarget || null;
+    if (!c2cTarget) {
+      try {
+        // 最近的会话键(群 + 私聊,最新优先);只认 c2c 那一族,群键忽略。
+        const keys = memoryDb ? activeConversations(memoryDb, 50) : [];
+        c2cTarget = discoverC2cTarget(keys);
+      } catch (err) {
+        log.warn(`盯梢→QQ：查找私聊目标失败（不影响其它功能）: ${describeError(err)}`);
+      }
+    }
+    if (!c2cTarget) {
+      log.warn('盯梢→QQ：已开启但找不到可用的私聊目标（QQBOT_FEED_QQ_C2C 未配且记忆库里没有私聊）—— 本轮不启用');
+      return null;
+    }
+    const reader = createFeedPushReader({
+      dbPath: cfg.dbPath,
+      log: (line) => log.warn(`盯梢→QQ：${line}`),
+    });
+    return { cfg, reader, c2cTarget, cursor: null, lastAttemptAt: 0, failures: 0 };
+  })();
+  if (feedQQ) {
+    log.info(
+      `盯梢→QQ：开启（私聊推送；只推新条目 + OpenRouter 价格变动 ≥${feedQQ.cfg.qqPricePct}%；`
+      + `目标 …${String(feedQQ.c2cTarget).slice(-6)}）`,
+    );
+  }
+
   if (config.policy.panel?.enabled) {
     try {
       const actionExec = createActionExec({
@@ -8931,10 +9098,15 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
           store: stateStore,
           // ⚠️ 一次只能说一句:她忙的时候直接拒(服务端不当队列 —— 队列会让"她同时在两个世界说话")
           runTurn: async ({ conversationKey, text, name }) => {
-            if (runner.isBusy(conversationKey)) {
+            const playerId = String(conversationKey).slice(4);
+            // ⚠️ 判忙要用**这一轮真正会用的会话键**(D329):绑定后是 QQ 私聊那条线。
+            //    旧写法拿 `web:<id>` 去问引擎(引擎里记的是 `qqbot-web-<id>`),
+            //    两条键永远对不上 → 判忙恒为 false(静默失效)。
+            const turnKey = conversationKeyFor({ scene: 'web', targetId: playerId });
+            if (runner.isBusy(turnKey)) {
               return { text: '', timedOut: true, busy: true };
             }
-            const message = { scene: 'web', targetId: String(conversationKey).slice(4), senderId: String(conversationKey).slice(4), senderName: name || null, content: text, source: 'web' };
+            const message = { scene: 'web', targetId: playerId, senderId: playerId, senderName: name || null, content: text, source: 'web' };
             const reply = await runWebChatTurn(message);
             // 1.171.0 / D288:`segments` 带给存储层 —— 每段一行,网页上一泡一条。
             return { text: reply.text, segments: reply.segments, timedOut: !String(reply.text ?? '').trim() };
@@ -8972,6 +9144,8 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
             metas: readPanelMetas(),
             events,
             now,
+            // 异界新闻(2026-11-10):每请求现读的只读投影(有缓存的话在这一层;读取失败给 null)。
+            feedNews: feedNews ? feedNews.latest() : null,
             companionFacts: readOtherCompanions(),
             // ⚠️ 立绘在不在 + **内容版本号** —— 由装配层读磁盘(纯函数那一层不认识文件系统)。
             //    版本号进立绘 URL 的 `?v=`:换皮 = 换地址,浏览器/公网缓存当场失效(D218)。
@@ -9001,6 +9175,70 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
   // ⚠️ 放在**启动时**而不是 tick 里:那些旧的到点会自己收网(用户会莫名收到"上钩了"),
   //    而 tick 要等一个周期才跑 —— 启动就清掉,窗口最小。
   cleanupLegacyFishing();
+
+  /**
+   * **盯梢新消息 → QQ 私聊**(2026-11-10;每 tick 调用,自己按 QQBOT_FEED_QQ_INTERVAL_MS 限频)。
+   *
+   * 只读库 → 选条(纯函数) → 排版(纯函数) → `sendChunked()`(唯一出站咽喉:
+   * 脱敏/分条/出站留痕/主动消息口径全在同一处)。
+   * - 首次启用:**cursor = 当前最新**,不回补历史(否则一上线就推几百条旧消息);
+   * - cursor 落 `state.db` 的 meta;重启不重发;
+   * - 失败:不推进失败那条的 cursor(下轮重试),指数退避最长 30 分钟,日志每次一行。
+   */
+  async function feedPushTick() {
+    if (!feedQQ) return;
+    const now = Date.now();
+    if (now - feedQQ.lastAttemptAt < feedQQ.cfg.qqIntervalMs) return;
+    feedQQ.lastAttemptAt = now;
+    try {
+      if (feedQQ.cursor === null) {
+        const rawCursor = stateStore.getMeta(FEED_QQ_CURSOR_KEY);
+        const stored = rawCursor === null || rawCursor === undefined ? null : Number(rawCursor);
+        // ⚠️ 必须区分"没有 cursor"与"cursor=0":前者是首次启用(从当前最新开始),
+        //    后者才是真的从最早的未读开始 —— `Number(null)` 恰好是 0,不挡住就会把历史全推一遍。
+        if (rawCursor !== null && rawCursor !== undefined && /^\d+$/.test(String(rawCursor))
+          && Number.isSafeInteger(stored) && stored >= 0) {
+          feedQQ.cursor = stored;
+        } else {
+          const latest = feedQQ.reader.latestDetectedAt();
+          feedQQ.cursor = latest === null ? 0 : latest;
+          stateStore.setMeta(FEED_QQ_CURSOR_KEY, String(feedQQ.cursor));
+          log.info(`盯梢→QQ：首次启用，从当前最新消息之后开始（不回补历史；cursor=${feedQQ.cursor}）`);
+          return;
+        }
+      }
+      const rows = feedQQ.reader.pending({ cursor: feedQQ.cursor, limit: 50 });
+      if (rows.length === 0) return;
+      const picks = selectPushable(rows, {
+        pricePct: feedQQ.cfg.qqPricePct,
+        previousFor: (query) => feedQQ.reader.previousFor(query),
+      });
+      if (picks.length === 0) {
+        // 这一批没有可推的(正文更新等):cursor 推到这批最大一条,别每轮重复扫。
+        const maxAt = rows.reduce((top, row) => Math.max(top, Number(row.detectedAt) || 0), feedQQ.cursor);
+        feedQQ.cursor = maxAt;
+        stateStore.setMeta(FEED_QQ_CURSOR_KEY, String(feedQQ.cursor));
+        return;
+      }
+      let sent = 0;
+      for (const pick of picks.slice(0, feedQQ.cfg.qqMaxPerTick)) {
+        const text = formatFeedPush(pick, { maxChars: Math.min(300, config.policy.maxChars) });
+        // 与早安同一条主动消息路:没有 messageId → 平台按主动消息计数(私聊一句,量很小)。
+        await sendChunked({ scene: 'c2c', targetId: feedQQ.c2cTarget, messageId: undefined, content: '' }, text);
+        feedQQ.cursor = Math.max(feedQQ.cursor, Number(pick.row.detectedAt) || feedQQ.cursor);
+        stateStore.setMeta(FEED_QQ_CURSOR_KEY, String(feedQQ.cursor));
+        sent += 1;
+      }
+      feedQQ.failures = 0;
+      log.info(`盯梢→QQ：已私聊推送 ${sent} 条（cursor=${feedQQ.cursor}）`);
+    } catch (err) {
+      feedQQ.failures += 1;
+      const backoffMs = Math.min(30 * 60_000, 60_000 * 2 ** Math.min(feedQQ.failures - 1, 5));
+      // 下一次至少等这么久(不推进 cursor:失败那条下轮重试)。
+      feedQQ.lastAttemptAt = Date.now() + backoffMs - feedQQ.cfg.qqIntervalMs;
+      log.warn(`盯梢→QQ：推送失败（${Math.round(backoffMs / 60_000)} 分钟后重试，cursor 不动）: ${describeError(err)}`);
+    }
+  }
 
   /**
    * **她走到地方了**(1.92.0 / D148):路上那一段的收尾。
@@ -9043,7 +9281,7 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
   //    它默认开着,所以"暖群关了就没定时器"这件事不能发生。
   if (
     config.policy.warmup.enabled || config.policy.morning.time || autoAnnounce
-    || archiveRunner || config.policy.selfcare?.enabled
+    || archiveRunner || config.policy.selfcare?.enabled || feedQQ
   ) {
     warmupTimer = setInterval(() => {
       // ⚠️ **卡住告警**(2026-10-03):上一拍还没跑完就又进来一次 = 有 await 挂住了。
@@ -9077,6 +9315,8 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         memoryArchiveTick();
         // "回头":把最近值得记的事固化成中期/长期记忆(每 N 小时一次)。
         memoryConsolidateTick();
+        // 盯梢新消息 → 私聊推送(2026-11-10;自己限频/退避,读不到库就静默跳过)。
+        await feedPushTick();
         // 指标点的保留策略(一天最多动一次,见 metricsTick)。
         metricsTick();
         } finally {

@@ -43,6 +43,37 @@ if (!fs.existsSync(envFile)) {
   ]);
 }
 
+// 实例运行时覆盖（C 区 `content/local/instance.json`）：给"同一仓库根、两只 bot 共用
+// content/ 之外还要按实例调运行时参数"留一条**可部署**的通道。不能用 `bots/<id>/instance.env`：
+// deploy 通道硬拒任何 `.env` 文件名，`bots/**` 也只写 `bots/<id>/run.cmd`；C 区的
+// `content/**` 才是 deploy 允许落内容的地方，所以覆盖文件放 content/local/，内容按 botId 分区。
+//
+// 顺序是判据，别挪：
+//   ① 必须在 `resolveEnvFile` 之后 —— 用 envFile 路径里的 `bots/<id>/` 认实例（认不出就跳过，
+//      绝不默认 megumin，否则爱丽丝会吃到惠惠的覆盖）；
+//   ② 必须在 `../src/index.js` 导入之前 —— `loadConfig` 读的是那一刻的 process.env；
+//   ③ 写入必须早于 .env 加载 —— `process.loadEnvFile` **不覆盖已存在的 process.env**（实测），
+//      而参数层次里 env(process) 高于 env-file，于是"先写 process.env" = 覆盖文件优先于 .env；
+//      也正因如此，模块只补 process.env 里**还没有**的键（supervisor/父进程显式环境优先）。
+// 动态 import：不改变 `../src/config.js` 的静态导入顺序。失败必须**响亮 bail**：宁可起不来，
+// 也不要带着"以为开了、其实没开"的状态跑（静默失效比崩溃更难查）。
+const { INSTANCE_OVERRIDE_PATH, applyInstanceOverrides } = await import('../src/instance-env.js');
+const instanceOverrideFile = path.join(ROOT_DIR, INSTANCE_OVERRIDE_PATH);
+try {
+  applyInstanceOverrides({
+    file: instanceOverrideFile,
+    envFile,
+    env: process.env,
+    log: (line) => out(`    ${line}`),
+  });
+} catch (error) {
+  bail('实例运行时覆盖文件无效，拒绝启动（不静默降级）', [
+    error instanceof Error ? error.message : '实例运行时覆盖文件读取失败',
+    `文件：${instanceOverrideFile}`,
+    '修好这个文件，或把它删掉/移走 —— 没有它时行为与以前完全一致。',
+  ]);
+}
+
 // 隔离：私有 home 的 sessions 必须是真实目录。own 不再消费全局 DSH profiles 等共享面，
 // 不要求它们是链接，也不删除/修补历史实体或链接（见 src\bot-home.js）。
 //

@@ -35,12 +35,12 @@ const read = (id, input) => resolveParams(CONFIG_PARAM_DEFINITIONS, { env: { [id
 
 export function registerConfigParamsTests({ test, assert }) {
   test('config params: complete typed catalogue and defaults are registered without secrets', () => {
-    assert.equal(CONFIG_PARAM_DEFINITIONS.length, 216); // Original 214 + explicit opt-in JSON path + S1 风格包选择。
-    assert.equal(new Set(CONFIG_PARAM_DEFINITIONS.map((def) => def.id)).size, 216);
+    assert.equal(CONFIG_PARAM_DEFINITIONS.length, 224); // 216 + 盯梢异界新闻/QQ 推送 8 项（2026-11-10）。
+    assert.equal(new Set(CONFIG_PARAM_DEFINITIONS.map((def) => def.id)).size, 224);
     assert.equal(CONFIG_PARAM_DEFINITIONS.some((def) => def.type === 'custom'), false);
     const typeCounts = {};
     for (const def of CONFIG_PARAM_DEFINITIONS) typeCounts[def.type] = (typeCounts[def.type] ?? 0) + 1;
-    assert.deepEqual(typeCounts, { int: 83, boolean: 45, number: 10, string: 28, url: 6, path: 14, enum: 12, object: 4, array: 14 });
+    assert.deepEqual(typeCounts, { int: 87, boolean: 47, number: 10, string: 30, url: 6, path: 14, enum: 12, object: 4, array: 14 });
     const defaults = resolveParams(CONFIG_PARAM_DEFINITIONS);
     assert.deepEqual(defaults.inputs, {});
     assert.equal(defaults.values.QQBOT_MOOD_TTL_MS, 600000);

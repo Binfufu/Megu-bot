@@ -28,7 +28,7 @@ const STORY_SECTION_KEYS = [
 ];
 const TURN_SECTION_KEYS = ['warmupTopics', 'meituLines'];
 const MOOD_SECTION_KEYS = ['config', 'ruleLabels'];
-const PLACE_IDS = ['home', 'fishing', 'guild', 'canteen', 'market', 'gallery'];
+const PLACE_IDS = ['home', 'fishing', 'guild', 'canteen', 'market', 'gallery', 'clinic'];
 const MODULE_TEXT_IDS = ['burst', 'sword', 'scout', 'talk', 'cook', 'fish', 'slow', 'weak', 'clumsy', 'nosy'];
 const MODULE_TEXT_NOTED = ['burst', 'cook'];
 const CHRONICLE_KINDS = ['meal', 'fed', 'selfcare', 'event', 'story', 'quest', 'fish', 'sell', 'home',

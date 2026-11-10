@@ -3,6 +3,16 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, openSync, writeFileSync, fsyncSync, closeSync, renameSync, unlinkSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 
+// 北京时间自然日 = UTC+8 固定偏移（无夏令时），与 src/usage-account.js 的 chinaDateKey()、
+// sqlite-store 的本地 `day` 列同一套口径；不引入第三套时区判断（不用本机时区，不用时区库）。
+const DAY_MS = 86_400_000;
+const BEIJING_OFFSET_MS = 8 * 3_600_000;
+/** 含 `ms` 的北京自然日窗口 [start,end)（epoch 毫秒，闭开区间）。 */
+function beijingDay(ms) {
+  const start = Math.floor((ms + BEIJING_OFFSET_MS) / DAY_MS) * DAY_MS - BEIJING_OFFSET_MS;
+  return { start, end: start + DAY_MS };
+}
+
 // Single-machine transactional outbox, not a cache: BACK UP THIS DATABASE.
 // Reuse: SQLite UPSERT / unique constraints + atomic transaction, asOf 2026-11-02:
 // https://sqlite.org/lang_UPSERT.html, https://sqlite.org/lang_transaction.html
@@ -64,7 +74,7 @@ const inboxColumns = 'id, sourceId, sourceName, key, type, title, url, summary, 
 
 /** All methods synchronous; dbPath must be an explicit persistent path.
  * sourceState returns null for unknown ids. status returns counts + all states.
- * applySnapshot returns { baseline, inserted, coalesced, count }; invalid samples
+ * applySnapshot returns { baseline, inserted, coalesced, suppressed, count }; invalid samples
  * throw and change nothing (caller may separately recordFailure). Missing keys never delete.
  * Fingerprint includes title/url/summary/publishedAt/observed (sorted JSON keys).
  * Each post-baseline fingerprint is delivered at most once per source/key EVER.
@@ -83,13 +93,33 @@ const inboxColumns = 'id, sourceId, sourceName, key, type, title, url, summary, 
  * projects delivery, never change detection. A fingerprint already present in any
  * inbox row for the key (A -> B -> A) is not delivered twice: no row is added and
  * the unique constraint is never allowed to raise.
+ *
+ * opts.maxPerKeyPerDay (non-negative safe integer, default 0 = unlimited): per-source
+ * per-key daily delivery cap, counted on the BEIJING (UTC+8) calendar day of `now`.
+ * It gates only messages that would ADD an inbox row: a key that already has
+ * maxPerKeyPerDay rows first detected that day gets none of the later ones, and each
+ * dropped message counts once in `suppressed`. In-place coalescing inside the window is
+ * a projection update, not a new message, so it neither spends nor needs quota.
+ * feed_items/feed_latest still advance on every sample, so a suppressed version is never
+ * backfilled later (a quiet day cannot become a next-day flood). The count is read and
+ * the writes happen inside the SAME BEGIN IMMEDIATE transaction; re-applying an identical
+ * snapshot is silent and never spends quota twice. An invalid value throws a TypeError
+ * before the transaction and changes nothing. The next Beijing day starts at zero again.
  */
 export function openFeedStore(dbPath) {
   text(dbPath, 'dbPath');
   if (dbPath === ':memory:' || !isAbsolute(dbPath)) throw new TypeError('dbPath must be an explicit absolute persistent path (NOT a deletable cache)');
   const db = new DatabaseSync(dbPath);
   try {
-    db.exec(`PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;
+    // WAL (persistent, also applied to an existing database on next open) so a reader
+    // (status/inbox) never blocks the observer's write transaction and a hard kill can
+    // recover from feed.db-wal instead of leaving a rollback journal behind. This is a
+    // durability setting, not a cache: backup must still copy feed.db WITH its -wal/-shm
+    // files while the observer is stopped (see scripts/feed-lab/README.md).
+    // busy_timeout first: switching an existing rollback-journal database to WAL can hit a
+    // transient SQLITE_BUSY while another connection holds a read transaction, and the
+    // timeout must already be armed for that statement.
+    db.exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;
       CREATE TABLE IF NOT EXISTS feed_sources (
         sourceId TEXT PRIMARY KEY, sourceName TEXT NOT NULL, baseline INTEGER NOT NULL DEFAULT 0,
         lastCheckAt INTEGER, lastSuccessAt INTEGER, etag TEXT, lastModified TEXT,
@@ -120,13 +150,26 @@ export function openFeedStore(dbPath) {
     DO UPDATE SET fingerprint=excluded.fingerprint`);
   const putInbox = db.prepare(`INSERT INTO feed_inbox
     (id,sourceId,sourceName,key,fingerprint,type,title,url,summary,publishedAt,detectedAt)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(sourceId,key,fingerprint) DO NOTHING`);
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    -- ⚠️ 冲突目标必须写成**任意唯一约束**：feed_inbox 的主键 id = hash(source,key,fingerprint)，
+    --    而合并窗口会把行内 fingerprint 改写成后来那一版（id 不变）。于是"内容回退到旧版本"
+    --    再插入时，按 (sourceId,key,fingerprint) 已经查不到旧行（它被改写了），可算出来的 id
+    --    正好等于那一行的主键 —— 只写 (sourceId,key,fingerprint) 的 DO NOTHING 接不住主键冲突，
+    --    会让整个源直接失败（2026-11-10 白云生产 OpenRouter 实测 UNIQUE constraint failed:
+    --    feed_inbox.id）。改成匹配任意冲突的 DO NOTHING，下面的 restore 分支再把行恢复成这一版。
+    ON CONFLICT DO NOTHING`);
   const inboxFingerprint = db.prepare('SELECT id FROM feed_inbox WHERE sourceId=? AND key=? AND fingerprint=?');
+  const inboxById = db.prepare('SELECT sourceId,key,fingerprint FROM feed_inbox WHERE id=?');
   // The window is anchored at the row's first detectedAt, so [now-coalesceMs, now]
   // holds at most one row per source/key (a row is created only once its predecessor
   // has left the window). The newest row is chosen if history ever says otherwise.
   const inboxWindow = db.prepare(`SELECT id FROM feed_inbox WHERE sourceId=? AND key=?
     AND detectedAt>=? AND detectedAt<=? ORDER BY detectedAt DESC, id LIMIT 1`);
+  // Daily cap budget = rows for this source/key first detected inside the Beijing day.
+  // A coalesced row keeps its first detectedAt, so an in-place update never spends quota
+  // on the following day; only a row that would be created today is counted.
+  const inboxDayCount = db.prepare(`SELECT COUNT(*) AS n FROM feed_inbox
+    WHERE sourceId=? AND key=? AND detectedAt>=? AND detectedAt<?`);
   const updateInbox = db.prepare(`UPDATE feed_inbox SET fingerprint=?,title=?,url=?,summary=?,publishedAt=?
     WHERE id=?`);
   function transaction(fn) {
@@ -152,21 +195,29 @@ export function openFeedStore(dbPath) {
         inboxCount: db.prepare('SELECT COUNT(*) AS n FROM feed_inbox').get().n,
       };
     },
-    listInbox({ limit = 100 } = {}) {
+    listInbox({ limit = 100, order = 'asc' } = {}) {
       if (!Number.isSafeInteger(limit) || limit < 1) throw new TypeError('limit must be a positive safe integer');
-      return db.prepare(`SELECT ${inboxColumns} FROM feed_inbox ORDER BY detectedAt,id LIMIT ?`).all(limit).map(r => ({ ...r }));
+      // asc is the historical/default delivery order; desc is an explicit read view for
+      // "newest first" consumers. exportInbox keeps its own ascending, stable-ID order.
+      if (order !== 'asc' && order !== 'desc') throw new TypeError('order must be asc or desc');
+      const direction = order === 'desc' ? 'DESC' : 'ASC';
+      return db.prepare(`SELECT ${inboxColumns} FROM feed_inbox ORDER BY detectedAt ${direction},id ${direction} LIMIT ?`)
+        .all(limit).map(r => ({ ...r }));
     },
-    applySnapshot(source, items, { now = Date.now(), etag, lastModified, coalesceMs = 0 } = {}) {
+    applySnapshot(source, items, { now = Date.now(), etag, lastModified, coalesceMs = 0, maxPerKeyPerDay = 0 } = {}) {
       const s = sourceInfo(source); millis(now); duration(coalesceMs, 'coalesceMs');
+      // Validated before the transaction: an invalid cap must change nothing at all.
+      duration(maxPerKeyPerDay, 'maxPerKeyPerDay');
       etag = validator(etag, 'etag'); lastModified = validator(lastModified, 'lastModified');
       if (!Array.isArray(items) || !items.length) throw new TypeError('empty/invalid snapshot is a source failure, not a baseline');
       const normalized = items.map(normalizeItem);
       if (new Set(normalized.map(i => i.key)).size !== normalized.length) throw new TypeError('duplicate snapshot keys');
       const windowStart = Math.max(now - coalesceMs, Number.MIN_SAFE_INTEGER);
+      const today = beijingDay(now);
       return transaction(() => {
         ensure.run(s.id, s.name);
         const baseline = !stateQuery.get(s.id).baseline;
-        let inserted = 0, coalesced = 0;
+        let inserted = 0, coalesced = 0, suppressed = 0;
         for (const i of normalized) {
           const old = getItem.get(s.id, i.key);
           if (!baseline && old?.fingerprint !== i.fingerprint) {
@@ -178,9 +229,25 @@ export function openFeedStore(dbPath) {
                 // In-place delivery projection: id/detectedAt/type stay as first detected.
                 updateInbox.run(i.fingerprint, i.title, i.url, i.summary, i.publishedAt, anchor.id);
                 coalesced += 1;
+              } else if (maxPerKeyPerDay > 0 && inboxDayCount.get(s.id, i.key, today.start, today.end).n >= maxPerKeyPerDay) {
+                // Over today's cap: drop the message but still advance the baseline below,
+                // so this version is never replayed tomorrow (no next-day flood).
+                suppressed += 1;
               } else {
                 const id = hash(JSON.stringify([s.id, i.key, i.fingerprint]));
-                inserted += Number(putInbox.run(id, s.id, s.name, i.key, i.fingerprint, old ? 'updated' : 'new', i.title, i.url, i.summary, i.publishedAt, now).changes);
+                const changes = Number(putInbox.run(id, s.id, s.name, i.key, i.fingerprint, old ? 'updated' : 'new', i.title, i.url, i.summary, i.publishedAt, now).changes);
+                if (changes > 0) {
+                  inserted += 1;
+                } else {
+                  // 主键冲突 = 这一版内容的稳定 id 已经有一行，只是它的 fingerprint 被窗口内
+                  // 合并改写成别的了。把那一行的投影恢复成这一版（id 重新与内容版本一致），
+                  // 不新增行、不抛错。只在确实同源同 key 时动，防哈希碰撞误伤。
+                  const existing = inboxById.get(id);
+                  if (existing && existing.sourceId === s.id && existing.key === i.key) {
+                    updateInbox.run(i.fingerprint, i.title, i.url, i.summary, i.publishedAt, id);
+                    coalesced += 1;
+                  }
+                }
               }
             }
           }
@@ -192,7 +259,7 @@ export function openFeedStore(dbPath) {
         }
         db.prepare(`UPDATE feed_sources SET baseline=1,lastCheckAt=?,lastSuccessAt=?,etag=?,lastModified=?,
           consecutiveFailures=0,error=NULL,retryAt=NULL WHERE sourceId=?`).run(now, now, etag, lastModified, s.id);
-        return { baseline, inserted, coalesced, count: normalized.length };
+        return { baseline, inserted, coalesced, suppressed, count: normalized.length };
       });
     },
     recordFailure(source, { now = Date.now(), error = 'source failure', retryAt = null } = {}) {

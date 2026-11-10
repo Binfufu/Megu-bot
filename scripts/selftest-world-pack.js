@@ -57,7 +57,7 @@ const STORY_KEYS = [
   'storySettleClosing', 'places', 'worldText', 'moduleText', 'chronicleKinds', 'eventLabels',
   'chronicleText', 'commandEffects', 'cardClaimNotes', 'keywordGroups', 'opsEffects',
 ];
-const PLACES = ['home', 'fishing', 'guild', 'canteen', 'market', 'gallery'];
+const PLACES = ['home', 'fishing', 'guild', 'canteen', 'market', 'gallery', 'clinic'];
 const MODULES = ['burst', 'sword', 'scout', 'talk', 'cook', 'fish', 'slow', 'weak', 'clumsy', 'nosy'];
 const KINDS = ['meal', 'fed', 'selfcare', 'event', 'story', 'quest', 'fish', 'sell', 'home',
   'potion', 'sleep', 'move', 'illness', 'heal'];

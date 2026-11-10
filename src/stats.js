@@ -1074,27 +1074,94 @@ export function mentionsEating(text) {
 }
 
 /**
- * **她没说吃就替她补一句动作行**(纯函数,2026-10-09;2026-10-23 收窄)。
+ * 替她补的那一行**进食动作**的固定句式池(主人 2026-11-10:至少 20 条)。
+ *
+ * ⚠️ 为什么是池子而不是一条:这一行只在「她这一轮真吃了、嘴上却一个字没提吃」时出现。
+ *    一条固定文案连着出现几次就立刻露馅 —— 它本来要传达的信息("我嘴里正嚼着东西")
+ *    会被读者当成模板,重复得越勤越像系统通知。池子让同一件事每次读起来都像新发生的。
+ *
+ * ⚠️ **每条都必须带 `{food}`**:2026-10-23(D298)退役的是**没有食物名**的万能句
+ *    (「嘴里还在嚼东西」—— 没信息量、让她空口嚼),不是这一行本身;
+ *    认不出有名有姓的食物(`food='投喂'`/空)**仍然一个字不补**,
+ *    不能因为"现在有 20 多条了"就把万能句偷偷加回来。
+ *
+ * ⚠️ 句式的形状固定成"整句括号动作":她的话一个字不动,这一行**另起一段**跟在后面
+ *    (见 `narrateMeal`),所以每条都要能独立成立、能填食物名、带一个"在吃"的动作词。
+ */
+export const MEAL_ACTION_LINES = Object.freeze([
+  '（嚼着{food}，含混地应了一声）',
+  '（嘴里塞着{food}，含含糊糊地应了句）',
+  '（一边嚼{food}一边含混地应了一声）',
+  '（含着{food}，声音有点发糊）',
+  '（嚼着{food}，含混地点了点头）',
+  '（嘴里还嚼着{food}，说话有点含糊）',
+  '（嚼了两口{food}，含混地应了一声）',
+  '（咬着{food}，含含糊糊地回了句）',
+  '（嘴里含着{food}，含混地应了声）',
+  '（含着{food}，敷衍地应了一声）',
+  '（腮帮子还鼓着{food}，含混地应了一声）',
+  '（嘴里塞满{food}，含糊地应了一句）',
+  '（含着{food}，只含混地唔了一声）',
+  '（咽下嘴里的{food}，含混地应了一声）',
+  '（叼着{food}，含糊地应了一声）',
+  '（一边吃{food}一边含混地应了一声）',
+  '（嘴里还含着{food}，含含糊糊地应了一声）',
+  '（嘴里嚼着{food}，声音含混）',
+  '（嚼着{food}，含混地应了句什么）',
+  '（嘴里还嚼着{food}，含混地嘟囔了一句）',
+  '（嘴里塞着{food}，含糊地哼了一声）',
+  '（嘴里还塞着{food}，含混地应了一声）',
+  '（嚼完一口{food}，含混地应了一声，又低头继续吃）',
+  '（嘴里的{food}还没咽下去，含混地应了一声）',
+]);
+
+/**
+ * 从句式池里挑一条并填上食物名(纯函数;`random` 可注入,测试可钉死)。
+ *
+ * ⚠️ 食物名为空 → 空串(调用方据此**不补**),不是"挑一条通用句"。
+ * ⚠️ `random()` 给 1/负数/NaN 时也落在合法下标上(不抛、不越界),和 `pickEatery`
+ *    那类纯函数同一口径:外部随机源再坏也不该让这一行消失。
+ *
+ * @param {string|null} [food] 这一口有名有姓的食物
+ * @param {() => number} [random] 随机源(测试注入)
+ * @returns {string} 填好的整句;食物名认不出时是空串
+ */
+export function mealActionLine(food, random = Math.random) {
+  const name = String(food ?? '').trim();
+  if (!name) return '';
+  const roll = Number(random());
+  const index = Number.isFinite(roll)
+    ? Math.min(MEAL_ACTION_LINES.length - 1, Math.max(0, Math.floor(roll * MEAL_ACTION_LINES.length)))
+    : 0;
+  return MEAL_ACTION_LINES[index].split('{food}').join(name);
+}
+
+/**
+ * **她没说吃就替她补一句动作行**(纯函数,2026-10-09;2026-10-23 收窄;2026-11-10 扩池)。
  *
  * 理由见 `mentionsEating`:**数值动了,话里就得看得见** —— 不然用户只看到饱食度自己涨。
  * 她说了就不补(别抢她的语气)。
  *
- * ⚠️ **2026-10-23 主人拍板:万能句退役**。只有 `food` 认得出**有名有姓**时才补
- * 「（嚼着XX,含混地应了一声）」;认不出(含 `food='投喂'` 这种泛称)就**一个字不补** ——
- * 万能句没有信息量,反而让她嘴上反复"嚼东西"。数值可见性闲置期由 `/状态` 与网页面板兜底。
+ * ⚠️ **2026-10-23 主人拍板:万能句退役**。只有 `food` 认得出**有名有姓**时才补;
+ *    认不出(含 `food='投喂'` 这种泛称)就**一个字不补** ——
+ *    万能句没有信息量,反而让她嘴上反复"嚼东西"。数值可见性闲置期由 `/状态` 与网页面板兜底。
+ * ⚠️ **2026-11-10 主人拍板:固定句式扩到至少 20 条**(见 `MEAL_ACTION_LINES`)——
+ *    退役的是"没食物名的万能句",不是"有名有姓这条";保留的这条也不能永远同一句。
  *
  * @param {string} text 她这一轮的正文(已剥掉协议标记)
  * @param {{food?: string|null, satietyDelta?: number}} [meal] 这一轮那次进食
+ * @param {{random?: () => number}} [options] 句式池的随机源(默认 `Math.random`)
  * @returns {string} 要发出的正文(可能多一行)
  */
-export function narrateMeal(text, meal = {}) {
+export function narrateMeal(text, meal = {}, { random = Math.random } = {}) {
   const body = String(text ?? '');
   if (!(Number(meal?.satietyDelta) > 0)) return body;
   if (mentionsEating(body)) return body;
   const food = String(meal?.food ?? '').trim();
   // 万能句退役(2026-10-23):没有有名有姓的食物就不补,别让她空口嚼东西。
   if (!food || food === '投喂') return body;
-  const action = `（嚼着${food}，含混地应了一声）`;
+  const action = mealActionLine(food, random);
+  if (action === '') return body;
   return body === '' ? action : `${body}\n\n${action}`;
 }
 

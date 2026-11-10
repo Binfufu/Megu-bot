@@ -6,10 +6,13 @@ import { createHash } from 'node:crypto';
 // a TENTATIVE default (owner may tune per source); shopping-platform price watchers
 // will reuse this exact `coalesceMs` name and per-source override.
 const COALESCE_MS = 3_600_000;
+// 主人 2026-11-04 拍板：同一来源同一条目每天最多 10 条入箱消息（按北京时间自然日计数）。
+// 购物平台（淘宝／京东／拼多多）价格盯梢复用同名参数与语义；0 = 不限。
+const MAX_INBOX_PER_KEY_PER_DAY = 10;
 export const FIXED_FEED_SOURCES = Object.freeze([
-  { id: 'openrouter', name: 'OpenRouter', url: 'https://openrouter.ai/api/v1/models', kind: 'openrouter', frequency: 'high', coalesceMs: COALESCE_MS },
-  { id: 'deepseek', name: 'DeepSeek', url: 'https://api-docs.deepseek.com/updates/', kind: 'deepseek', frequency: 'high', coalesceMs: COALESCE_MS },
-  { id: 'glm', name: 'GLM', url: 'https://docs.bigmodel.cn/cn/update/new-releases.md', kind: 'glm', frequency: 'high', coalesceMs: COALESCE_MS },
+  { id: 'openrouter', name: 'OpenRouter', url: 'https://openrouter.ai/api/v1/models', kind: 'openrouter', frequency: 'high', coalesceMs: COALESCE_MS, maxInboxPerKeyPerDay: MAX_INBOX_PER_KEY_PER_DAY },
+  { id: 'deepseek', name: 'DeepSeek', url: 'https://api-docs.deepseek.com/updates/', kind: 'deepseek', frequency: 'high', coalesceMs: COALESCE_MS, maxInboxPerKeyPerDay: MAX_INBOX_PER_KEY_PER_DAY },
+  { id: 'glm', name: 'GLM', url: 'https://docs.bigmodel.cn/cn/update/new-releases.md', kind: 'glm', frequency: 'high', coalesceMs: COALESCE_MS, maxInboxPerKeyPerDay: MAX_INBOX_PER_KEY_PER_DAY },
 ].map(Object.freeze));
 
 // As sampled 2026-11-02: OpenRouter models API schema (not an LLM summary):

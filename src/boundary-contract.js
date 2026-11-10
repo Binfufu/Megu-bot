@@ -143,7 +143,7 @@ export const CONTRACT_ROWS = Object.freeze([
   {
     id: 'session-key',
     boundary: '会话键(机器人跟"谁"说话)',
-    owner: '`conversationKeyFor(message)`(`src\\index.js`)—— `qqbot-c2c-<openid>` / `qqbot-group-<群id>`,网页是 `qqbot-web-<playerId>`',
+    owner: '`conversationKeyFor(message)`(`src\\index.js`)—— `qqbot-c2c-<openid>` / `qqbot-group-<群id>`,网页是 `qqbot-web-<playerId>`;⚠️ 网页账号**已验证绑定**到某个 QQ 时(2026-11-10 / D329),网页私聊改用那个 QQ 的 `qqbot-c2c-<openid>`,两边共用一段历史,未绑定/绑定不自洽仍是各自的键',
     trigger: '每条入站消息 / 每次主动发言',
     how: '会话键标识持久对话与记忆归档的 `conversation`;`/重置` 让它进下一"代"(`-g<N>`)',
     note: '⚠️ 键是**会话**不是"机器人的身份":私聊里关于对方的事实另用 `self`;机器人**只有一个身体**,不按 QQ 用户分身(D132/D171)',

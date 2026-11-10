@@ -23,6 +23,11 @@
       "reason": "去重/账本测试用的 32 位十六进制明文序列（ABCDEF…/FEDCBA…），非真实 openid"
     },
     {
+      "path": "scripts/selftest-feed-watch.mjs",
+      "id": "api-key-prefix",
+      "reason": "错误脱敏反证用例里的合成 GitHub token 形状（ghp_ 后接 0123456789abcdefghij 顺序数字与字母），不是真实凭据"
+    },
+    {
       "path": "scripts/selftest-residue.js",
       "id": "openid-hex",
       "reason": "合成占位 id（全 0 + 1），非真实 openid"

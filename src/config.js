@@ -997,6 +997,19 @@ function buildRuntimeConfig({ rootDir, envFile, loadedEnvFile }) {
           // "什么时候发由我说了算"就是 manual。
           trigger: parseAnnounceTrigger(raw('QQBOT_ANNOUNCE_TRIGGER')),
         },
+        // 盯梢 → 网站「异界新闻」与 QQ 私聊推送（2026-11-10）。
+        // 默认不改变现有行为：库路径为空 = 两处都不启用；QQ 推送还要显式开 QQBOT_FEED_QQ。
+        // ⚠️ 这是**只读**投影：面板/推送只 SELECT 盯梢库的公开字段，不写、不碰 .env。
+        feed: {
+          dbPath: raw('QQBOT_FEED_DB') ? path.resolve(rootDir, raw('QQBOT_FEED_DB')) : null,
+          news: asBool('QQBOT_FEED_NEWS', true),
+          newsLimit: Math.max(1, Math.min(50, asInt('QQBOT_FEED_NEWS_LIMIT', 20))),
+          qq: asBool('QQBOT_FEED_QQ', false),
+          qqC2cTarget: (raw('QQBOT_FEED_QQ_C2C') ?? '').trim(),
+          qqIntervalMs: Math.max(5_000, Math.min(3_600_000, asInt('QQBOT_FEED_QQ_INTERVAL_MS', 60_000))),
+          qqPricePct: Math.max(1, Math.min(10_000, asInt('QQBOT_FEED_QQ_PRICE_PCT', 50))),
+          qqMaxPerTick: Math.max(1, Math.min(20, asInt('QQBOT_FEED_QQ_MAX_PER_TICK', 3))),
+        },
         // 谁能打控制指令(播报等)。留空 = 回落到播报/早安的私聊目标;
         // 三者都没有 = 谁都不能(fail closed)。
         admin: {
