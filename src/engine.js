@@ -147,7 +147,7 @@ export function createOwnEngine(options) {
    *    · 取消/超时**不重试**(那是这一趟被掐了,不是交接本身坏了),立刻按取消处理;
    *    · 返回值形状不对是**代码错**、重试也修不好,当场抛(不浪费三次调用)。
    */
-  async function initialHandoff(key, signal) {
+  async function initialHandoff(key, signal, turnOptions = {}) {
     signal.throwIfAborted();
     let abort;
     const cancelled = new Promise((_, reject) => {
@@ -158,7 +158,7 @@ export function createOwnEngine(options) {
       for (let attempt = 1; attempt <= handoffAttempts; attempt += 1) {
         try {
           const block = await Promise.race([Promise.resolve().then(() => {
-            signal.throwIfAborted(); return handoff(key);
+            signal.throwIfAborted(); return handoff(key, turnOptions);
           }), cancelled]);
           signal.throwIfAborted();
           if (block !== null && block !== undefined && typeof block !== 'string') throw new Error('handoff must return a string or null');
@@ -446,7 +446,7 @@ export function createOwnEngine(options) {
      *   · 代价:重启后该轮工具上下文不可重放(带 tools 的思考态模型本仓暂不声明支持);
      *   · 纯 tool_calls 不再落到 `[跳过]`;预算耗尽给显式"没能完成"正文。
      */
-    async runTurn(conversationKey, text, turnTimeoutMs, imageBlocks, toolContext = null) {
+    async runTurn(conversationKey, text, turnTimeoutMs, imageBlocks, toolContext = null, turnOptions = {}) {
       if (stopped) throw new Error('engine stopped');
       const images = normalizeLlmImages(imageBlocks);
       const key = String(conversationKey ?? '');
@@ -468,7 +468,7 @@ export function createOwnEngine(options) {
           const allHistory = store.conversationTurns(key);
           const block = handoff && allHistory.length === 0 && !s.summary && s.resetId === 0
             && store.getMeta(`own-engine:handoff-suppressed:${key}`) !== 'true'
-            ? await initialHandoff(key, signal) : '';
+            ? await initialHandoff(key, signal, { scene: turnOptions?.scene ?? null }) : '';
           const effectiveText = block.trim() ? block + '\n\n' + String(text ?? '') : text;
           // T1-A:历史投影 —— 档案行原样保留,只动"本轮实际发给模型的输入"。
           const fullHistory = allHistory.filter(row => row.id > s.coveredId).map(projectTurn);

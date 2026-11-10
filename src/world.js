@@ -96,6 +96,13 @@ export const PLACES = Object.freeze(LOCAL_STORY_WORLD?.places ?? [
     "kind": "gallery",
     "travelMs": 240000,
     "blurb": "示例世界的图片展区。"
+  },
+  {
+    "id": "clinic",
+    "name": "诊疗所",
+    "kind": "clinic",
+    "travelMs": 300000,
+    "blurb": "示例世界的诊疗所。"
   }
 ]);
 const WORLD_TEXT = LOCAL_STORY_WORLD?.worldText ?? {
@@ -136,6 +143,7 @@ export const ROUTES = Object.freeze({
   canteen: ['guild', 'home', 'market'],
   market: ['home', 'guild', 'fishing'],
   fishing: ['home', 'guild', 'canteen'],
+  clinic: ['guild', 'home', 'market'],
 });
 
 /** 从某处出发的去处(认不出给空数组 —— 不猜)。 */
@@ -278,7 +286,8 @@ export function herWhereabouts({ metas = [], scenes = [], now = Date.now() } = {
  *
  * ⚠️ **认不出场所就返回 null**(宁可"不知道她在哪",也不写一条错的事实)。
  *
- * @param {{action?: 'eat'|'life', eatery?: object, activity?: object}} decision
+ * @param {{action?: 'eat'|'life'|'heal', eatery?: object, activity?: object,
+ *   clinic?: object|string|null, doctor?: {name?: string}|null}} decision
  * @param {{now?: number, ttlMs?: number}} [opts] `ttlMs` = 这条事实多久后过期(默认 30 分钟)
  * @returns {null | {place: string, placeName: string, where: string|null, doing: string,
  *   reason: string, since: number, until: number}}
@@ -298,6 +307,23 @@ export function whereaboutsFromDecision(decision, { now = Date.now(), ttlMs = 30
       where: eatery.place ?? null,
       doing: eatery.food ? `吃${eatery.food}` : '吃饭',
       reason: '饿了(饱食低于阈值)',
+      since,
+      until,
+    };
+  }
+
+  if (decision.action === 'heal') {
+    // ⚠️ 场所**只认 clinic**:调用方(`selfcare.decideSelfCare`)只会在 `placeById('clinic')`
+    //    认得出时才给 `action:'heal'`,这里再按 id 认一遍 —— 认不出 clinic 就返回 null,不猜。
+    const clinic = placeById(decision.clinic?.id ?? decision.clinic);
+    if (!clinic || clinic.id !== 'clinic') return null;
+    const doctor = decision.doctor ?? {};
+    return {
+      place: clinic.id,
+      placeName: clinic.name,
+      where: doctor?.name ?? null,
+      doing: `去${clinic.name}看诊`,
+      reason: '身体不适(需要治疗)',
       since,
       until,
     };

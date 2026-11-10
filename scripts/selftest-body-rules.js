@@ -57,7 +57,9 @@ export async function loadNeutralContentFixture(moduleNames) {
       schemaVersion: 1, storyEvents: makeEvents('biological'),
       storyPacks: { megumin: { id: 'megumin', label: '合成生物体故事' }, aris: { id: 'aris', label: '合成机械体故事', events: makeEvents('mechanical') } },
       storyClosingWords: ['合成收尾'], storyClosingExamples: ['合成收尾示例'], storyRespondClosing: '合成回应收尾', storySettleClosing: '合成自决收尾',
-      places: world.PLACES.map((row) => ({ ...row, name: `合成地点${row.id}`, blurb: '合成场地说明' })),
+      // 旧快照契约固定 6 处(home..gallery):clinic 只存在于世界包时代的新表(回退 PLACES 的第 7 项),
+      // 旧 content/local/story-world.json 永远不会有它 —— 所以喂给旧读取器的合成快照要滤掉。
+      places: world.PLACES.filter((row) => row.id !== 'clinic').map((row) => ({ ...row, name: `合成地点${row.id}`, blurb: '合成场地说明' })),
       worldText: { currency: '合成币', questAcceptPrefix: '合成接取「', questAcceptSuffix: '」', questAcceptPlain: '合成接取' },
       companions: ['megumin', 'aris'].map((id, index) => ({ id, name: `合成伙伴${index}`, fullName: `合成全名${index}`, theme: id, bot: id, stateDir: id, art: `fixture_${index}.png`, blurb: '合成伙伴说明' })),
       moduleText: Object.fromEntries(tuning.MODULE_TUNING.map((row, index) => [row.id, { name: `合成模块${index}`, ...(row.note === undefined ? {} : { note: '合成模块说明' }) }])),

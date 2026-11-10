@@ -212,6 +212,13 @@
         "kind": "gallery",
         "travelMs": 120000,
         "blurb": "把收集到的图片挂出来的地方 —— 按日 / 周 / 月 / 年挑着看"
+      },
+      {
+        "id": "clinic",
+        "name": "诊疗所",
+        "kind": "clinic",
+        "travelMs": 180000,
+        "blurb": "看诊与简单处置的地方 —— 受了伤或身子不舒服时会来这儿"
       }
     ],
     "worldText": {

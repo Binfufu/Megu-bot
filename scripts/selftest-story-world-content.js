@@ -161,14 +161,14 @@ function publicChild(options) {
     }
     check(() => assert.deepEqual(d.CHARACTER_DAYS, {}));
     check(() => assert.equal(d.renderDayLine([{month:1,day:2,label:'合成纪念日',source:'原创来源'}]),'今天是她合成纪念日（1月2日，出处：原创来源）'));
-    check(() => assert.deepEqual(w.PLACES.map(row=>row.name), ['住所','垂钓区','任务中心','餐厅','交易区','图片展区']));
-    check(() => assert.deepEqual(w.PLACES.map(row=>row.travelMs), [180000,360000,300000,300000,420000,240000]));
+    check(() => assert.deepEqual(w.PLACES.map(row=>row.name), ['住所','垂钓区','任务中心','餐厅','交易区','图片展区','诊疗所']));
+    check(() => assert.deepEqual(w.PLACES.map(row=>row.travelMs), [180000,360000,300000,300000,420000,240000,300000]));
     check(() => assert.equal(w.placesFor(), w.PLACES));
-    check(() => assert.equal(w.placesFor({gallery:false}).length,5));
+    check(() => assert.equal(w.placesFor({gallery:false}).length,6));
     check(() => assert.equal(w.placeById('unknown'),null));
     check(() => assert.deepEqual(w.routesFrom('unknown'),[]));
     check(() => assert.equal(w.herWhereabouts({now:1000}).placeId,null));
-    check(() => assert.equal(w.describeWorld({now:1000}).places.length,6));
+    check(() => assert.equal(w.describeWorld({now:1000}).places.length,7));
     check(() => assert.equal(w.whereaboutsFromAction({kind:'move.to',target:'guild',current:{placeId:'home'},now:1000}).arriveAt,301000));
     check(() => assert.equal(w.whereaboutsFromAction({kind:'quest.accept',detail:{label:'甲'},now:1000}).doing,'在任务中心接下了「甲」'));
     check(() => assert.equal(w.settleTravel({to:'guild',arriveAt:301000},{now:301000}).doing,'到了任务中心'));
@@ -199,7 +199,9 @@ function publicChild(options) {
     check(()=>assert.equal(cmd.BRIDGE_COMMANDS.length,24));
     const fixture={schemaVersion:1,storyEvents:[event],storyPacks:{megumin:{id:'megumin',label:'合成默认故事'},aris:{id:'aris',label:'合成机械故事',events:[event]}},
       storyClosingWords:['合成收尾'],storyClosingExamples:['合成收尾。'],storyRespondClosing:'合成回应收尾',storySettleClosing:'合成自决收尾',
-      places:w.PLACES.map(row=>({...row,name:row.id==='guild'?'合成任务地点':'合成地点'+row.id,blurb:'合成场所说明'})),
+      // 旧快照固定 6 处(home/fishing/guild/canteen/market/gallery):clinic 是世界包时代的第 7 处,
+      // 旧 content/local/story-world.json 永远不会含它 —— 所以喂给旧读取器的合成快照仍按 6 处来。
+      places:w.PLACES.filter(row=>row.id!=='clinic').map(row=>({...row,name:row.id==='guild'?'合成任务地点':'合成地点'+row.id,blurb:'合成场所说明'})),
       worldText:{currency:'合成货币',questAcceptPrefix:'合成接取「',questAcceptSuffix:'」',questAcceptPlain:'合成接取'},
       companions:['megumin','aris'].map((id,index)=>({id,name:index===0?'合成伙伴甲':'合成伙伴乙',fullName:'合成完整名称'+index,theme:id,bot:id,stateDir:id,art:'synthetic_'+index+'.png',blurb:'合成伙伴说明'})),
       moduleText:Object.fromEntries(t.MODULE_TUNING.map((row,index)=>[row.id,{name:'合成能力'+index,...(row.note===undefined?{}:{note:'合成说明'})}])),

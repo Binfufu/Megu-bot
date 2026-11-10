@@ -1,0 +1,160 @@
+qqbot 通用框架三基础问题 · T0 判据（probe 探针模式：现状校准）
+基准树见 git HEAD；结果 14/14 条符合校准期望。
+[PASS] ctx.inject.not-persist want=green got=green  ← (对照项，须保持绿)
+       无关下一轮的实际 messages 不再携带上一轮临时 recall 注入(T1-A 历史投影已落地)
+[PASS] ctx.image.no-auto-replay want=green got=green  ← (对照项，须保持绿)
+       隔 24h 无关轮次不再回放旧图(T4 已落地:像素只来自本轮/桥层显式来源;历史文字提示保留)
+[PASS] ctx.image.new-image-suppresses-replay want=green got=green  ← (对照项，须保持绿)
+       新图经 callOptions 单独传递且抑制旧图回放
+[PASS] ctx.group.isolation want=green got=green  ← (对照项，须保持绿)
+       另一群请求不含前群内容
+[PASS] ctx.reset.clears want=green got=green  ← (对照项，须保持绿)
+       reset 后旧文本与旧图均不再进入请求
+[PASS] summary.isolated.no-cross-task want=green got=green  ← (对照项，须保持绿)
+       同键连续两个无状态任务轮,后一请求不含前一任务材料,且每次只有本轮一条
+[PASS] inbound.reference.keeps-image-and-ref want=green got=green  ← (对照项，须保持绿)
+       引用身份(replyToMessageId)已保留(T3);嵌套引用附件不混入顶层 images(来源分离,解析走发送绑定)
+[PASS] inbound.direct-attachment.carried want=green got=green  ← (对照项，须保持绿)
+       顶层附件图片照常提取并进补图账（修复不得破坏）
+[PASS] meitu.receipt.outbound-binding want=green got=green  ← (对照项，须保持绿)
+       服务返回逐张收据(outboundMessageId/source/md5);图库侧身份在(recordSent.md5=true)(T2 已落地)
+[PASS] media.link.binds-and-resolves want=green got=green  ← (对照项，须保持绿)
+       发送收据→持久绑定→同作用域引用查找回环成立(任务状态=completed);跨群/重启后仍可查(同 API)
+[PASS] meitu.task.observable want=green got=green  ← (对照项，须保持绿)
+       成功发送后有任务级产物(status=completed,角色=白子)供聊天层注入事实块(T2 已落地)
+[PASS] meitu.success.counts want=green got=green  ← (对照项，须保持绿)
+       ok/sent/failed 结算保持既有口径
+[PASS] meitu.send-failure.counted want=green got=green  ← (对照项，须保持绿)
+       失败计数不回退（reason=upload_failed）
+[PASS] llm.vision.passthrough want=green got=green  ← (对照项，须保持绿)
+       正确传入的图片会连同钉地注记进入真实 provider body（T4「知道图片内容」的通道基线）
+
+JSON:
+[
+  {
+    "id": "ctx.inject.not-persist",
+    "want": "green",
+    "got": "green",
+    "ok": true,
+    "detail": "无关下一轮的实际 messages 不再携带上一轮临时 recall 注入(T1-A 历史投影已落地)",
+    "pass": true,
+    "fixBy": "(对照项，须保持绿)"
+  },
+  {
+    "id": "ctx.image.no-auto-replay",
+    "want": "green",
+    "got": "green",
+    "ok": true,
+    "detail": "隔 24h 无关轮次不再回放旧图(T4 已落地:像素只来自本轮/桥层显式来源;历史文字提示保留)",
+    "pass": true,
+    "fixBy": "(对照项，须保持绿)"
+  },
+  {
+    "id": "ctx.image.new-image-suppresses-replay",
+    "want": "green",
+    "got": "green",
+    "ok": true,
+    "detail": "新图经 callOptions 单独传递且抑制旧图回放",
+    "pass": true,
+    "fixBy": "(对照项，须保持绿)"
+  },
+  {
+    "id": "ctx.group.isolation",
+    "want": "green",
+    "got": "green",
+    "ok": true,
+    "detail": "另一群请求不含前群内容",
+    "pass": true,
+    "fixBy": "(对照项，须保持绿)"
+  },
+  {
+    "id": "ctx.reset.clears",
+    "want": "green",
+    "got": "green",
+    "ok": true,
+    "detail": "reset 后旧文本与旧图均不再进入请求",
+    "pass": true,
+    "fixBy": "(对照项，须保持绿)"
+  },
+  {
+    "id": "summary.isolated.no-cross-task",
+    "want": "green",
+    "got": "green",
+    "ok": true,
+    "detail": "同键连续两个无状态任务轮,后一请求不含前一任务材料,且每次只有本轮一条",
+    "pass": true,
+    "fixBy": "(对照项，须保持绿)"
+  },
+  {
+    "id": "inbound.reference.keeps-image-and-ref",
+    "want": "green",
+    "got": "green",
+    "ok": true,
+    "detail": "引用身份(replyToMessageId)已保留(T3);嵌套引用附件不混入顶层 images(来源分离,解析走发送绑定)",
+    "pass": true,
+    "fixBy": "(对照项，须保持绿)"
+  },
+  {
+    "id": "inbound.direct-attachment.carried",
+    "want": "green",
+    "got": "green",
+    "ok": true,
+    "detail": "顶层附件图片照常提取并进补图账（修复不得破坏）",
+    "pass": true,
+    "fixBy": "(对照项，须保持绿)"
+  },
+  {
+    "id": "meitu.receipt.outbound-binding",
+    "want": "green",
+    "got": "green",
+    "ok": true,
+    "detail": "服务返回逐张收据(outboundMessageId/source/md5);图库侧身份在(recordSent.md5=true)(T2 已落地)",
+    "pass": true,
+    "fixBy": "(对照项，须保持绿)"
+  },
+  {
+    "id": "media.link.binds-and-resolves",
+    "want": "green",
+    "got": "green",
+    "ok": true,
+    "detail": "发送收据→持久绑定→同作用域引用查找回环成立(任务状态=completed);跨群/重启后仍可查(同 API)",
+    "pass": true,
+    "fixBy": "(对照项，须保持绿)"
+  },
+  {
+    "id": "meitu.task.observable",
+    "want": "green",
+    "got": "green",
+    "ok": true,
+    "detail": "成功发送后有任务级产物(status=completed,角色=白子)供聊天层注入事实块(T2 已落地)",
+    "pass": true,
+    "fixBy": "(对照项，须保持绿)"
+  },
+  {
+    "id": "meitu.success.counts",
+    "want": "green",
+    "got": "green",
+    "ok": true,
+    "detail": "ok/sent/failed 结算保持既有口径",
+    "pass": true,
+    "fixBy": "(对照项，须保持绿)"
+  },
+  {
+    "id": "meitu.send-failure.counted",
+    "want": "green",
+    "got": "green",
+    "ok": true,
+    "detail": "失败计数不回退（reason=upload_failed）",
+    "pass": true,
+    "fixBy": "(对照项，须保持绿)"
+  },
+  {
+    "id": "llm.vision.passthrough",
+    "want": "green",
+    "got": "green",
+    "ok": true,
+    "detail": "正确传入的图片会连同钉地注记进入真实 provider body（T4「知道图片内容」的通道基线）",
+    "pass": true,
+    "fixBy": "(对照项，须保持绿)"
+  }
+]

@@ -164,6 +164,18 @@ export function createConfigParamDefinitions(parsers) {
   positive('QQBOT_SELFCARE_LIFE_EVERY_MS', 3 * 60 * 60_000);
   ratio('QQBOT_SELFCARE_LIFE_CHANCE', 0.5);
   boolean('QQBOT_ANNOUNCE', false);
+  // 盯梢 → 网站「异界新闻」/ QQ 私聊推送（2026-11-10）：
+  // 库路径为空 = 两处都不启用（默认行为不变）；QQ 推送还要显式开 QQBOT_FEED_QQ。
+  // ⚠️ 这 8 项都是 runtime / 非敏感 —— `content/local/instance.json` 可按实例覆盖
+  //    （生产不需要改 .env，部署通道也只写 C 区 content/**）。
+  boolean('QQBOT_FEED_NEWS', true);
+  text('QQBOT_FEED_DB', '');
+  positive('QQBOT_FEED_NEWS_LIMIT', 20, { max: 50 });
+  boolean('QQBOT_FEED_QQ', false);
+  text('QQBOT_FEED_QQ_C2C', '');
+  positive('QQBOT_FEED_QQ_INTERVAL_MS', 60_000, { min: 5_000, max: 3_600_000 });
+  positive('QQBOT_FEED_QQ_PRICE_PCT', 50, { max: 10_000 });
+  positive('QQBOT_FEED_QQ_MAX_PER_TICK', 3, { max: 20 });
   boolean('QQBOT_STATS', true);
   boolean('QQBOT_STAT_DELTA_LINE', true);
   boolean('QQBOT_STATS_MONEY', true);

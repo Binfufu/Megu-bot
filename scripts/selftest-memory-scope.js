@@ -141,16 +141,21 @@ export function registerMemoryScopeTests({ test, assert }) {
 
   test('wiring:两个注入点都必须过作用域（扫源码，防"模块写了没接线"）', () => {
     const source = fs.readFileSync(path.resolve('src', 'index.js'), 'utf8');
-    assert.match(source, /import \{ filterBlocksForAccess, filterInsightsForAccess, memoryAccessFor \} from '\.\/memory-scope\.js'/,
+    // ⚠️ 2026-11-10(D329):作用域判定改由 `memoryAccessForScene` 统一取档(按"这一轮从哪来"),
+    //    判据明改到新事实,并追加"场景真的被读"两条 —— 不是删旧判据让它变绿。
+    assert.match(source, /import \{ filterBlocksForAccess, filterInsightsForAccess, memoryAccessForScene \} from '\.\/memory-scope\.js'/,
       'import 必须与模块导出一致');
     const handoffStart = source.indexOf('async function handoffFor(');
     const handoffEnd = source.indexOf('\n  }', handoffStart);
     const handoffBody = source.slice(handoffStart, handoffEnd);
-    assert.match(handoffBody, /memoryAccessFor\(conversationKey/, '交接:按会话 key 判作用域');
+    assert.match(handoffBody, /memoryAccessForScene\(\{/, '交接:按会话 key + 场景取作用域');
+    assert.match(handoffBody, /scene: turnOptions\?\.scene \?\? null/, '交接:场景必须真的传进判定');
     assert.match(handoffBody, /filterBlocksForAccess\(/, '交接:块真的被过滤过');
     const notesStart = source.indexOf('  async function turnNotes(');
     const notesEnd = source.indexOf('\n  /**', notesStart);
     const notesBody = source.slice(notesStart, notesEnd);
+    assert.match(notesBody, /memoryAccessForScene\(\{/, '每轮:洞察按会话 key + 场景取作用域');
+    assert.match(notesBody, /scene: recallFor\?\.scene \?\? null/, '每轮:场景必须真的传进判定');
     assert.match(notesBody, /filterInsightsForAccess\(/, '每轮:洞察真的被过滤过');
     // 反证:过滤不能是"过滤完又丢掉结果"—— 必须喂给渲染函数的对应参数。
     assert.match(handoffBody, /renderMemoryBlocks\(memoryDb, \{ blocks: visible \}\)/);

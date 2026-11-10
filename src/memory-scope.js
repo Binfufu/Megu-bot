@@ -89,6 +89,32 @@ export function memoryAccessFor(conversationKey, { ownerIds = null } = {}) {
 }
 
 /**
+ * **按"这一轮从哪来"取访问档**(2026-11-10 / D329 跨通道私聊共享)。
+ *
+ * ⚠️ 网页私聊与 QQ 私聊共用会话线之后,会话键长得像 `qqbot-c2c-<openid>` ——
+ *    若只按键判定,网页那一轮会白拿 c2c 档的私有常驻块/洞察。**这是不能顺手送的东西**:
+ *    网页访问者不一定就是那个 QQ 的主人(用户 2026-11-10 明确提醒"网页不一定"),
+ *    而"共享"只承诺**最近对话接得上**,不承诺网页端继承 QQ 私聊的派生私有内容。
+ *
+ * 口径:
+ *   · `scene === 'web'` → 一律按网页档(fail closed:无私有块、无洞察),**哪怕键是 c2c**;
+ *   · 其余场景(QQ 私聊/群聊/没传场景)→ 与 `memoryAccessFor` 完全一致(旧行为零变化)。
+ *
+ * @param {object} input
+ * @param {string|null} [input.scene] 这一轮的场景(`web` / `c2c` / `group` / null)
+ * @param {string} [input.conversationKey] 实际会话键
+ * @param {Set<string>|null} [input.ownerIds] 主人 openid 名单
+ * @returns {ReturnType<typeof memoryAccessFor>}
+ */
+export function memoryAccessForScene({ scene = null, conversationKey = '', ownerIds = null } = {}) {
+  if (String(scene ?? '') === 'web') {
+    const { kind, id } = parseConversationScope(conversationKey);
+    return { kind, id, privateBlocks: false, insights: false, reason: 'web-shared-conversation' };
+  }
+  return memoryAccessFor(conversationKey, { ownerIds });
+}
+
+/**
  * 按访问策略过滤常驻块。**纯函数** —— 不读库、不改入参。
  *
  * @param {Array<{label: string}>} blocks

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 const ROOT=fileURLToPath(new URL('../',import.meta.url));
-const SUITES=['selftest-feed.mjs','selftest-feed-fetch.mjs','selftest-feed-sources.mjs','selftest-feed-watch.mjs','selftest-feed-review.mjs'];
+const SUITES=['selftest-feed.mjs','selftest-feed-fetch.mjs','selftest-feed-push.mjs','selftest-feed-sources.mjs','selftest-feed-watch.mjs','selftest-feed-review.mjs'];
 export function registerFeedGateTests({test}) {
  test('盯梢回归：全部离线套件均已登记',()=>{
   assert.deepEqual(fs.readdirSync(path.join(ROOT,'scripts')).filter(n=>/^selftest-feed.*\.mjs$/.test(n)).sort(),[...SUITES,'selftest-feed-gates.mjs'].sort());

@@ -167,6 +167,10 @@ export function registerBlockTests({ test, assert }) {
     const fnEnd = source.indexOf('\n  }', fnStart);
     const fnBody = source.slice(fnStart, fnEnd);
     assert.match(fnBody, /renderMemoryBlocks/, '字样必须在 handoffFor 函数体内');
-    assert.match(fnBody, /memoryAccessFor\(/, '作用域判定必须在 handoffFor 函数体内');
+    // ⚠️ 2026-11-10(D329):作用域判定从"只按键"改成"按键 + 这一轮从哪来" ——
+    //    交接层拿不到 message,所以由引擎把 `turnOptions.scene` 透传进来。判据明改到新事实,
+    //    并**追加**"场景真的被传进判定"这一条 —— 不是删旧判据让它变绿。
+    assert.match(fnBody, /memoryAccessForScene\(/, '作用域判定必须在 handoffFor 函数体内');
+    assert.match(fnBody, /scene: turnOptions\?\.scene \?\? null/, '交接层必须把本轮场景交给作用域判定');
   });
 }
