@@ -35,12 +35,12 @@ const read = (id, input) => resolveParams(CONFIG_PARAM_DEFINITIONS, { env: { [id
 
 export function registerConfigParamsTests({ test, assert }) {
   test('config params: complete typed catalogue and defaults are registered without secrets', () => {
-    assert.equal(CONFIG_PARAM_DEFINITIONS.length, 224); // 216 + 盯梢异界新闻/QQ 推送 8 项（2026-11-10）。
-    assert.equal(new Set(CONFIG_PARAM_DEFINITIONS.map((def) => def.id)).size, 224);
+    assert.equal(CONFIG_PARAM_DEFINITIONS.length, 227); // 216 + 盯梢 8 项 + 健康生命周期 2 项 + 旧派生读闸 1 项（2026-11-11）。
+    assert.equal(new Set(CONFIG_PARAM_DEFINITIONS.map((def) => def.id)).size, 227);
     assert.equal(CONFIG_PARAM_DEFINITIONS.some((def) => def.type === 'custom'), false);
     const typeCounts = {};
     for (const def of CONFIG_PARAM_DEFINITIONS) typeCounts[def.type] = (typeCounts[def.type] ?? 0) + 1;
-    assert.deepEqual(typeCounts, { int: 87, boolean: 47, number: 10, string: 30, url: 6, path: 14, enum: 12, object: 4, array: 14 });
+    assert.deepEqual(typeCounts, { int: 89, boolean: 48, number: 10, string: 30, url: 6, path: 14, enum: 12, object: 4, array: 14 });
     const defaults = resolveParams(CONFIG_PARAM_DEFINITIONS);
     assert.deepEqual(defaults.inputs, {});
     assert.equal(defaults.values.QQBOT_MOOD_TTL_MS, 600000);
@@ -71,6 +71,7 @@ export function registerConfigParamsTests({ test, assert }) {
       QQBOT_EXPLOSION_COOLDOWN_SECONDS: 1000, QQBOT_MEMORY_ARCHIVE_MINUTES: 60000,
       QQBOT_MEMORY_CONSOLIDATE_MINUTES: 60000, QQBOT_MEMORY_NOTE_TTL_DAYS: 86400000,
       QQBOT_MEMORY_CONSOLIDATE_WINDOW_DAYS: 86400000, QQBOT_MEMORY_BLOCKS_HOURS: 3600000,
+      QQBOT_MEMORY_HEALTH_WINDOW_HOURS: 3600000, QQBOT_MEMORY_HEALTH_DENIAL_HOURS: 3600000,
       QQBOT_MEMORY_BLOCKS_TIMEOUT_SECONDS: 1000, QQBOT_MEMORY_INSIGHTS_EVERY_HOURS: 3600000,
       QQBOT_MEMORY_INSIGHTS_TIMEOUT_SECONDS: 1000, QQBOT_MEMORY_SUMMARY_TIMEOUT_SECONDS: 1000,
       QQBOT_MEMORY_SUMMARY_MIN_INTERVAL_MINUTES: 60000,

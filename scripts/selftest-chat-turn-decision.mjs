@@ -27,6 +27,7 @@ import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import {
   DIRECT_RESPONSE_NOTES,
+  REALITY_GROUNDING_NOTES,
   SPOKEN_STANDING_NOTES,
   withFacts,
   withStyleNudge,
@@ -135,6 +136,7 @@ function createHarness({ source = readIndex(), kbEnabled = false, kbHit = false,
     wrapInject,
     ENCYCLOPEDIA_NOTE,
     DIRECT_RESPONSE_NOTES,
+    REALITY_GROUNDING_NOTES,
     withStyleNudge,
     withFacts,
     withTurnFacts: withFacts,

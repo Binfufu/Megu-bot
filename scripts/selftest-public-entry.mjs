@@ -129,7 +129,7 @@ try {
       // 阶段 4：世界包加载器、公开契约套件与公开中立示例世界（示例包要有真实文件才真校验）
       'src/world-pack.js', 'scripts/selftest-world-pack.js', 'content/worlds/example/world.json',
       'src/burst.js', 'src/meitu-gallery.js', 'src/meitu-search.js', 'src/mood.js',
-      'src/morning.js', 'src/social.js', 'src/style.js', 'src/warmup.js',
+      'src/morning.js', 'src/social.js', 'src/style.js', 'src/warmup.js', 'src/time-label.js',
       // S1：风格包加载器（P 区纯模块；content/styles 是 C 区，公开树没有它 → 内置 legacy 回退）
       'src/style-pack.js',
       // 挂账B：边界契约公开视图 + 命令表公开视图两个公开套件及其闭包

@@ -23,6 +23,9 @@
  */
 
 import { cleanMemoryText } from './memory-archive.js';
+import { ageLabel, formatDay } from './time-label.js';
+
+const DEFAULT_MID_TTL_MS = 3 * 24 * 3600 * 1000;
 
 /**
  * 一条洞察至少要能引到几条笔记。洞察 = **跨多条**记忆的模式总结;
@@ -39,6 +42,25 @@ function hasTable(db, name) {
     return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(String(name)));
   } catch {
     return false;
+  }
+}
+
+/**
+ * 老库补 `policy_v`(C 刀,2026-11-11):旧洞察没有生成口径版本,补列时默认 0 =
+ * 旧口径内容 → 读路径先停用(保留可审计),等下一拍用新口径重新生成。
+ * 只读连接补不上 → 不抛,读路径按 0 处理(同样不冒充新口径)。
+ */
+export function ensureInsightSchema(db) {
+  if (!hasTable(db, 'insight')) return { ok: false, added: [] };
+  try {
+    const cols = db.prepare('PRAGMA table_info(insight)').all().map((row) => row.name);
+    if (!cols.includes('policy_v')) {
+      db.exec('ALTER TABLE insight ADD COLUMN policy_v INTEGER NOT NULL DEFAULT 0');
+      return { ok: true, added: ['policy_v'] };
+    }
+    return { ok: true, added: [] };
+  } catch (err) {
+    return { ok: false, added: [], error: String(err?.message ?? err) };
   }
 }
 
@@ -76,27 +98,66 @@ export function latestInsightCreatedAt(db) {
  * (与 memory-store 的 recentNotesText 同一条 SQL 口径 —— 软失效/合并掉的不要,
  * 一行一条 ≤80 字截断;区别只在它同时要 id,derived_from 的校验全靠这批真实 id。)
  *
- * @returns {Array<{id: number, text: string}>}
+ * C 刀 B(2026-11-11):补 **mid TTL 过滤 + 源时间** ——
+ * 旧实现只筛 invalid/merged,一周前的中期近况仍能进入"洞察"的输入,
+ * 于是"他最近常熬夜"这类结论会由过期材料推出、再每轮注入。
+ *
+ * @returns {Array<{id: number, text: string, at: number|null, tier: string|null}>}
  */
-export function recentInsightNotes(db, { limit = 30, charsPerNote = 80 } = {}) {
+export function recentInsightNotes(db, {
+  limit = 30, charsPerNote = 80, now = Date.now(), midTtlMs = DEFAULT_MID_TTL_MS,
+} = {}) {
   if (!hasTable(db, 'note')) return [];
   const merged = noteHasColumn(db, 'merged_into') ? ' AND merged_into IS NULL' : '';
+  const ttl = Number.isFinite(Number(midTtlMs)) && Number(midTtlMs) > 0
+    ? ' AND (tier = \'long\' OR at >= ?)'
+    : '';
   const rows = db.prepare(
-    `SELECT id, text FROM note WHERE invalid_at IS NULL${merged} ORDER BY at DESC LIMIT ?`,
-  ).all(Math.max(1, Math.min(200, limit)));
+    `SELECT id, text, at, tier FROM note WHERE invalid_at IS NULL${merged}${ttl} ORDER BY at DESC LIMIT ?`,
+  ).all(...(ttl ? [now - Number(midTtlMs)] : []), Math.max(1, Math.min(200, limit)));
   return rows
-    .map((row) => ({ id: Number(row.id), text: cleanMemoryText(String(row.text ?? '')).slice(0, charsPerNote) }))
+    .map((row) => ({
+      id: Number(row.id),
+      text: cleanMemoryText(String(row.text ?? '')).slice(0, charsPerNote),
+      at: row.at == null ? null : Number(row.at),
+      tier: row.tier == null ? null : String(row.tier),
+    }))
     .filter((row) => Number.isInteger(row.id) && row.text !== '');
+}
+
+/**
+ * 这条洞察的**来源现在还算不算数**(C 刀 B)。
+ * - 没有 derived_from(老行/坏行)→ 无法证明失效,保留(不能凭空删);
+ * - 来源笔记一条都不在当前库(老库/已清理)→ 无法证明,保留;
+ * - 有来源、但**全部**已软失效或中期已过 TTL → 这条洞察不该再当"当前背景"注入。
+ */
+export function insightSourcesUsable(db, insight, { now = Date.now(), midTtlMs = DEFAULT_MID_TTL_MS } = {}) {
+  const ids = (insight?.derivedFrom ?? []).map(Number).filter(Number.isInteger);
+  if (ids.length === 0 || !hasTable(db, 'note')) return true;
+  const placeholders = ids.map(() => '?').join(',');
+  const rows = db.prepare(`SELECT at, tier, invalid_at FROM note WHERE id IN (${placeholders})`).all(...ids);
+  if (rows.length === 0) return true;
+  return rows.some((row) => row.invalid_at == null
+    && (row.tier === 'long' || Number(row.at) >= now - Number(midTtlMs)));
 }
 
 /**
  * 读最新的几条洞察(给注入与生成提示词用)。表不在 → [](老库/只读连接降级)。
  * derived_from 解析不出来 = 视为空数组(不让一条坏行把渲染整个带崩)。
+ *
+ * C 刀 B:默认按来源有效性过滤 —— 来源全失效/过期的洞察不再注入;
+ * 但**不物理删**(只增不改的 ADD-only 纪律不变),审计仍可查库。
  */
-export function latestInsights(db, { limit = 10 } = {}) {
+export function latestInsights(db, {
+  limit = 10, now = Date.now(), midTtlMs = DEFAULT_MID_TTL_MS, includeLegacy = false,
+} = {}) {
   if (!hasTable(db, 'insight')) return [];
+  const hasPolicy = (() => {
+    try { return db.prepare('PRAGMA table_info(insight)').all().some((row) => row.name === 'policy_v'); } catch { return false; }
+  })();
   const rows = db.prepare(
-    'SELECT id, text, derived_from, model, created_at FROM insight ORDER BY created_at DESC, id DESC LIMIT ?',
+    `SELECT id, text, derived_from, model, created_at${hasPolicy ? ', policy_v' : ''}
+       FROM insight ORDER BY created_at DESC, id DESC LIMIT ?`,
   ).all(Math.max(1, Math.min(50, limit)));
   return rows.map((row) => {
     let derivedFrom = [];
@@ -112,8 +173,12 @@ export function latestInsights(db, { limit = 10 } = {}) {
       derivedFrom,
       model: row.model == null ? null : String(row.model),
       createdAt: Number(row.created_at) || 0,
+      policyV: hasPolicy ? Number(row.policy_v) || 0 : 0,
     };
-  });
+  })
+    // C 刀:旧口径洞察先停用(不物理删);`includeLegacy` 仅审计/回滚用。
+    .filter((row) => includeLegacy || row.policyV >= 1)
+    .filter((row) => insightSourcesUsable(db, row, { now, midTtlMs }));
 }
 
 /**
@@ -154,7 +219,11 @@ export async function buildInsights({
     };
   }
   const validIds = new Set(validNotes.map((note) => Number(note.id)));
-  const notesText = validNotes.map((note) => `${note.id}. ${note.text}`).join('\n');
+  const notesText = validNotes.map((note) => {
+    // C 刀 B:把笔记发生日期带给生成端 —— 输入无时间时,模型只能把旧近况写成"最近"。
+    const day = formatDay(note.at);
+    return `${note.id}. ${day ? `[${day}] ` : ''}${note.text}`;
+  }).join('\n');
   const existingText = (Array.isArray(existing) ? existing : [])
     .map((item) => String(item?.text ?? '').trim())
     .filter(Boolean)
@@ -172,7 +241,10 @@ export async function buildInsights({
     '4. 不要编造:笔记里没有的事不许写;不确定的就不写;',
     '5. 每条必须带 derived_from:这条洞察是从哪几条笔记看出来的(编号数组,只能是下面列出的',
     `   真实编号,至少 ${INSIGHT_MIN_NOTES} 条 —— 说不出出处的洞察没有价值);`,
-    '6. 不要与"已有洞察"重复(意思接近也算重复)。',
+    '6. 不要与"已有洞察"重复(意思接近也算重复);',
+    // C 刀 B(2026-11-11):笔记行首带日期。旧近况不能写成"现在/最近"。
+    '7. **保留时间**:笔记带日期就按日期写("某日他…");会变化的状态不要写成"他现在…",',
+    '   已经过期的近期状态不要升级成长期特征。',
     '',
     '输出要求:只输出一个 JSON 对象,不要 JSON 以外的任何文字。形状:',
     '{"insights":[{"text":"洞察正文","derived_from":[12,15]}]}',
@@ -267,8 +339,12 @@ export function appendInsights(db, insights, { model = null, now = Date.now() } 
   );
   if (list.length === 0) return { written: 0, refs: 0 };
   if (!hasTable(db, 'insight')) return { written: 0, refs: 0 }; // 老库没表:不写(与读端降级对称)
+  const hasPolicy = (() => {
+    try { return db.prepare('PRAGMA table_info(insight)').all().some((row) => row.name === 'policy_v'); } catch { return false; }
+  })();
   const ins = db.prepare(
-    'INSERT INTO insight (text, derived_from, model, created_at) VALUES (?, ?, ?, ?)',
+    `INSERT INTO insight (text, derived_from, model, created_at${hasPolicy ? ', policy_v' : ''})
+     VALUES (?, ?, ?, ?${hasPolicy ? ', 1' : ''})`,
   );
   let refs = 0;
   db.exec('BEGIN');
@@ -294,14 +370,24 @@ export function appendInsights(db, insights, { model = null, now = Date.now() } 
  * `rows` = 调用方**已按作用域过滤好**的洞察(2026-10-28 / P0;口径只在 `src\memory-scope.js`)。
  * 不传 = 取全库最新(保持旧行为,纯渲染判据零改动)。
  */
-export function renderInsights(db, { limit = 3, budgetChars = INSIGHT_BUDGET_CHARS, rows = null } = {}) {
-  const source = Array.isArray(rows) ? rows : latestInsights(db, { limit });
+export function renderInsights(db, {
+  limit = 3, budgetChars = INSIGHT_BUDGET_CHARS, rows = null,
+  now = Date.now(), midTtlMs = DEFAULT_MID_TTL_MS, includeLegacy = false,
+} = {}) {
+  const source = (Array.isArray(rows) ? rows : latestInsights(db, { limit, now, midTtlMs, includeLegacy }))
+    // 调用方可能已按作用域过滤;这里再兜一道"来源是否还成立"与"是否旧口径",
+    // 否则过期/已纠正/旧版洞察仍会借 rows 参数绕过 latestInsights 的过滤。
+    .filter((row) => includeLegacy || Number(row.policyV ?? 1) >= 1)
+    .filter((row) => insightSourcesUsable(db, row, { now, midTtlMs }));
   if (source.length === 0) return '';
   const header = '【记忆洞察】以下是跨多条记忆看出的背景观察，是背景不是台词：不要复述、不要照着念。';
   const lines = [header];
   let used = header.length;
   for (const row of source) {
-    const line = `· ${row.text}`;
+    // C 刀 B:带"多久以前的观察" —— 生成时间新不代表事实发生时间新。
+    const age = Number(row.createdAt) > 0 ? ageLabel(now - Number(row.createdAt)) : '';
+    const mark = age ? `（${age}的观察）` : '';
+    const line = `· ${mark}${row.text}`;
     if (used + line.length > budgetChars) break;
     lines.push(line);
     used += line.length + 1;

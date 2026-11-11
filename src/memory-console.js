@@ -460,7 +460,11 @@ export function createMemoryConsole({ memoryDb = null, store = null, log = () =>
         const row = db.prepare('SELECT id, scope, subject, kind, value, invalid_at FROM fact WHERE id = ?').get(rowId);
         if (!row) return { ok: false, error: 'not_found' };
         if (row.invalid_at == null) return { ok: false, error: 'already' };
-        db.prepare('UPDATE fact SET invalid_at = NULL, superseded_by = NULL WHERE id = ? AND invalid_at IS NOT NULL').run(rowId);
+        // C 刀 A:健康行恢复时把 state 一并还原成 active —— 否则 invalid_at 清了、
+        // state 还停在 resolved/refuted,读路径会继续把它当"已恢复"挡在注入外。
+        db.prepare(
+          "UPDATE fact SET invalid_at = NULL, superseded_by = NULL, state = CASE WHEN kind = 'health' THEN 'active' ELSE state END, resolved_at = CASE WHEN kind = 'health' THEN NULL ELSE resolved_at END WHERE id = ? AND invalid_at IS NOT NULL",
+        ).run(rowId);
         audit(`fact #${rowId} 恢复 by=${whoOf(operator)} ${clip(row.scope, 24)}/${clip(row.subject, 20)}/${row.kind} = ${clip(row.value)}`);
         return { ok: true, id: rowId };
       } catch (error) {

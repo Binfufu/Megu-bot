@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import vm from 'node:vm';
-import { DIRECT_RESPONSE_NOTES, withStyleNudge } from '../src/style.js';
+import { DIRECT_RESPONSE_NOTES, REALITY_GROUNDING_NOTES, withStyleNudge } from '../src/style.js';
 export function registerLongTermConsumptionTests({ test, assert }) {
   test('长期记忆消费:真实turnNotes必须等待异步检索，指纹到最终提示词且无Promise占位', async () => {
     const source = fs.readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
@@ -10,6 +10,7 @@ export function registerLongTermConsumptionTests({ test, assert }) {
     const pending = new Promise(r => { resolve = r; });
     const run = vm.runInNewContext(source.slice(begin, end) + '\nturnNotes', {
       DIRECT_RESPONSE_NOTES,
+      REALITY_GROUNDING_NOTES,
       config: { policy: { stats: { enabled: false }, growth: { enabled: false }, seriousGuard: true } },
       pendingStoryFor: () => null, companyTurnNote: () => null, affinityNote: () => 'affinity-control',
       describeFishingScene: () => null, readFishing: () => null, panelPromptNote: () => null,
@@ -28,6 +29,7 @@ export function registerLongTermConsumptionTests({ test, assert }) {
     // Resolved null must not become a truthy Promise placeholder either.
     const nullRun = vm.runInNewContext(source.slice(begin, end) + '\nturnNotes', {
       DIRECT_RESPONSE_NOTES,
+      REALITY_GROUNDING_NOTES,
       config: { policy: { stats: { enabled: false }, growth: { enabled: false } } },
       pendingStoryFor: () => null, companyTurnNote: () => null, affinityNote: () => 'affinity-control',
       panelPromptNote: () => null, describeLedgerForPrompt: () => null,
@@ -35,7 +37,7 @@ export function registerLongTermConsumptionTests({ test, assert }) {
       turnPolicyFor: () => ({ suppressMood: true, suppressNudges: true }),
     });
     const nullNotes = await nullRun(null, null);
-    assert.deepEqual(Array.from(nullNotes), [...DIRECT_RESPONSE_NOTES, 'affinity-control']);
+    assert.deepEqual(Array.from(nullNotes), [...DIRECT_RESPONSE_NOTES, ...REALITY_GROUNDING_NOTES, 'affinity-control']);
     assert.match(withStyleNudge('control', nullNotes), /affinity-control/,
       '空检索仍保留既有好感对照项，直接回应要求不能挤掉其他注入');
     assert.doesNotMatch(withStyleNudge('control', nullNotes), /Promise|null/);
