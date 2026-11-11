@@ -137,20 +137,32 @@ export function registerMemoryReconcileTests({ test, assert }) {
           scope: 'c2c:2', subject: 'self', kind: 'health', value: '感冒', firstSeen: 4000, lastSeen: 9000,
         });
         assert.ok(coldId > gastritisId, '前提:后插入的 id 更大');
+        // 组 3:非健康维度的**平局**用例(健康组不再参与收敛后,平局分支需要这一组来覆盖)。
+        const firstTieId = insertFact(store, {
+          scope: 'c2c:3', subject: 'self', kind: 'relation', value: '甲', firstSeen: 6000, lastSeen: 7000,
+        });
+        const secondTieId = insertFact(store, {
+          scope: 'c2c:3', subject: 'self', kind: 'relation', value: '乙', firstSeen: 6500, lastSeen: 7000,
+        });
+        assert.ok(secondTieId > firstTieId, '前提:平局时后插入的 id 更大');
         // 前提:历史冲突真的并存(直插绕过了 touchFact,两条都还"有效")。
-        assert.equal(store.facts({ latestOnly: false }).length, 4);
+        assert.equal(store.facts({ latestOnly: false }).length, 6);
         assert.equal(store.factStats().invalid, 0);
 
         const before = totalChanges(store.handle);
         const dry = store.reconcileFacts({ now: 10_000, dryRun: true });
         assert.equal(dry.dryRun, true);
-        assert.equal(dry.groups, 2, '两组历史并存');
-        assert.equal(dry.conflicts, 2, '每组退役一条');
+        // ⚠️ C 刀 A(2026-11-11):健康**不参与**按 kind 的收敛 —— 胃炎与感冒可以同时成立,
+        //    旧行为会把"最近见过的那条"留下、另一条软失效(诊断现场:胃病被胃疼顶掉)。
+        //    所以这里只剩关系那两组冲突。
+        assert.equal(dry.groups, 2, '健康组不参与收敛,只剩两组关系');
+        assert.equal(dry.conflicts, 2, '每组关系退役一条');
         assert.equal(dry.kept.length, 2);
         assert.equal(dry.kept.find((item) => item.value === '老婆').id, wifeId, 'last_seen 大的留下');
-        assert.equal(dry.kept.find((item) => item.kind === 'health').value, '感冒', '同 last_seen 取 id 大者');
+        assert.equal(dry.kept.find((item) => item.value === '乙').id, secondTieId, '平局取 id 大者');
         assert.equal(dry.invalidated.find((item) => item.id === sisterId).supersededBy, wifeId);
-        assert.equal(dry.invalidated.find((item) => item.id === gastritisId).supersededBy, coldId);
+        assert.equal(dry.invalidated.find((item) => item.id === firstTieId).supersededBy, secondTieId);
+        assert.equal(dry.invalidated.some((item) => item.kind === 'health'), false, '健康行一条都不许被收敛掉');
         // dryRun 的硬判据:这条连接一行都没改,库里也没有任何 invalid_at。
         assert.equal(totalChanges(store.handle), before, 'dryRun 不许写一个字节');
         assert.equal(
@@ -163,19 +175,23 @@ export function registerMemoryReconcileTests({ test, assert }) {
         const applied = store.reconcileFacts({ now: 10_500 });
         assert.equal(applied.dryRun, false);
         assert.equal(applied.conflicts, 2);
-        assert.equal(store.handle.prepare('SELECT COUNT(*) AS n FROM fact').get().n, 4, 'ADD-only:物理行数不变');
+        assert.equal(store.handle.prepare('SELECT COUNT(*) AS n FROM fact').get().n, 6, 'ADD-only:物理行数不变');
         const rows = store.handle.prepare('SELECT id, value, invalid_at, superseded_by FROM fact ORDER BY id').all();
         const sister = rows.find((row) => row.id === sisterId);
         assert.equal(sister.invalid_at, 10_500);
         assert.equal(sister.superseded_by, wifeId);
         assert.equal(rows.find((row) => row.id === wifeId).invalid_at, null, '保留的那条仍有效');
+        assert.equal(rows.find((row) => row.id === gastritisId).invalid_at, null, '健康行不被收敛');
+        assert.equal(rows.find((row) => row.id === coldId).invalid_at, null, '健康行不被收敛');
         assert.deepEqual(store.facts({ scope: 'c2c:1' }).map((item) => item.value), ['老婆']);
-        assert.deepEqual(store.facts({ scope: 'c2c:2' }).map((item) => item.value), ['感冒']);
+        // 健康两项并存(顺序按 last_seen DESC,同值时不强求顺序)。
+        assert.deepEqual(store.facts({ scope: 'c2c:2' }).map((item) => item.value).sort(), ['感冒', '胃炎']);
+        assert.deepEqual(store.facts({ scope: 'c2c:3' }).map((item) => item.value), ['乙'], '平局保留 id 大的');
         assert.equal(store.facts({ scope: 'c2c:1', latestOnly: false }).length, 2, 'latestOnly:false 仍能审计');
         const stats = store.factStats();
-        assert.equal(stats.total, 2, 'factStats 只数有效行');
+        assert.equal(stats.total, 4, 'factStats 只数有效行(健康两条 + 保留关系两条)');
         assert.equal(stats.invalid, 2);
-        assert.equal(stats.total + stats.invalid, 4, '物理行数 = 有效 + 失效');
+        assert.equal(stats.total + stats.invalid, 6, '物理行数 = 有效 + 失效');
 
         // 幂等:再跑一次没有冲突、也不再改任何行。
         const changesAfterApply = totalChanges(store.handle);

@@ -211,6 +211,12 @@ export function createConfigParamDefinitions(parsers) {
   positive('QQBOT_MEMORY_NOTE_TTL_DAYS', 3);
   positive('QQBOT_MEMORY_CONSOLIDATE_WINDOW_DAYS', 3);
   boolean('QQBOT_MEMORY_LATEST_ONLY', true);
+  // 健康事实生命周期(C 刀 A):短期自述的有效期与"我没事"提示的有效期。
+  // 默认值是【暂定】档(72h / 48h),0 = 分别回滚到旧读行为 / 不写提示。
+  nonnegative('QQBOT_MEMORY_HEALTH_WINDOW_HOURS', 72);
+  nonnegative('QQBOT_MEMORY_HEALTH_DENIAL_HOURS', 48);
+  // 旧派生内容(常驻块/洞察)读闸:默认停用旧口径,1 = 审计/回滚时放回注入。
+  boolean('QQBOT_MEMORY_LEGACY_DERIVED', false);
   boolean('QQBOT_MEMORY_ENTITY', true);
   ratio('QQBOT_MEMORY_ENTITY_BOOST', 0.3);
   boolean('QQBOT_MEMORY_BLOCKS', true);

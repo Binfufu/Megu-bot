@@ -8,17 +8,21 @@
  */
 import { stripInjectMarks } from './inject-mark.js';
 import { composeModeNote } from './turn-policy.js';
-import { DIRECT_RESPONSE_NOTES, SPOKEN_STANDING_NOTES, STYLE_NUDGE_THEMES } from './style.js';
+import { DIRECT_RESPONSE_NOTES, REALITY_GROUNDING_NOTES, SPOKEN_STANDING_NOTES, STYLE_NUDGE_THEMES } from './style.js';
 
-/** 升级投影规则时，own 摘要与归档派生视图必须一起失效/重建。 */
-export const CHAT_INPUT_PROJECTION_VERSION = 3;
+/**
+ * 升级投影规则时，own 摘要与归档派生视图必须一起失效/重建。
+ * v4(2026-11-11,C 刀):注入规则新增"现实观察边界",且摘要/记忆渲染改带时间边界 ——
+ * 旧摘要与旧投影是"没有时间/旧规则"的产物,必须停用重建(读时版本闸,不删原档)。
+ */
+export const CHAT_INPUT_PROJECTION_VERSION = 4;
 export const LEGACY_NOTES_TITLE = '（本次表达要求，照做但不要念出来：）';
 const LEGACY_SEPARATOR = `\n\n${LEGACY_NOTES_TITLE}\n`;
 const MODE_NOTES = ['task', 'knowledge'].map(composeModeNote);
 const FIXED_NOTES = new Set([
   // 共享规则措辞升级后仍识别旧 producer 的完整尾缀（只用于旧记录兼容，不再注入）。
   '直接回应：先给回答、态度或自然接话，不先复述、转述或概括对方刚说的话，也不先总结群聊。',
-  ...DIRECT_RESPONSE_NOTES, ...SPOKEN_STANDING_NOTES, ...Object.values(STYLE_NUDGE_THEMES).flat(),
+  ...DIRECT_RESPONSE_NOTES, ...REALITY_GROUNDING_NOTES, ...SPOKEN_STANDING_NOTES, ...Object.values(STYLE_NUDGE_THEMES).flat(),
 ]);
 // buildMoodNote 的完整行式（不是“本轮情绪”四字命中就算来源）。
 const MOOD_LINE = /^本轮情绪：[^；\n]+；[1-9]\d* 句以内、不超过 [1-9]\d* 字(?:；语气词用「[^」\n]+」)?(?:；句尾可以带 [^\n]+)?$/;

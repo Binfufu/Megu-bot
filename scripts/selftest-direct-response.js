@@ -8,7 +8,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import {
-  DIRECT_RESPONSE_NOTES, SPOKEN_STANDING_NOTES,
+  DIRECT_RESPONSE_NOTES, REALITY_GROUNDING_NOTES, SPOKEN_STANDING_NOTES,
   pickNudges, rememberNudges, withStyleNudge,
 } from '../src/style.js';
 import { getMoodTheme, splitSpokenLines } from '../src/mood.js';
@@ -44,6 +44,7 @@ function consumer({ source = readIndex(), theme = 'megumin', nudgeCount = 1, omi
   const recallCalls = [];
   const sandbox = {
     ...(omitDirect ? {} : { DIRECT_RESPONSE_NOTES }),
+    REALITY_GROUNDING_NOTES,
     SPOKEN_STANDING_NOTES, pickNudges, rememberNudges,
     moodTheme: getMoodTheme(theme), recentNudges: [],
     detectTurnMode, composeModeNote, noteGatesFor, turnPolicyFor,
@@ -127,9 +128,10 @@ export function registerDirectResponseTests({ test, assert: a = assert }) {
     const source = readIndex();
     a.ok(importsDirectResponse(source), 'index.js must really import DIRECT_RESPONSE_NOTES from style.js');
     const body = sliceFunction(source, '  async function turnNotes(');
-    a.match(body, /\)\s*\{\s*(?:\/\*[\s\S]*?\*\/\s*|\/\/[^\r\n]*\r?\n\s*)*const notes = \[\.\.\.DIRECT_RESPONSE_NOTES\];/,
+    a.match(body, /\)\s*\{\s*(?:\/\*[\s\S]*?\*\/\s*|\/\/[^\r\n]*\r?\n\s*)*const notes = \[\.\.\.DIRECT_RESPONSE_NOTES, \.\.\.REALITY_GROUNDING_NOTES\];/,
       'shared notes must seed the real function before stats/random/task/serious gates');
     a.doesNotMatch(body, /typeof\s+DIRECT_RESPONSE_NOTES/, 'missing import is a wiring error, not a silent fallback');
+    a.doesNotMatch(body, /typeof\s+REALITY_GROUNDING_NOTES/, 'grounding rules are required, not a silent fallback');
     const missingImport = source.replace(/\bDIRECT_RESPONSE_NOTES\s*,\s*(?=[^}]*\}\s*from\s*['"]\.\/style\.js['"])/, '')
       .replace(/,\s*DIRECT_RESPONSE_NOTES(?=\s*\}\s*from\s*['"]\.\/style\.js['"])/, '');
     const commentBait = "// import { DIRECT_RESPONSE_NOTES } from './style.js';\n"
@@ -159,9 +161,12 @@ export function registerDirectResponseTests({ test, assert: a = assert }) {
         const recall = row.proactive ? { conversation: label, query: row.text } : null;
         const notes = await run.turnNotes(null, message, [], recall, { hasImage: image });
         a.deepEqual(Array.from(notes).slice(0, DIRECT_RESPONSE_NOTES.length), [...DIRECT_RESPONSE_NOTES], `${label}: first notes are shared rules`);
+        a.deepEqual(Array.from(notes).slice(DIRECT_RESPONSE_NOTES.length, DIRECT_RESPONSE_NOTES.length + REALITY_GROUNDING_NOTES.length),
+          [...REALITY_GROUNDING_NOTES], `${label}: grounding rules follow the shared rules`);
         a.notEqual(notes, DIRECT_RESPONSE_NOTES, 'each turn gets its own mutable array');
         a.equal(detectTurnMode(message?.content ?? '').mode, row.mode);
         const prompt = withStyleNudge(`${userFingerprint}\n${row.text}`, notes);
+        a.ok(prompt.includes('看不见的不要当成看见'), `${label}: reality grounding reaches the model`);
         assertRulesAtConsumer(a, prompt, label);
         a.equal(occurrences(prompt, userFingerprint), 1, `${label}: real user text control remains`);
         a.ok(prompt.includes(`RECALL-CONTROL:${row.text}`), `${label}: awaited recall reaches same consumer`);
@@ -184,7 +189,7 @@ export function registerDirectResponseTests({ test, assert: a = assert }) {
 
   test('直接回应/negative:只在内存破坏真实turnNotes接线，消费端必须发现规则丢失', async () => {
     const source = readIndex();
-    const broken = source.replace('const notes = [...DIRECT_RESPONSE_NOTES];', 'const notes = [];');
+    const broken = source.replace('const notes = [...DIRECT_RESPONSE_NOTES, ...REALITY_GROUNDING_NOTES];', 'const notes = [];');
     a.notEqual(broken, source, 'mutation must hit actual seed, not a synthetic fixture');
     const run = consumer({ source: broken });
     const notes = await run.turnNotes(null, { content: '你今天开心吗', conversation: 'negative' });

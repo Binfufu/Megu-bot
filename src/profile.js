@@ -28,6 +28,10 @@
  */
 
 import { SERIOUS_CATEGORIES } from './serious.js';
+import { ageLabel } from './time-label.js';
+
+// 兼容旧导入:健康行/恢复提示仍在用同一个实现(D159:时间口径只写一处)。
+export { ageLabel };
 
 /** 五个维度。`relation` 关系 / `name` 名字 / `preference` 偏好 / `dislike` 雷区 / `health` 健康。 */
 export const FACT_KINDS = Object.freeze(['relation', 'name', 'preference', 'dislike', 'health']);
@@ -354,6 +358,161 @@ export function extractAccept(text) {
   return { relation: match[1], text: source.replace(ACCEPT_PATTERN, '').replace(/[ \t]+$/gm, '').trim() };
 }
 
+// ---------------------------------------------------------------------------
+// 健康语义识别(C 刀 A,2026-11-11;现场 = 2026-11-02 的"旧胃疼回流")
+//
+// 旧实现只做 `source.includes(word)`,于是这一层同时有四个洞:
+//   ① 否定照收:「我不胃疼了」「我没有胃疼」都被记成**正在胃疼**(而且会刷新 last_seen);
+//   ② 问句照收:「你胃疼吗?」「是不是胃疼」被记成他自己的病;
+//   ③ 第三人照收:「他胃疼」挂在说话人自己头上(私聊里 subject 恒为 self);
+//   ④ 恢复抽不出来:「我胃已经不疼了」「我没事啊」→ [],旧行永远不退役。
+//
+// 所以先判**这一小句**的语义,再决定记什么:
+//   · polarity = active(本人自述仍在)/ resolved(本人说已经好了)/ refuted(本人否认);
+//   · subject   = self(本人)/ other(你/他/她/他们)/ unknown(句子里没有指代);
+//   · question  = 这一小句是不是问句。
+// ⚠️ 仍然**只认词表里的症状**:这里不假装理解所有中文,认不出就不记(宁可漏,不猜)。
+// ---------------------------------------------------------------------------
+
+/** 健康事实的当前状态(存进 fact.state;NULL = 老行,按旧口径读)。 */
+export const HEALTH_STATE = Object.freeze({
+  ACTIVE: 'active',
+  RESOLVED: 'resolved',
+  REFUTED: 'refuted',
+});
+
+/** 这些是"长期背景"的健康档位 —— 不套短期有效期,但也不等于"现在正在发作"。 */
+export const HEALTH_BACKGROUND_DETAILS = Object.freeze(['chronic', 'mental', 'serious']);
+
+/** 症状词后面跟这些 = 本人说已经好了(而不是"还在疼")。 */
+const HEALTH_RECOVERY_AFTER = /(已经|早就|终于)?(好了|好多了|不疼了|不痛了|没事了|没了|缓解|痊愈|治好了|过去了)/;
+/** 症状词前面跟这些 = 否定(我没有胃疼 / 我不胃疼了)。 */
+const HEALTH_NEGATION_BEFORE = /(不|没|没有|无|不是|不再|并不)$/;
+/**
+ * 身体部位 + "不疼了" 的恢复说法:句子里**没有**完整的症状词也要认出来。
+ * (「我胃已经不疼了」里没有「胃疼」这两个连续字,旧的 includes 永远抽不到。)
+ */
+const BODY_RECOVERY = Object.freeze([
+  { re: /胃(也|都|已经|现在|早就|一直)?(不|不再)(疼|痛|难受)/, value: '胃疼', detail: 'short' },
+  { re: /(肚子|腹)(也|都|已经|现在|早就|一直)?(不|不再)(疼|痛|难受)/, value: '肚子疼', detail: 'short' },
+  { re: /头(也|都|已经|现在|早就|一直)?(不|不再)(疼|痛)/, value: '头疼', detail: 'short' },
+  { re: /嗓子(也|都|已经|现在)?(不|不再)(疼|痛)/, value: '嗓子疼', detail: 'short' },
+  { re: /牙(也|都|已经|现在)?(不|不再)(疼|痛)/, value: '牙疼', detail: 'short' },
+]);
+/**
+ * 没有症状词的「我没事 / 已经好了」。
+ * ⚠️ 只认**整小句就是这句**的形状:否则「好了,走吧」也会被当成"病好了"。
+ */
+const GENERIC_HEALTH_CLAUSE = /^(我|俺|咱)?(现在|目前|已经|真的|确实)?(身体)?(没事|没什么事|没啥事|没不舒服|没什么不舒服|不难受|挺好|好多了|好了|没事了|不疼了|不痛了)[啊呀哈呢吧的了！!。，,\s]*$/;
+/** 泛化恢复必须带一个"锚" —— 光一句「好了」太容易是「好了,走吧」。 */
+const GENERIC_HEALTH_ANCHOR = /(我|俺|咱|身体|现在|已经)/;
+/**
+ * 泛化恢复里**真的在说身体**的证据(用于"是否顺手收尾唯一短期症状"):
+ * 「我没事啊」算;「已经好了」「我好了」不算 —— 后者太容易是"游戏下载好了"。
+ */
+const GENERIC_HEALTH_BODY = /(身体|胃|头|肚子|嗓子|牙|疼|痛|舒服|难受|病|感冒|发烧|恢复|痊愈)/;
+const GENERIC_HEALTH_DENIAL_ONLY = /^(我|俺|咱)?(现在|目前|真的|确实)?(没事|没什么事|没啥事|没不舒服|没什么不舒服|不难受)[啊呀哈呢吧的了！!。，,\s]*$/;
+/**
+ * A-not-A / 疑问变体(C 刀 A 复核补充):`isQuestion` 只认问号与吗/呢,
+ * 但「我是不是胃疼」「感冒好了没」同样是问句 —— 不许拿来改状态。
+ */
+const HEALTH_QUESTION = /是不是|有没有|好了没|好没好|还(疼|痛|难受)吗|还(疼|痛)不|要不要紧/;
+
+const PRONOUNS = /我|俺|咱|你|您|他|她|它/g;
+/** 家属/宠物/朋友:说的是别人,不是说话人自己的病(旧实现会串成 self)。 */
+const THIRD_PARTY_OWNER = /(我的?|我家的?)(妈|妈妈|爸|爸爸|哥|哥哥|姐|姐姐|弟|弟弟|妹|妹妹|爷爷|奶奶|外公|外婆|朋友|同事|同学|室友|猫|狗|孩子|儿子|女儿)/;
+
+/** 一小句里,症状词前面**最近的那个代词**是谁 —— 决定这条该挂谁头上。 */
+function subjectNear(clause, index) {
+  const before = clause.slice(0, index);
+  if (THIRD_PARTY_OWNER.test(before)) return 'other';
+  let last = null;
+  for (const match of before.matchAll(PRONOUNS)) last = match[0];
+  if (last === null) return 'unknown';
+  return /我|俺|咱/.test(last) ? 'self' : 'other';
+}
+
+/**
+ * 从一句话里读出**健康语义事件**(纯函数)。
+ *
+ * @param {string} text 人话(不要带桥注入)
+ * @returns {{events: Array<{value: string, detail: string, polarity: string,
+ *   subject: 'self'|'other'|'unknown', question: boolean}>, generic: 'denial'|'recovery'|null,
+ *   genericBody: boolean}}
+ *   `generic` = 整句没有具体症状词、只是"我没事/已经好了";调用方用它停止**当前**的无依据患病推断。
+ *   `genericBody` = 这句泛化恢复**真的在说身体**(只有它为真时才该顺手收尾唯一短期症状;
+ *   「已经好了/我好了」太容易是"游戏下载好了",只写提示、不动症状)。
+ */
+export function extractHealthSignals(text) {
+  const source = String(text ?? '').trim();
+  const out = { events: [], generic: null, genericBody: false };
+  if (source === '') return out;
+  const clauses = source.split(/(?<=[，。！？；、\n])/).map((clause) => clause.trim()).filter(Boolean);
+  const seen = new Set();
+  const pushEvent = (event) => {
+    const key = `${event.value}|${event.polarity}|${event.subject}|${event.question ? 1 : 0}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.events.push(event);
+  };
+  const categories = [
+    ['serious', SERIOUS_CATEGORIES.illness],
+    ['chronic', HEALTH_WORDS.chronic],
+    ['short', HEALTH_WORDS.short],
+    ['mental', HEALTH_WORDS.mental],
+  ];
+  for (const clause of clauses) {
+    // A-not-A / 「好了没」也是问句:问句不改状态(不得把「我是不是胃疼」当否认)。
+    const question = isQuestion(clause) || HEALTH_QUESTION.test(clause);
+    let matched = false;
+    for (const [detail, words] of categories) {
+      for (const word of words) {
+        const index = clause.indexOf(word);
+        if (index < 0) continue;
+        matched = true;
+        const before = clause.slice(Math.max(0, index - 6), index);
+        const after = clause.slice(index + word.length, index + word.length + 8);
+        let polarity = HEALTH_STATE.ACTIVE;
+        if (question) {
+          // 问句只是"提到",不落任何状态(既不新增也不退役)。
+          polarity = HEALTH_STATE.ACTIVE;
+        } else if (HEALTH_NEGATION_BEFORE.test(before)) {
+          // 「我不胃疼了」= 已经好了;「我没有胃疼」= 否认发生过/否认现在有。
+          polarity = /了/.test(clause.slice(index + word.length)) ? HEALTH_STATE.RESOLVED : HEALTH_STATE.REFUTED;
+        } else if (HEALTH_RECOVERY_AFTER.test(after)) {
+          polarity = HEALTH_STATE.RESOLVED;
+        }
+        pushEvent({ value: word, detail, polarity, subject: subjectNear(clause, index), question });
+        // ⚠️ 同一小句、同一类只取第一个:serious 词表里「癌症/化疗/确诊」是同一件事的不同说法,
+        //    全收会把「我确诊了癌症」记成三条病。旧实现也是"一类只取一个",这里保持一致。
+        break;
+      }
+    }
+    if (!matched) {
+      for (const entry of BODY_RECOVERY) {
+        const match = entry.re.exec(clause);
+        if (!match) continue;
+        matched = true;
+        pushEvent({
+          value: entry.value,
+          detail: entry.detail,
+          polarity: HEALTH_STATE.RESOLVED,
+          subject: subjectNear(clause, match.index),
+          question,
+        });
+      }
+    }
+    if (!matched && !question && GENERIC_HEALTH_CLAUSE.test(clause) && GENERIC_HEALTH_ANCHOR.test(clause)) {
+      const recovery = /(好了|好多了|不疼了|不痛了|没事了|缓解|痊愈)/.test(clause);
+      out.generic = out.generic ?? (recovery ? 'recovery' : 'denial');
+      if (out.genericBody === false) {
+        out.genericBody = GENERIC_HEALTH_BODY.test(clause) || GENERIC_HEALTH_DENIAL_ONLY.test(clause);
+      }
+    }
+  }
+  return out;
+}
+
 export function extractFacts(text, { subject = 'self' } = {}) {
   const source = String(text ?? '').trim();
   if (source === '') return [];
@@ -365,22 +524,20 @@ export function extractFacts(text, { subject = 'self' } = {}) {
     out.push({ kind, value, detail });
   };
 
-  // ① 健康:三类按词表找,一类里命中一个就够(先长词后短词由词表顺序保证)。
-  for (const [category, words] of Object.entries(HEALTH_WORDS)) {
-    for (const word of words) {
-      if (source.includes(word)) {
-        push('health', word, category);
-        break;
-      }
-    }
+  // ① 健康:先判这一小句的语义,只把「本人自述仍在」的记成事实。
+  //    康复/否认不在这里造正向事实 —— 它们由 `learnFactsFrom` 走更新路径(`extractHealthSignals`)。
+  //    ⚠️ 一类只取第一条(与旧实现同口径):「我感冒了,头晕」不是两场病,先记最像主诉的那个。
+  const healthSignals = extractHealthSignals(source);
+  const firstOfDetail = new Map();
+  for (const event of healthSignals.events) {
+    if (event.question || event.subject === 'other' || event.polarity !== HEALTH_STATE.ACTIVE) continue;
+    if (firstOfDetail.has(event.detail)) continue;
+    firstOfDetail.set(event.detail, event);
   }
-  // ①.5 **重病**单独一档(用户 2026-10-01:「健康要不要加上重病,我感觉这个比较严肃」)。
-  //     它也是 health,但 detail=serious —— 注入时排在前面,而且措辞要求"别当谈资"。
-  for (const word of SERIOUS_CATEGORIES.illness) {
-    if (source.includes(word)) {
-      push('health', word, 'serious');
-      break;
-    }
+  // 旧实现按 chronic → short → mental → serious 的顺序落地,这里保持同一顺序(不重排既有输出)。
+  for (const detail of ['chronic', 'short', 'mental', 'serious']) {
+    const event = firstOfDetail.get(detail);
+    if (event) push('health', event.value, event.detail);
   }
   // ⚠️ 问句到此为止:健康那种陈述("我感冒了")照收,但
   // 「你喜欢我吗」「那我算你的父亲吗」不是偏好、也不是关系。
@@ -489,24 +646,40 @@ export function factKey({ scope, subject, kind, value }) {
   return `${scope}|${subject}|${kind}|${value}`;
 }
 
+export const SOFT_MIN_SEEN = 2;
+
 /**
  * 这条事实现在**够不够格被当真**(注入 / 回扫落库,两处共用同一条门槛)。
  *
  * 用户 2026-10-01 说的"偏好按**最高频率**提取"落到实现上就是这个:
  * **软维度(偏好、以及"讨厌"那侧)要见过两次**;关系、健康、明确祈使否定是硬事实,一次就算。
  * ⚠️ 两处共用同一个函数 —— 否则"回扫收进来的"与"运行时肯注入的"会各有一套标准。
+ *
+ * **健康的时间口径(C 刀 A,2026-11-11)**:`short` 不是"永久事实",而是"最近一次自述"。
+ * 传了 `now` + `healthWindowMs` 时,超过窗口的 short **不再进当前事实注入**
+ * (历史仍留在库里,由历史/回忆通道处理)。慢性/心理/重病不套这个窗口 ——
+ * 它们是长期背景,但也不因此等于"现在正在发作"。两个参数都不传 = 旧行为(老调用/老测试)。
  */
-export const SOFT_MIN_SEEN = 2;
-
-export function factVisible(fact, { softMinSeen = SOFT_MIN_SEEN } = {}) {
+export function factVisible(fact, { softMinSeen = SOFT_MIN_SEEN, now = null, healthWindowMs = null } = {}) {
   if (!fact) return false;
   if (fact.kind === 'preference') return (fact.seenCount ?? 1) >= softMinSeen;
   if (fact.kind === 'dislike') return fact.detail === 'forbid' || (fact.seenCount ?? 1) >= softMinSeen;
+  if (fact.kind === 'health') {
+    if (fact.state === HEALTH_STATE.RESOLVED || fact.state === HEALTH_STATE.REFUTED) return false;
+    // C 刀兼容:老库里 source=mined 且没有 state 的健康行,是旧回扫"猜"出来的 ——
+    // 当时没有事件时间,可能被旧 bug 刷成"最近"。先降为历史记录,不再当当前状态注入
+    // (本刀之后新的 mined 写入带 state=active,不受这条影响)。
+    if (fact.state == null && fact.source === 'mined') return false;
+    if (now === null || !healthWindowMs) return true;
+    if (fact.detail !== 'short') return true;
+    const at = Number(fact.lastSeen ?? fact.last_seen ?? 0);
+    return at > 0 && Number(now) - at <= Number(healthWindowMs);
+  }
   return true;
 }
 
 /** 给人看的一行(日志与提示词共用同一份措辞,免得两处说法分叉)。 */
-export function describeFact(fact) {
+export function describeFact(fact, { now = null } = {}) {
   // ⚠️ 重病那一档要**自带态度**(别当谈资) —— 它进了提示词就会影响她怎么说话。
   if (fact.kind === 'health' && fact.detail === 'serious') {
     return `健康（**严肃**:别当谈资、别追问）:${fact.value}`;
@@ -517,7 +690,17 @@ export function describeFact(fact) {
     case 'name': return `名字：${fact.value}${detail}`;
     case 'preference': return `偏好：${fact.value}${detail}`;
     case 'dislike': return `雷区：${fact.value}${detail}`;
-    case 'health': return `健康：${fact.value}${detail}`;
+    case 'health': {
+      // ⚠️ 关键:健康这一行必须让人看出**这是过去自述**,不是"现在正在疼"。
+      //    旧措辞「健康：胃疼(short)」读起来就是当前病情 —— 模型据此追问完全合理。
+      if (now === null) return `健康：${fact.value}${detail}`;
+      const at = Number(fact.lastSeen ?? fact.last_seen ?? 0);
+      const when = at > 0 ? `${ageLabel(Number(now) - at)}自述` : '';
+      const suffix = HEALTH_BACKGROUND_DETAILS.includes(fact.detail)
+        ? '长期背景'
+        : (when ? `${when}，之后未再确认` : '之后未再确认');
+      return `健康：${fact.value}（${fact.detail ? `${fact.detail}；` : ''}${suffix}）`;
+    }
     default: return `${fact.kind}：${fact.value}${detail}`;
   }
 }
@@ -533,11 +716,14 @@ export function describeFact(fact) {
  * 于是"江时光"被当成**说话人**的代号(用户报的现场)。现在分开:
  * 当前说话人的照旧;不是他的**单独一块、写明"这是别人的"**。
  */
-export function renderFacts(facts, { budgetChars = 160, perKind = 3, currentSubject = null, labelFor = null } = {}) {
+export function renderFacts(facts, { budgetChars = 160, perKind = 3, currentSubject = null, labelFor = null, now = null, healthWindowMs = null } = {}) {
   if (!facts || facts.length === 0) return '';
   const order = ['name', 'relation', 'health', 'dislike', 'preference'];
-  const mine = currentSubject ? facts.filter((fact) => (fact.subject ?? currentSubject) === currentSubject) : facts;
-  const others = currentSubject ? facts.filter((fact) => (fact.subject ?? currentSubject) !== currentSubject) : [];
+  // 健康这一维再兜一道:恢复/否认过的行即使被调用方漏筛,也不许进"当前事实"。
+  const live = facts.filter((fact) => fact.kind !== 'health'
+    || (fact.state !== HEALTH_STATE.RESOLVED && fact.state !== HEALTH_STATE.REFUTED));
+  const mine = currentSubject ? live.filter((fact) => (fact.subject ?? currentSubject) === currentSubject) : live;
+  const others = currentSubject ? live.filter((fact) => (fact.subject ?? currentSubject) !== currentSubject) : [];
   const picked = [];
   // ⚠️ **先按"是不是当前说话人的"分组,再按维度排**(2026-10-09):顺序错了会出现
   //    "别人的一条夹在说话人自己的事实中间",读者(模型)更容易把两者混起来 —— 那正是这次修的 bug。
@@ -551,7 +737,13 @@ export function renderFacts(facts, { budgetChars = 160, perKind = 3, currentSubj
   }
   if (picked.length === 0) return '';
   const lines = ['关于他/他们，你知道这些（照做但别念出来，也别主动报）：'];
-  let used = lines[0].length;
+  // ⚠️ C 刀 A(2026-11-11):只要这一块里出现健康,**必须**同时说清"那是过去自述"——
+  //    否则旧病会被当成"现在看见他脸色发白"的依据(2026-11-02 现场)。
+  const hasHealth = picked.some((fact) => fact.kind === 'health');
+  if (hasHealth) {
+    lines.push('（健康项是他过去的自述，不代表现在；他当前说自己没事/已经好了时，以他当前的话为准。）');
+  }
+  let used = lines.join('\n').length;
   let otherHeaderWritten = false;
   for (const fact of picked) {
     const isOther = currentSubject ? (fact.subject ?? currentSubject) !== currentSubject : false;
@@ -561,10 +753,45 @@ export function renderFacts(facts, { budgetChars = 160, perKind = 3, currentSubj
       const who = typeof labelFor === 'function' ? labelFor(fact.subject) : null;
       lines.push(`· （下面这些是**别人**的，不是跟你说话这个人的${who ? `，说的是「${who}」` : ''}）`);
     }
-    const line = `· ${describeFact(fact)}`;
+    const line = `· ${describeFact(fact, { now })}`;
     if (used + line.length > budgetChars) break;
     lines.push(line);
     used += line.length + 1;
   }
   return lines.length > 1 ? lines.join('\n') : '';
+}
+
+/**
+ * 「他最近明确说过自己当前没事」的一行提示(C 刀 A)。
+ *
+ * 为什么需要它:用户说「我没事啊」时句子里**没有症状词**,按词表抽不出任何事实 ——
+ * 旧实现于是什么都不做,旧胃疼照旧注入,她继续坚持。现在把这句话本身记成一条
+ * **有时效的提示**,让"他当前的说法"压过"旧事实"。
+ *
+ * @param {number} denialAt 上次明确否认/说已经好了的时刻(ms)
+ * @param {{now?: number, windowMs?: number}} [options] `windowMs<=0` = 关掉这条提示
+ * @returns {string} 要追加到事实块末尾的一行;没有/过期返回 ''
+ */
+export function healthDenialLine(denialAt, { now = Date.now(), windowMs = 0 } = {}) {
+  const at = Number(denialAt) || 0;
+  if (at <= 0 || !(Number(windowMs) > 0)) return '';
+  if (Number(now) - at > Number(windowMs) || at > Number(now)) return '';
+  return `· 他${ageLabel(Number(now) - at)}明确说过自己当前没事/已经好了 —— 旧健康记录不能当成他现在不舒服的依据，他当前的说法优先。`;
+}
+
+/**
+ * 把消息自带的平台时间解析成毫秒(纯函数)。
+ * QQ 给的 `timestamp` 可能是 ISO 字符串、秒或毫秒;认不出返回 null(不猜)。
+ */
+export function parseEventTime(value) {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || value <= 0) return null;
+    return value < 1e12 ? Math.round(value * 1000) : Math.round(value);
+  }
+  const text = String(value).trim();
+  if (text === '') return null;
+  if (/^\d+$/.test(text)) return parseEventTime(Number(text));
+  const parsed = Date.parse(text);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }

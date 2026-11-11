@@ -18,7 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
-import { DIRECT_RESPONSE_NOTES } from '../src/style.js';
+import { DIRECT_RESPONSE_NOTES, REALITY_GROUNDING_NOTES } from '../src/style.js';
 import { splitSpokenLines } from '../src/mood.js';
 import { ENCYCLOPEDIA_NOTE } from '../src/kb.js';
 import {
@@ -188,6 +188,7 @@ export function registerTurnPolicyTests({ test, assert }) {
       const lastTurnMode = new Map();
       const sandbox = {
         DIRECT_RESPONSE_NOTES,
+        REALITY_GROUNDING_NOTES,
         config: {
           policy: {
             stats: { enabled: false }, growth: { enabled: false }, seriousGuard: true,
@@ -359,6 +360,7 @@ export function registerTurnPolicyTests({ test, assert }) {
     const serious = await import('../src/serious.js');
     const sandbox = {
       DIRECT_RESPONSE_NOTES,
+      REALITY_GROUNDING_NOTES,
       // 真口径模块(替代闭包 import —— vm 里没有模块系统)。
       detectTurnMode: policy.detectTurnMode,
       noteGatesFor: policy.noteGatesFor,

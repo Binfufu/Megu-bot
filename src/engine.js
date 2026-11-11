@@ -46,6 +46,7 @@ import {
 } from './context-budget.js';
 import { wrapInject } from './inject-mark.js';
 import { CHAT_INPUT_PROJECTION_VERSION, projectChatInput } from './chat-input-projection.js';
+import { dayKey, formatDay, formatStamp } from './time-label.js';
 import { normalizeLlmImages } from './llm.js';
 // P3-b 工具循环(P3-a 纯层):引擎只管循环,权限口径在 capabilities 层。
 import { budgetExhaustedText, buildAssistantMessage, buildToolResultMessages, nextLoopAction } from './tool-loop.js';
@@ -92,6 +93,28 @@ function readPersona(personaPath) {
   const text = fs.readFileSync(personaPath, 'utf8');
   if (text.trim() === '') throw new Error(`engine: 人设文件是空的(${personaPath})`);
   return text;
+}
+
+/**
+ * **摘要材料的时间标签**(C 刀 B,2026-11-11)。
+ *
+ * 现场:历史逐字原文只带 role/content,不带发生时间 —— 一个月前的「我胃疼」与今天的话
+ * 在请求里长得一模一样;摘要输入也只写「用户/她」,模型无法知道"这是哪天的事"。
+ * 这里只影响**本轮发给模型的输入**,append-only 原档一个字节都不改(projectTurn 也仍照旧剥注入)。
+ *
+ * @param {Array<object>} turns conversation_turn 行(有 at/role/content/meta)
+ * @param {{now?: number}} [options]
+ * @returns {string} 一行一轮: `[MM-DD HH:mm] 用户: …`
+ */
+export function renderSummarySource(turns, { now = Date.now() } = {}) {
+  return (Array.isArray(turns) ? turns : []).map((turn) => {
+    const who = turn.role === 'assistant' ? '她' : '用户';
+    const stamp = formatStamp(turn.at, { now });
+    const body = turn.meta?.images?.length
+      ? `${turn.content}（附 ${turn.meta.images.length} 张图片，本次未附带，不得猜细节）`
+      : turn.content;
+    return `${stamp ? `[${stamp}] ` : ''}${who}: ${body}`;
+  }).join('\n');
 }
 
 /**
@@ -321,7 +344,7 @@ export function createOwnEngine(options) {
       : turn.content;
   }
   async function compactSummary(previousSummary, older, signal, key) {
-    const transcript = older.map((t) => `${t.role === 'assistant' ? '她' : '用户'}: ${historicalImageText(t)}`).join('\n');
+    const transcript = renderSummarySource(older, { now: now() });
     const prompt = `${SUMMARY_PROMPT}\n\n【旧摘要】\n${previousSummary || '(无)'}\n\n【待压缩的对话段】\n${transcript}`;
     const result = await cancellableChat([{ role: 'user', content: prompt }], { timeoutMs, signal }, key, 'summary');
     return { text: String(result?.text ?? '').trim(), usage: result?.usage ?? null };
@@ -330,6 +353,9 @@ export function createOwnEngine(options) {
   /**
    * 组装一轮的 messages(ASSEMBLY_ORDER:stable → summary → history → turn)。
    * 注入块全部经 wrapInject(刀二C 硬规矩);易变注入(贡献者)进本轮 user 消息。
+   *
+   * **跨日才标日期**(C 刀 B):同一段连续对话不逐行重复日期,只有进入新的一天时
+   * 才在那一行前面加 `[MM-DD]` —— 既让模型知道"这是很久以前",又不白烧 token。
    */
   function assemble({ stable, summary, history, text, key, replayImageId }) {
     const messages = [];
@@ -340,13 +366,23 @@ export function createOwnEngine(options) {
       messages.push({ role: 'system', content: wrapInject('summary', summary) });
     }
     // ③ history:逐字历史(append-only,轮界对齐)
+    // C 刀 B:只给**跨日**的旧消息加日期 —— 当天连续对话不加,前缀逐字节稳定(缓存命中前提);
+    // 跨日时同一天只在第一条前标一次。
+    const atNow = now();
+    const currentDay = dayKey(atNow);
+    let lastDay = null;
     for (const turn of history) {
       const hasImages = Boolean(turn.meta?.images?.length);
       const images = turn.id === replayImageId ? normalizeLlmImages(turn.meta?.images) : [];
       const content = hasImages && !images.length ? historicalImageText(turn) : turn.content;
+      const day = dayKey(turn.at);
+      const isOldDay = day !== '' && currentDay !== '' && day !== currentDay;
+      const prefix = isOldDay && day !== lastDay ? `[${formatDay(turn.at, { now: atNow })}] ` : '';
+      if (isOldDay) lastDay = day;
+      const stamped = `${prefix}${content}`;
       messages.push({ role: turn.role === 'assistant' ? 'assistant' : 'user',
-        content: images.length ? [{ type: 'text', text: content },
-          ...images.map(url => ({ type: 'image_url', image_url: { url } }))] : content });
+        content: images.length ? [{ type: 'text', text: stamped },
+          ...images.map(url => ({ type: 'image_url', image_url: { url } }))] : stamped });
     }
     // ④ turn:本轮 = 贡献者注入(自报家门)+ 用户这句
     const blocks = [];

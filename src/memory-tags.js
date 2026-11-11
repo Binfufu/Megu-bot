@@ -44,6 +44,7 @@
 import { cleanMemoryText } from './memory-archive.js';
 import { INFRA_CONTENT } from './local-infra-content.js';
 import { accessBonus, accessFreshness } from './memory-store.js';
+import { formatDay } from './time-label.js';
 
 /**
  * 标签词表 —— **唯一的真相在这里**。**这是"内容标签":只有这些能落库、也只有这些能当检索键。**
@@ -669,11 +670,15 @@ export function recallDecision(memories, query, options = {}) {
  */
 export function renderRecall(picked, options = {}) {
   const budget = options.budgetChars ?? 600;
+  const now = options.now ?? Date.now();
   if (!picked || picked.length === 0) return '';
   const lines = ['【长期记忆·节选】以下是更早以前的事，只当背景：不要复述、不要说"我记得你说过"。'];
   let used = lines[0].length;
   for (const memory of picked) {
-    const line = `· ${cleanMemoryText(memory.text).slice(0, 80)}`;
+    // C 刀 B:逐条也带日期 —— 总标题只说"更早以前",模型仍可能把其中一条当刚发生。
+    const day = formatDay(memory.at, { now });
+    const mark = day ? `[${day}] ` : '';
+    const line = `· ${mark}${cleanMemoryText(memory.text).slice(0, 80)}`;
     if (used + line.length > budget) break;
     lines.push(line);
     used += line.length + 1;

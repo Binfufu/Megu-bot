@@ -31,6 +31,7 @@ import { noteClaims, scoreTurn } from './memory-notes.js';
 import { CHAT_INPUT_PROJECTION_VERSION, projectChatInput } from './chat-input-projection.js';
 import { CHUNK_MAX, chunkKnowledge, renderKnowledge } from './kb.js';
 import { bigramTokens, cosineSimilarity, ftsMatchExpression, normalizeTags, recallDecision, renderRecall, tagsFor } from './memory-tags.js';
+import { formatDay } from './time-label.js';
 import { log } from './log.js';
 
 /** 打开(必要时创建)记忆库。 */
@@ -1482,12 +1483,17 @@ export function notesFor(db, {
 }
 
 /** 把固化记忆渲染成注入用的几行(与标签检索**共用一个预算**,见 D77 判据③)。 */
-export function renderNotes(picked, { budgetChars = 300 } = {}) {
+export function renderNotes(picked, { budgetChars = 300, now = Date.now() } = {}) {
   if (!picked || picked.length === 0) return '';
   const lines = [];
   let used = 0;
   for (const note of picked) {
-    const line = `· ${cleanMemoryText(note.text).slice(0, 80)}`;
+    // C 刀 B(2026-11-11):旧实现只渲染 text —— 一周前的近况与今天的近况字节相同,
+    // 模型自然把它当现在。现在每条带"长期/近期 + 日期",让时间边界跟着条目走。
+    const day = formatDay(note.at, { now });
+    const tier = note.tier === 'long' ? '长期' : '近期';
+    const mark = day ? `[${tier}·${day}] ` : '';
+    const line = `· ${mark}${cleanMemoryText(note.text).slice(0, 80)}`;
     if (used + line.length > budgetChars) break;
     lines.push(line);
     used += line.length + 1;
@@ -2108,9 +2114,19 @@ const WRITABLE_LABELS = MEMORY_BLOCKS_DEFAULTS.filter((block) => !block.readOnly
  * (bot 名 + 一句身份锚点;它是 read_only,生成器永远不改它)。
  */
 export function ensureBlockSchema(db, { aboutHerValue = '' } = {}) {
+  // C 刀:老库没有 policy_v 列 —— 补上,默认 0 = 旧口径内容(读路径先停用,等重新生成)。
+  try {
+    const cols = db.prepare('PRAGMA table_info(memory_block)').all().map((row) => row.name);
+    if (cols.length > 0 && !cols.includes('policy_v')) {
+      db.exec('ALTER TABLE memory_block ADD COLUMN policy_v INTEGER NOT NULL DEFAULT 0');
+      log.info('记忆库迁移：memory_block 补上 policy_v（旧块 = 旧口径，先停用等重建）');
+    }
+  } catch {
+    // 只读连接:补不上就按"没有这列"降级(读路径用 hasBlockColumn 判断)。
+  }
   const ins = db.prepare(
-    `INSERT OR IGNORE INTO memory_block (label, description, value, limit_chars, read_only)
-     VALUES (?, ?, ?, ?, ?)`,
+    `INSERT OR IGNORE INTO memory_block (label, description, value, limit_chars, read_only, policy_v)
+     VALUES (?, ?, ?, ?, ?, 1)`,
   );
   db.exec('BEGIN');
   try {
@@ -2129,8 +2145,10 @@ export function ensureBlockSchema(db, { aboutHerValue = '' } = {}) {
 /** 读全部块(按固定顺序);表不在 → [](老库/只读连接降级)。 */
 export function getMemoryBlocks(db) {
   if (!hasTable(db, 'memory_block')) return [];
+  const hasPolicy = db.prepare('PRAGMA table_info(memory_block)').all().some((row) => row.name === 'policy_v');
   const rows = db.prepare(
-    'SELECT label, description, value, limit_chars, read_only, model, updated_at, build_ms FROM memory_block',
+    `SELECT label, description, value, limit_chars, read_only, model, updated_at, build_ms${hasPolicy ? ', policy_v' : ''}
+       FROM memory_block`,
   ).all();
   const order = new Map(MEMORY_BLOCKS_DEFAULTS.map((block, index) => [block.label, index]));
   return rows
@@ -2143,6 +2161,8 @@ export function getMemoryBlocks(db) {
       model: row.model == null ? null : String(row.model),
       updatedAt: row.updated_at == null ? null : Number(row.updated_at),
       buildMs: row.build_ms == null ? null : Number(row.build_ms),
+      // 没有这一列(只读连接/未迁移)时按 0 处理 = 旧口径,不冒充新口径。
+      policyV: hasPolicy ? Number(row.policy_v) || 0 : 0,
     }))
     .sort((a, b) => (order.get(a.label) ?? 99) - (order.get(b.label) ?? 99));
 }
@@ -2195,6 +2215,10 @@ export async function buildMemoryBlocks({ current, notesText, generate, now = Da
   const prompt = [
     '你在维护一个记忆系统的常驻摘要块。下面给出各块的职责、当前内容,与最近固化的记忆笔记。',
     '请**只依据笔记**更新各块:笔记里没有的不要编;已了结的约定收进一句"已完成";块与块之间别重复。',
+    // ⚠️ C 刀 B(2026-11-11):笔记带日期,块里也要保留时间边界 ——
+    //    旧实现把"最近在意的事"写成现在时,于是一周前的近况会变成长期背景。
+    '笔记行首标了「长期/近期·日期」。会变化的状态(近况/健康/心情)要写成"某日他…",',
+    '不要写成"他最近/现在…";已经过期的近期状态不要升级成长期特征。',
     '',
     '各块职责:',
     spec,
@@ -2243,13 +2267,17 @@ export async function buildMemoryBlocks({ current, notesText, generate, now = Da
 export function applyBlockUpdates(db, updates, { model = null, now = Date.now() } = {}) {
   const list = (updates ?? []).filter((item) => item && typeof item.label === 'string');
   if (list.length === 0) return { written: 0, skippedReadOnly: 0 };
-  const sel = db.prepare('SELECT label, value, limit_chars, read_only FROM memory_block WHERE label = ?');
+  const hasPolicy = db.prepare('PRAGMA table_info(memory_block)').all().some((row) => row.name === 'policy_v');
+  const sel = db.prepare(`SELECT label, value, limit_chars, read_only${hasPolicy ? ', policy_v' : ''} FROM memory_block WHERE label = ?`);
   const insHistory = db.prepare(
     'INSERT INTO memory_block_history (label, value, replaced_at) VALUES (?, ?, ?)',
   );
   const upd = db.prepare(
-    'UPDATE memory_block SET value = ?, model = ?, updated_at = ? WHERE label = ?',
+    `UPDATE memory_block SET value = ?, model = ?, updated_at = ?${hasPolicy ? ', policy_v = 1' : ''} WHERE label = ?`,
   );
+  const upgrade = hasPolicy
+    ? db.prepare('UPDATE memory_block SET policy_v = 1 WHERE label = ? AND (policy_v IS NULL OR policy_v < 1)')
+    : null;
   let written = 0;
   let skippedReadOnly = 0;
   db.exec('BEGIN');
@@ -2262,7 +2290,12 @@ export function applyBlockUpdates(db, updates, { model = null, now = Date.now() 
         continue;
       }
       const value = String(item.value ?? '').trim().slice(0, Number(row.limit_chars) || 200);
-      if (value === '' || value === String(row.value ?? '')) continue;
+      if (value === '') continue;
+      if (value === String(row.value ?? '')) {
+        // 值没变但口径是旧的:标成新口径(否则它会永远停在"旧内容、不注入")。
+        if (Number(row.policy_v) < 1) upgrade?.run(item.label);
+        continue;
+      }
       insHistory.run(item.label, String(row.value ?? ''), now);
       upd.run(value, model == null ? null : String(model), now, item.label);
       written += 1;
@@ -2286,15 +2319,30 @@ export function memoryBlockStats(db) {
   };
 }
 
-/** 生成块的输入材料:最近 N 条有效固化笔记,一行一条(≤80 字截断,与交接口径一致)。 */
-export function recentNotesText(db, { limit = 30, charsPerNote = 80 } = {}) {
+/** 生成块的输入材料:最近 N 条有效固化笔记,一行一条(≤80 字截断,与交接口径一致)。
+ *
+ * C 刀 B(2026-11-11):常驻块/洞察不能拿"过期中期近况"当现在的材料 ——
+ * 旧实现只筛 invalid/merged,不筛 mid TTL,也不把笔记时间送进下游,
+ * 于是"他最近常熬夜"这类块/洞察会由一周前的近况推出、再每轮注入。
+ * 现在:中期超过 TTL 的不进输入;每行带日期,生成端能看见时间边界。
+ */
+export function recentNotesText(db, {
+  limit = 30, charsPerNote = 80, now = Date.now(), midTtlMs = 3 * 24 * 3600 * 1000,
+} = {}) {
   if (!hasTable(db, 'note')) return '';
   const merged = hasNoteColumn(db, 'merged_into') ? ' AND merged_into IS NULL' : '';
+  const ttl = Number.isFinite(Number(midTtlMs)) && Number(midTtlMs) > 0
+    ? ' AND (tier = \'long\' OR at >= ?)'
+    : '';
   const rows = db.prepare(
-    `SELECT text FROM note WHERE invalid_at IS NULL${merged} ORDER BY at DESC LIMIT ?`,
-  ).all(Math.max(1, Math.min(200, limit)));
+    `SELECT text, at, tier FROM note WHERE invalid_at IS NULL${merged}${ttl} ORDER BY at DESC LIMIT ?`,
+  ).all(...(ttl ? [now - Number(midTtlMs)] : []), Math.max(1, Math.min(200, limit)));
   return rows
-    .map((row) => `· ${cleanMemoryText(String(row.text ?? '')).slice(0, charsPerNote)}`)
+    .map((row) => {
+      const day = formatDay(row.at, { now });
+      const mark = day ? `[${row.tier === 'long' ? '长期' : '近期'}·${day}] ` : '';
+      return `· ${mark}${cleanMemoryText(String(row.text ?? '')).slice(0, charsPerNote)}`;
+    })
     .filter((line) => line !== '· ')
     .join('\n');
 }
@@ -2354,7 +2402,7 @@ export function pickLongTerm(db, {
   const notes = notesFor(db, { conversation, query, now, peopleNames, midTtlMs, excludeIds, latestOnly })
     .filter((note) => !tooRecent?.(note.id))
     .slice(0, Math.max(1, noteLimit));
-  const noteText = renderNotes(notes, { budgetChars: budget });
+  const noteText = renderNotes(notes, { budgetChars: budget, now });
   // ② 再按标签挑原文;同一轮已经在固化里出现过的、以及刚端过的,都不重复印。
   //    ⚠️ 带了语义向量时,**没有标签交集也要去取候选**(D92:那正是覆盖率要治的那一半)。
   const noted = new Set(notes.map((note) => note.id));

@@ -1178,6 +1178,24 @@ function buildRuntimeConfig({ rootDir, envFile, loadedEnvFile }) {
           //    `QQBOT_MEMORY_LATEST_ONLY=0` = 不过滤、行为回到 P1-B(旧说法照旧端出来),
           //    **数据一条不丢**(失效行只是不再注入,仍可审计;这是本块的回滚开关)。
           latestOnly: asBool('QQBOT_MEMORY_LATEST_ONLY', true),
+          // **健康事实的生命周期**(C 刀 A,2026-11-11;现场 = 旧胃疼一个月后仍被当成"现在")。
+          //
+          // 旧行为:健康一次即"永久有效",短期(short)也不例外 —— 一个月的胃疼每轮都进提示词,
+          // 用户说"我没事"也撤不掉。新口径:
+          //   · `short` = "最近一次自述";超过 `windowMs` 就不再进**当前事实**注入(历史仍留着);
+          //   · 慢性/心理/重病不套这个窗口(长期背景),但渲染会标明"过去自述/长期背景";
+          //   · 用户明确说"我没事/已经好了"会记一条有时效的提示,压过旧记录。
+          // ⚠️ 窗口数值【暂定】72 小时(与中期笔记 3 天同档,便于先观察);**不是主人已拍板的定值**,
+          //    观察真实对话后再定稿。`0` = 关闭时间窗口(恢复/否认过滤仍生效,不回到"旧病永远常驻")。
+          health: {
+            windowMs: asNonNegativeInt('QQBOT_MEMORY_HEALTH_WINDOW_HOURS', 72) * 3600_000,
+            // "我没事/已经好了"这条提示的有效期【暂定】48 小时;`0` = 不写这条提示(回滚开关)。
+            denialWindowMs: asNonNegativeInt('QQBOT_MEMORY_HEALTH_DENIAL_HOURS', 48) * 3600_000,
+          },
+          // **旧派生内容的读闸**(C 刀,2026-11-11):常驻块/洞察的老内容是"没有时间边界"的旧口径,
+          // 升级后先停用(不删,等下一次生成用新口径重建)。`QQBOT_MEMORY_LEGACY_DERIVED=1`
+          // = 审计/回滚:把旧内容也放回注入(不推荐长期开)。
+          legacyDerived: asBool('QQBOT_MEMORY_LEGACY_DERIVED', false),
           // **实体共现 boost**(P1-F,2026-10-19,方案 §5):query 里出现"认识的人/学会的概念"
           // 的名字时,mention 过这些名字的轮次在检索里加分(权重 <1,盖不过标签命中)。
           // ⚠️ `boost` 是【暂定 0.3】(与语义权重同量级),上线后按固定集 v2 的实体分组

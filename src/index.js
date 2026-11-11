@@ -80,7 +80,7 @@ import {
   pickSelfDecidedBranch,
   storyExpired,
 } from './story.js';
-import { breakBeforeKaomoji, DEMO_STYLE_NUDGES, DIRECT_RESPONSE_NOTES, pickNudges, rememberNudges, SPOKEN_STANDING_NOTES, withFacts, withStyleNudge } from './style.js';
+import { breakBeforeKaomoji, DEMO_STYLE_NUDGES, DIRECT_RESPONSE_NOTES, pickNudges, REALITY_GROUNDING_NOTES, rememberNudges, SPOKEN_STANDING_NOTES, withFacts, withStyleNudge } from './style.js';
 import { getMoodTheme, buildMoodNote, decideMood, maybeSpokenEmoji, splitSpokenLines } from './mood.js';
 import {
   buildChronicle,
@@ -182,7 +182,7 @@ import { archiveOwnHistory } from './own-memory-archive.js';
 import { createMemoryArchiveTick, startMemoryArchive } from './memory-archive-tick.js';
 import { activeConversations, archiveDue, archiveOnStartup, backfillEmbeddings, buildMemoryBlocks, applyBlockUpdates, consolidate, embeddingCoverage, ensureBlockSchema, ensureFtsSchema, ensureNoteSchema, entityStats, fetchQueryVector, forgetNotes, forgetSummary, getSummary, getMemoryBlocks, indexTurnFts, knowledgeStats, makeHandoffFromConfig, makeKnowledgeProvider, makeLongTermProvider, memoryBlockStats, memorySummary, noteStats, notesOf, openMemory, recentNotesText, rebuildEntities, renderMemoryBlocks, saveSummary, summarizeConversation, summaryPlan, tagCoverage } from './memory-store.js';
 // P2-A:记忆洞察(2026-10-22,方案 §4.4)—— 生成/落库/渲染都在这一个模块里(memory 层零 HTTP)。
-import { INSIGHT_MIN_NOTES, appendInsights, buildInsights, insightsDue, latestInsightCreatedAt, latestInsights, recentInsightNotes, renderInsights } from './memory-insights.js';
+import { INSIGHT_MIN_NOTES, appendInsights, buildInsights, ensureInsightSchema, insightsDue, latestInsightCreatedAt, latestInsights, recentInsightNotes, renderInsights } from './memory-insights.js';
 // P0 记忆作用域(2026-10-28):常驻块/洞察只在允许的会话里出现(口径一份,纯函数)。
 import { filterBlocksForAccess, filterInsightsForAccess, memoryAccessForScene } from './memory-scope.js';
 // 跨通道私聊共享(2026-11-10 / D329):只有"网页账号已服务端验证绑定到某个 QQ"才并入
@@ -198,7 +198,7 @@ import { createToolBudget } from './tool-budget.js';
 import { isResponsesApi } from './llm.js';
 // W4 记忆检修台(P2-C,2026-10-22):API 逻辑全在 memory-console.js —— index.js 只把两个库的现有连接递给面板。
 import { createMemoryConsole } from './memory-console.js';
-import { RELATION_WORDS, describeFact, detectClaimAboutSelf, extractAccept, extractFacts, factVisible, labelOf, parseForget, renderFacts, resolveNameTeach } from './profile.js';
+import { RELATION_WORDS, describeFact, detectClaimAboutSelf, extractAccept, extractFacts, extractHealthSignals, factVisible, healthDenialLine, labelOf, parseEventTime, parseForget, renderFacts, resolveNameTeach } from './profile.js';
 import { buildExplosion, isExplosionRequest } from './explosion.js';
 import { buildNarrationPrompt, isExplosionFinisher, resolveCasterName } from './narration.js';
 import { retryAsync } from './retry.js';
@@ -1323,6 +1323,13 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
    *   ② 新增**命名句**这一类事实(`名字`);旧实现里 `extractFacts('记住 这个人，名字叫江时光')` → `[]`,
    *      所以"记住名字"这件事**根本没有落地的地方**。
    */
+  /**
+   * 「他最近明确说过自己没事/已经好了」的存储键(C 刀 A)。
+   * 用 meta 而不是 fact:它不是"关于他的事实",而是一条**有时效的对话状态**,
+   * 过期就该消失,不该进事实表被历史回扫/冲突规则二次加工。
+   */
+  const healthDenialKey = (scope, subject) => `health:denial:${scope}|${subject}`;
+
   function learnFactsFrom(message) {
     if (!config.policy.growth.enabled) return [];
     const isGroup = message.scene === 'group';
@@ -1353,7 +1360,11 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       if (row.subject) log.info(`记名字：${row.reason}，记下的名字是「${row.value}」`);
       else if (NAMING_HINT.test(text)) log.info(`看到命名句「${row.value}」但${row.reason}`);
     }
+    const eventAt = parseEventTime(message.timestamp) ?? Date.now();
     const facts = extractFacts(text, { subject })
+      // 健康单独走下面的状态机:同一条消息里的"否定/恢复"也要落库,
+      // 而 `extractFacts` 只产出"本人自述仍在"的正向事实(见 profile.js 的 extractHealthSignals)。
+      .filter((fact) => fact.kind !== 'health')
       .filter((fact) => !isGroup || (fact.kind === 'relation' && RELATION_WORDS.includes(fact.value)));
     for (const row of tells) {
       facts.push({ kind: 'name', value: row.value, detail: row.self ? 'self' : null, nameSubject: row.subject });
@@ -1383,6 +1394,82 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       } catch (err) {
         log.warn(`记"关于人的事实"失败（不影响对话）: ${describeError(err)}`);
       }
+    }
+    // **健康状态机**(C 刀 A,2026-11-11):只认本人自述;问句/第三人/否定不记成"自己病了"。
+    //   · active  → 记一条"最近一次自述",带事件时刻(回扫旧消息不许刷新);
+    //   · resolved/refuted → 更新已有行为"已恢复/已否认",不新建事实;
+    //   · generic("我没事/已经好了")→ 记一条有时效的否认提示;若当前只有**唯一一条**
+    //     短期症状,就把它一并标成已恢复(有歧义时只记提示,不猜是哪一种)。
+    if (!isGroup) {
+      const signals = extractHealthSignals(text);
+      // ⚠️ 复核 P1-2:先把**本条消息之前**就存在的短期症状拍下来。generic 收尾只能动这些,
+      //    绝不能把同一句里刚报的「我没事，就是有点头晕」当成"旧症状"顺手清掉。
+      const preExistingActive = stateStore.facts({ scope, subject: 'self' })
+        .filter((fact) => fact.kind === 'health' && fact.state !== 'resolved' && fact.state !== 'refuted')
+        .filter((fact) => fact.detail === 'short');
+      let activeInThisMessage = false;
+      let seriousWritten = false;
+      for (const event of signals.events) {
+        if (event.question) continue;
+        if (event.subject === 'other') {
+          log.info(`健康提及：这句说的是别人（${event.value}），不记成他自己的病`);
+          continue;
+        }
+        // 同一句里的重病只落一条(「确诊了癌症，下个月化疗」是同一件事,不是两种病)。
+        if (event.detail === 'serious') {
+          if (seriousWritten) continue;
+          seriousWritten = true;
+        }
+        if (event.polarity === 'active') activeInThisMessage = true;
+        try {
+          const result = stateStore.touchFact({
+            scope,
+            subject: 'self',
+            kind: 'health',
+            value: event.value,
+            detail: event.detail,
+            source: 'told',
+            state: event.polarity,
+            onsetAt: eventAt,
+            eventAt,
+          });
+          if (event.polarity === 'active') {
+            // 复核 P1-1:新的自述比旧的「我没事」更新 —— 旧提示必须撤销,
+            // 否则"当前说法优先"会反过来用旧否认压新症状。
+            stateStore.forgetMeta(healthDenialKey(scope, 'self'));
+          }
+          if (result?.resolved) {
+            log.info(`健康自述：${event.value} 已标记为${event.polarity === 'resolved' ? '恢复' : '否认'}（旧行保留可审计）`);
+          } else if (result?.isNew) {
+            log.info(`健康自述：记下「${event.value}」（${event.detail}，${event.polarity}）`);
+          }
+        } catch (err) {
+          log.warn(`记健康状态失败（不影响对话）: ${describeError(err)}`);
+        }
+      }
+      // 本句已经明确报了症状(如「我没事,就是有点头晕」)→ 不写"当前没事"的泛化提示,
+      // 也不收尾任何症状(那句"没事"更可能是"别的都还好/别担心")。
+      if (signals.generic && !activeInThisMessage) {
+        const now = Date.now();
+        try {
+          stateStore.setMeta(healthDenialKey(scope, 'self'), String(now));
+          log.info(`健康自述：他明确说自己${signals.generic === 'recovery' ? '已经好了' : '现在没事'}（旧病记录不再当作现状）`);
+          // 只有**唯一一条**短期症状、且这句泛化恢复真的在说身体时才替它收尾;
+          // 多条 = 不知道他说哪一条;「已经好了/我好了」可能是别的事 → 只写提示,不动症状。
+          if (signals.genericBody && preExistingActive.length === 1) {
+            stateStore.touchFact({
+              scope, subject: 'self', kind: 'health', value: preExistingActive[0].value, detail: preExistingActive[0].detail,
+              source: 'told', state: 'resolved', eventAt: now,
+            });
+            log.info(`健康自述：唯一的短期症状「${preExistingActive[0].value}」随之标记为恢复`);
+          }
+        } catch (err) {
+          log.warn(`记"我没事"提示失败（不影响对话）: ${describeError(err)}`);
+        }
+      }
+    } else if (extractHealthSignals(text).events.length > 0) {
+      // 群里不记健康(与旧口径一致:群里只认@声明的**关系**),但要把"为什么不记"说清楚。
+      log.info('健康提及：群聊健康自述不落库（沿用旧口径：群里只收声明式关系）');
     }
     for (const fact of saved) {
       // 名字那一条要说清"这是谁的名字" —— 它就是这次修的 bug,日志里必须看得见
@@ -1432,7 +1519,10 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       //    两侧都收(不搬动旧数据),`currentSubject='self'` 保证旧的那些仍算"他自己的",不会被误标成"别人的"。
       // P1-C(2026-10-19):默认只看**仍成立**的事实 —— 被他改口掉的旧说法不进提示词
       // (旧行还在库里、只标了 invalid_at;`QQBOT_MEMORY_LATEST_ONLY=0` 可回 P1-B 行为)。
-      const all = stateStore.facts({ scope, limit: 30, latestOnly: memoryCfg.latestOnly }).filter((fact) => factVisible(fact));
+      // C 刀 A(2026-11-11):短期健康过了有效期就不再冒充"现在";恢复/否认过的行直接退出。
+      const now = Date.now();
+      const all = stateStore.facts({ scope, limit: 30, latestOnly: memoryCfg.latestOnly })
+        .filter((fact) => factVisible(fact, { now, healthWindowMs: memoryCfg.health.windowMs }));
       const facts = message.scene === 'group'
         ? all
         : all.filter((fact) => fact.subject === 'self' || fact.subject === message.senderId);
@@ -1446,8 +1536,21 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
           return null;
         }
       };
-      const rendered = renderFacts(facts, { budgetChars: 160, currentSubject, labelFor: nameOf });
-      return rendered === '' ? null : rendered;
+      const rendered = renderFacts(facts, {
+        budgetChars: 160,
+        currentSubject,
+        labelFor: nameOf,
+        now,
+        healthWindowMs: memoryCfg.health.windowMs,
+      });
+      // 「我没事/已经好了」这条**当前纠正**必须比旧事实更晚出现、排在后面,才压得住它。
+      const denialAt = Number(stateStore.getMeta(healthDenialKey(scope, currentSubject)) ?? 0);
+      const denial = healthDenialLine(denialAt, { now, windowMs: memoryCfg.health.denialWindowMs });
+      if (rendered === '' && denial === '') return null;
+      if (rendered === '') {
+        return `关于他/他们，你知道这些（照做但别念出来，也别主动报）：\n${denial}`;
+      }
+      return denial ? `${rendered}\n${denial}` : rendered;
     } catch (err) {
       log.warn(`读"关于人的事实"失败（不影响对话）: ${describeError(err)}`);
       return null;
@@ -1545,6 +1648,15 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
             log.warn(`常驻记忆块初始化失败（不影响对话）: ${describeError(err)}`);
           }
         }
+        // C 刀:洞察表补 policy_v(老库旧口径 = 0,读路径先停用、等重新生成)。
+        try {
+          const insightSchema = ensureInsightSchema(memoryDb);
+          if (insightSchema.added?.length && !quiet) {
+            log.info(`记忆库迁移：insight 补上 ${insightSchema.added.join(' / ')}（旧洞察先停用，保留可审计）`);
+          }
+        } catch (err) {
+          log.warn(`洞察表迁移失败（读路径按旧口径停用）: ${describeError(err)}`);
+        }
         return result;
       };
       archiveRunner = startMemoryArchive(runArchive,
@@ -1587,7 +1699,8 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         log.info(
           `关于人的事实：名字 ${factStats.name ?? 0} ｜ 关系 ${factStats.relation ?? 0} ｜ 偏好 ${factStats.preference ?? 0} ｜ ` +
           `雷区 ${factStats.dislike ?? 0} ｜ 健康 ${factStats.health ?? 0} ｜ 已被新说法取代 ${factStats.invalid ?? 0} 条` +
-          '（每轮注入 ≤160 字；软失效读过滤=' + (memoryCfg.latestOnly ? '开' : '关') +
+          '（事实行预算 ≤160 字（健康时态说明另计）；软失效读过滤=' + (memoryCfg.latestOnly ? '开' : '关') +
+          '；短期健康有效期=' + (memoryCfg.health.windowMs > 0 ? `${Math.round(memoryCfg.health.windowMs / 3600_000)}h` : '关') +
           '；历史回扫：node scripts\\profile-scan.js）',
         );
       }
@@ -1924,13 +2037,18 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         const blocks = getMemoryBlocks(memoryDb);
         const due = blocks.some((block) =>
           !block.readOnly
-          && (block.value.trim() === '' || block.updatedAt == null
+          && (Number(block.policyV) < 1
+            || block.value.trim() === '' || block.updatedAt == null
             || nowMs - block.updatedAt >= memoryCfg.blocks.everyMs));
         if (due) {
           const startedAt = Date.now();
           const result = await buildMemoryBlocks({
             current: blocks,
-            notesText: recentNotesText(memoryDb, { limit: 30 }),
+            notesText: recentNotesText(memoryDb, {
+              limit: 30,
+              now: nowMs,
+              midTtlMs: memoryCfg.noteTtlMs,
+            }),
             generate: (prompt) => summarizer(prompt),
           });
           if (result.error) {
@@ -1957,14 +2075,23 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       try {
         const nowMs = Date.now();
         if (insightsDue(latestInsightCreatedAt(memoryDb), { everyMs: memoryCfg.insights.everyMs, now: nowMs })) {
-          const notes = recentInsightNotes(memoryDb, { limit: memoryCfg.insights.inputNotes });
+          const notes = recentInsightNotes(memoryDb, {
+            limit: memoryCfg.insights.inputNotes,
+            now: nowMs,
+            midTtlMs: memoryCfg.noteTtlMs,
+          });
           // 没攒够可引用的笔记 = 没有可反思的材料,这是常态不是故障:安静跳过,不刷日志。
           if (notes.length >= INSIGHT_MIN_NOTES) {
             const startedAt = Date.now();
             const result = await withTimeout(
               buildInsights({
                 notes,
-                existing: latestInsights(memoryDb, { limit: 10 }),
+                existing: latestInsights(memoryDb, {
+                  limit: 10,
+                  now: nowMs,
+                  midTtlMs: memoryCfg.noteTtlMs,
+                  includeLegacy: memoryCfg.legacyDerived,
+                }),
                 generate: (prompt) => summarizer(prompt),
                 maxPerRun: memoryCfg.insights.maxPerRun,
                 limitChars: memoryCfg.insights.limitChars,
@@ -2093,7 +2220,9 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
           conversationKey,
           ownerIds: config.policy.admin?.ids ?? null,
         });
-        const visible = filterBlocksForAccess(getMemoryBlocks(memoryDb), access);
+        const visible = filterBlocksForAccess(getMemoryBlocks(memoryDb), access)
+          // C 刀:旧口径块(没有时间边界)先不注入;`QQBOT_MEMORY_LEGACY_DERIVED=1` 仅审计/回滚时放回。
+          .filter((block) => memoryCfg.legacyDerived || Number(block.policyV) >= 1);
         blocksText = renderMemoryBlocks(memoryDb, { blocks: visible });
         if (visible.length === 0) {
           log.info(`记忆作用域：${conversationKey} 不给私有常驻块（${access.reason}）`);
@@ -3498,7 +3627,9 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
 
       const result = await runner.runTurn(
         conversationKey,
-        withStyleNudge(prompt, nextNudges()),
+        // C 刀 B(2026-11-11):定时早安虽然不走当轮事实注入,但仍吃同一段历史/摘要 ——
+        // 现实观察边界必须一起到达,否则"旧病 + 早上"两条入口的表现会不一致。
+        withStyleNudge(prompt, [...nextNudges(), ...REALITY_GROUNDING_NOTES]),
         config.policy.replyTimeoutMs,
       );
 
@@ -5466,7 +5597,7 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
     { hasImage = null, backgroundImages = false, decision = null } = {},
   ) {
     // 直接回应不属于口语花活：任务/知识、严肃场景和随机风格关闭时也必须到达。
-    const notes = [...DIRECT_RESPONSE_NOTES];
+    const notes = [...DIRECT_RESPONSE_NOTES, ...REALITY_GROUNDING_NOTES];
     // recallFor 与"本轮决策"都必须在**这次 await 之前**定下来:
     // 旧实现是 await 长期记忆**之后**才判 mode 并写共享状态,同会话另一轮在 await 里
     // 跑完就能改写它 —— 先到的这一轮于是按别人的状态回答(F2 修的正是这个)。
@@ -5639,8 +5770,16 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         const insightText = renderInsights(memoryDb, {
           limit: memoryCfg.insights.maxPerRun,
           budgetChars: memoryCfg.insights.maxPerRun * memoryCfg.insights.limitChars,
+          now: Date.now(),
+          midTtlMs: memoryCfg.noteTtlMs,
+          includeLegacy: memoryCfg.legacyDerived,
           rows: typeof latestInsights === 'function' && typeof filterInsightsForAccess === 'function'
-            ? filterInsightsForAccess(latestInsights(memoryDb, { limit: memoryCfg.insights.maxPerRun }), access)
+            ? filterInsightsForAccess(latestInsights(memoryDb, {
+              limit: memoryCfg.insights.maxPerRun,
+              now: Date.now(),
+              midTtlMs: memoryCfg.noteTtlMs,
+              includeLegacy: memoryCfg.legacyDerived,
+            }), access)
             : null,
         });
         if (insightText) notes.push(wrapInject('insight', insightText));

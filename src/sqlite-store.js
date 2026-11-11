@@ -224,7 +224,14 @@ CREATE TABLE IF NOT EXISTS fact (
   -- 三列全空 = "这条现在仍成立",所以老库补列后行为一点不变(迁移见 migrate)。
   superseded_by INTEGER,         -- 取代它的新行 id(NULL = 没被取代)
   merged_into   INTEGER,         -- P1-D 近重复合并预留(本版不写)
-  invalid_at    INTEGER          -- 软失效时刻毫秒;NULL = 现在仍成立
+  invalid_at    INTEGER,         -- 软失效时刻毫秒;NULL = 现在仍成立
+  -- 健康事实的生命周期(C 刀 A,2026-11-11):
+  -- 旧实现里"短期(short)"只是 detail 字符串,没有生命周期 —— 一个月前的胃疼
+  -- 也按"现在正在疼"每轮注入。这四列把"这次自述什么时候发生/是否已恢复"分开记:
+  state       TEXT,              -- active / resolved / refuted(NULL = 老行,按旧口径读)
+  resolved_at INTEGER,           -- 本人说已经好了/否认的时刻(只审计用,不改 last_seen)
+  onset_at    INTEGER,           -- 这次症状最早自述的事件时刻(不是"最后见到")
+  event_at    INTEGER            -- 最近一次**事件**时刻(回扫旧消息不许刷新 last_seen)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_key ON fact(scope, subject, kind, value);
 CREATE INDEX IF NOT EXISTS idx_fact_seen ON fact(last_seen DESC);
@@ -736,6 +743,17 @@ function migrate(db) {
   if (factColumns.length > 0 && factMissing.length > 0) {
     for (const column of factMissing) db.exec(`ALTER TABLE fact ADD COLUMN ${column} INTEGER`);
     log.info(`状态库迁移：fact 补上 ${factMissing.join(' / ')}（ADD-only 软失效，老事实当作一直有效）`);
+  }
+  // 健康生命周期(C 刀 A,2026-11-11):老库没有这四列。
+  // ⚠️ 空值 = "老行",读路径按旧口径(factVisible 不传 now 时行为不变) ——
+  //    迁移本身**不改任何判定**:把旧行当成"状态未知",由 C 刀的兼容处理再决定。
+  const healthMissing = ['state', 'resolved_at', 'onset_at', 'event_at']
+    .filter((column) => !factColumns.includes(column));
+  if (factColumns.length > 0 && healthMissing.length > 0) {
+    for (const column of healthMissing) {
+      db.exec(`ALTER TABLE fact ADD COLUMN ${column} ${column === 'state' ? 'TEXT' : 'INTEGER'}`);
+    }
+    log.info(`状态库迁移：fact 补上 ${healthMissing.join(' / ')}（健康生命周期：老行留空 = 状态未知）`);
   }
 
   // own_llm_call 的模型列(1.168.0 / D275):花费报表要"按模型分节"(照 DeepSeek 官方
@@ -1578,19 +1596,108 @@ export class SqliteStateStore {  #db;
    *      (invalid_at / superseded_by 清空),而不是另起一行:同一句话永远只有一行。
    *
    * @param {{scope: string, subject: string, kind: string, value: string,
-   *          detail?: string|null, source?: string, now?: number}} fact
+   *          detail?: string|null, source?: string,
+   *          state?: 'active'|'resolved'|'refuted'|null,
+   *          onsetAt?: number|null, eventAt?: number|null}} fact
+   *   `state/onsetAt/eventAt` 是健康生命周期(C 刀 A)用的;其它维度不传,行为不变。
+   *   · `resolved/refuted` = 本人说"已经好了/没有这回事":只更新已有行,**不新建事实**;
+   *   · `eventAt` = 这条自述**发生**的时刻(归档回扫用):旧消息不许刷新 `last_seen`;
+   *   · `onsetAt` = 这次症状最早自述的时刻(只在新起一次时写)。
    * @returns {null | {isNew: boolean, scope: string, subject: string, kind: string,
-   *          value: string, id: number, superseded: Array<{id: number, kind: string, value: string}>}}
+   *          value: string, id: number, superseded: Array<{id: number, kind: string, value: string}>,
+   *          resolved?: boolean}}
    *   `id` = 本次命中的那一行(新的或已存在的);`superseded` = 被这次写失效的旧行(可能为空;
    *   mined 恒为空 —— 它只 upsert,不动任何行的有效性)。
    */
-  touchFact({ scope, subject, kind, value, detail = null, source = 'told' }, now = Date.now()) {
+  touchFact({
+    scope, subject, kind, value, detail = null, source = 'told',
+    state = null, onsetAt = null, eventAt = null,
+  }, now = Date.now()) {
     if (!scope || !subject || !kind || !value) return null;
     // ⚠️ **唯一能改"有效/失效"的来源**:他说的 / 群里声明的。mined 只做 upsert。
     const authoritative = source === 'told' || source === 'declared';
     const existing = this.#db
-      .prepare('SELECT id, seen_count, invalid_at FROM fact WHERE scope = ? AND subject = ? AND kind = ? AND value = ?')
+      .prepare('SELECT id, seen_count, invalid_at, state, resolved_at, superseded_by, last_seen, onset_at, event_at FROM fact WHERE scope = ? AND subject = ? AND kind = ? AND value = ?')
       .get(scope, subject, kind, value);
+    // 健康事件的发生时刻:调用方给了就用它(归档回扫不能拿"现在"冒充"当时"),
+    // 没给就按这次写入的时刻。数字之外一律不猜。
+    const eventTime = Number.isFinite(Number(eventAt)) && Number(eventAt) > 0 ? Number(eventAt) : now;
+
+    // ① **恢复/否认**(只有 health 会传):更新已有行,绝不新建"病好了"这种事实。
+    if (kind === 'health' && (state === 'resolved' || state === 'refuted')) {
+      if (!existing) return null;
+      // 幂等:同一状态再次到达不重复写时间,也不刷新 last_seen。
+      if (existing.invalid_at != null && existing.state === state) {
+        return { isNew: false, scope, subject, kind, value, id: existing.id, superseded: [], resolved: true };
+      }
+      this.#db
+        .prepare('UPDATE fact SET state = ?, resolved_at = ?, invalid_at = COALESCE(invalid_at, ?), superseded_by = NULL WHERE id = ?')
+        .run(state, now, now, existing.id);
+      return { isNew: false, scope, subject, kind, value, id: existing.id, superseded: [], resolved: true };
+    }
+
+    // ② 健康**自述仍在**:单独一条写路径 ——
+    //    · 不同症状**可以并存**(感冒不替代胃病;胃疼也不替代胃病);
+    //    · 旧行被恢复/否认过 → 本人再说一次就复活(只信 told/declared;mined 不许复活);
+    //    · 回扫旧消息(`eventAt` 早于已记的事件)→ 不刷新 last_seen/seen_count(不"复活"旧近况)。
+    if (kind === 'health') {
+      const activeState = state === 'active' || state === null ? 'active' : state;
+      const canRevive = authoritative;
+      if (!existing) {
+        const firstOnset = Number.isFinite(Number(onsetAt)) && Number(onsetAt) > 0 ? Number(onsetAt) : eventTime;
+        this.#db
+          .prepare(
+            `INSERT INTO fact (scope, subject, kind, value, detail, source, first_seen, last_seen, seen_count,
+                               state, onset_at, event_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+          )
+          .run(scope, subject, kind, value, detail, source, now, eventTime, activeState, firstOnset, eventTime);
+        const row = this.#db
+          .prepare('SELECT id FROM fact WHERE scope = ? AND subject = ? AND kind = ? AND value = ?')
+          .get(scope, subject, kind, value);
+        return { isNew: true, scope, subject, kind, value, id: row.id, superseded: [] };
+      }
+      // 旧行已恢复/否认,而这条是 mined(回扫猜的):不复活、也不刷新任何账。
+      if (!canRevive && (existing.state === 'resolved' || existing.state === 'refuted')) {
+        return { isNew: false, scope, subject, kind, value, id: existing.id, superseded: [], resolved: true };
+      }
+      const duplicate = source === 'mined' && eventTime <= Number(existing.event_at ?? existing.last_seen ?? 0);
+      const nextLastSeen = duplicate
+        ? Number(existing.last_seen)
+        : (source === 'mined' ? Math.max(Number(existing.last_seen) || 0, eventTime) : now);
+      const nextOnset = existing.onset_at != null
+        ? Number(existing.onset_at)
+        : (Number.isFinite(Number(onsetAt)) && Number(onsetAt) > 0 ? Number(onsetAt) : eventTime);
+      // 旧行被恢复/否认过:本人再说一次 → 复活(只信 told/declared)。
+      const revive = canRevive && (existing.state === 'resolved' || existing.state === 'refuted' || existing.invalid_at != null);
+      const nextState = revive ? 'active' : (existing.state ?? activeState);
+      this.#db
+        .prepare(
+          `UPDATE fact SET last_seen = ?, seen_count = ?, detail = COALESCE(detail, ?),
+             source = CASE WHEN source = 'told' THEN 'told' ELSE ? END,
+             state = ?, resolved_at = ?, invalid_at = ?, superseded_by = ?,
+             onset_at = ?, event_at = MAX(COALESCE(event_at, 0), ?)
+           WHERE id = ?`,
+        )
+        .run(
+          nextLastSeen,
+          duplicate ? Number(existing.seen_count) : Number(existing.seen_count) + 1,
+          detail,
+          source,
+          nextState,
+          revive ? null : (existing.resolved_at ?? null),
+          revive ? null : existing.invalid_at,
+          revive ? null : (existing.superseded_by ?? null),
+          revive ? eventTime : nextOnset,
+          eventTime,
+          existing.id,
+        );
+      return {
+        isNew: false, scope, subject, kind, value, id: existing.id, superseded: [], resolved: false,
+      };
+    }
+
+    // ③ 非健康维度:旧行为不变(含"改口就软失效旧说法"的冲突规则)。
     this.#db
       .prepare(
         `INSERT INTO fact (scope, subject, kind, value, detail, source, first_seen, last_seen, seen_count)
@@ -1620,6 +1727,7 @@ export class SqliteStateStore {  #db;
     // ② 冲突退役(只有 told/declared):同 scope+subject+kind、值不同、现在还成立的行
     //    → 软失效并指回本次行。⚠️ 在**同一个作用域+对象+维度**内判冲突 —— 别的群、
     //    别人的事实一条都不许动。
+    //    ⚠️ 健康**不走这里**:不同症状可以同时成立(胃病+感冒),整维互相替代是旧 bug。
     const superseded = [];
     if (authoritative) {
       const victims = this.#db
@@ -1659,7 +1767,7 @@ export class SqliteStateStore {  #db;
     }
     if (latestOnly) where.push('invalid_at IS NULL');
     const sql = `SELECT id, scope, subject, kind, value, detail, source, first_seen, last_seen, seen_count,
-                        superseded_by, merged_into, invalid_at
+                        superseded_by, merged_into, invalid_at, state, resolved_at, onset_at, event_at
                    FROM fact ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
                   ORDER BY last_seen DESC LIMIT ?`;
     return this.#db
@@ -1679,6 +1787,10 @@ export class SqliteStateStore {  #db;
         supersededBy: row.superseded_by,
         mergedInto: row.merged_into,
         invalidAt: row.invalid_at,
+        state: row.state ?? null,
+        resolvedAt: row.resolved_at ?? null,
+        onsetAt: row.onset_at ?? null,
+        eventAt: row.event_at ?? null,
       }));
   }
 
@@ -1719,6 +1831,11 @@ export class SqliteStateStore {  #db;
     // 分组键用 \u0000 分隔:scope/subject 里可能含冒号等字符,拼接键不能有歧义。
     const groups = new Map();
     for (const row of rows) {
+      // ⚠️ C 刀 A(2026-11-11):**健康不能按 kind 收敛** ——
+      //    「胃病」和「感冒」可以同时成立,旧逻辑却把"最近见过的那条"留下、
+      //    其余全部软失效(诊断现场:胃病被后来的胃疼顶掉)。
+      //    恢复/否认已由 `touchFact` 的 state 管,不需要这里再按时间猜。
+      if (row.kind === 'health') continue;
       const key = `${row.scope}\u0000${row.subject}\u0000${row.kind}`;
       const list = groups.get(key);
       if (list) list.push(row);

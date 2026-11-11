@@ -262,7 +262,10 @@ CREATE TABLE IF NOT EXISTS memory_block (
   read_only   INTEGER NOT NULL DEFAULT 0,
   model       TEXT,                 -- 哪个模型写的(审计)
   updated_at  INTEGER,
-  build_ms    INTEGER
+  build_ms    INTEGER,
+  -- C 刀(2026-11-11):派生内容的生成口径版本。老库补列时默认 0 = 旧口径内容,
+  -- 读路径不把它当"当前背景"注入(先停用、等下一次生成用新口径重建);新写入 = 1。
+  policy_v    INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS memory_block_history (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -357,7 +360,9 @@ CREATE TABLE IF NOT EXISTS insight (
   text         TEXT NOT NULL,     -- 一条洞察(第三人称事实陈述,≤120 字)
   derived_from TEXT NOT NULL,     -- JSON 数组:真实 note.id 列表(可审计的出处)
   model        TEXT,              -- 哪个模型写的(审计)
-  created_at   INTEGER NOT NULL
+  created_at   INTEGER NOT NULL,
+  -- C 刀(2026-11-11):老库补列时默认 0 = 旧口径洞察,不再注入但保留可审计;新写入 = 1。
+  policy_v     INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_insight_created ON insight(created_at DESC);
 `;
