@@ -225,9 +225,9 @@ const BASE_COMMANDS = [
     aliases: ['找本 <关键词>', '下载本子 <编号>'],
     scope: 'group',
     who: 'anyone',
-    effect: '按关键词搜索 JM 作品并由代码发回结果拼图与编号；下本按编号或上次搜索的序号下载，' +
-      '完成后回网页阅读链接。仅允许的群可用，默认关闭，需要部署者在同一台机器上自行运行 JM 边车服务。' +
-      '整条链路不经过模型。',
+    effect: '按关键词搜索 JM 作品：只搜到 1 本时立即下载并打包成整本 PDF 发到群（搜本/下本合并）；' +
+      '搜到多本时回「JM编号 + 作品标题」文字清单，按编号或序号用下本取整本 PDF。仅允许的群可用，' +
+      '默认关闭，需要部署者在同一台机器上自行运行 JM 边车服务。整条链路不经过模型。',
     source: 'src/jm-command.js · parseJmCommand / src/jm-service.js · handleJmCommand',
   },
   {

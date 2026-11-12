@@ -1,26 +1,31 @@
 /**
- * 「搜本/下本」的**服务层**（2026-11-12，代码层 JM 搜本 —— 整条链路不经过模型）。
+ * 「搜本/下本」的**服务层**（2026-11-12）。
+ *
+ * 2026-11-12 主人拍板的形态：**搜本/下本单本合并，搜到即下载；搜多本给清单**。
+ *
+ *   · 搜本 <关键词> [数量] → 边车搜索：
+ *       - 恰好 1 本：立刻「下载 → 生成整本 PDF → 把 PDF 文件发到群」（搜本+下本合并）；
+ *       - 多本：只回**文字清单**（序号 + JM 编号 + 作品标题），提示用「下本 <编号或序号>」；
+ *       - 0 本：固定话术。
+ *   · 下本 <编号> / 下本 <序号> → 下载该本 → 生成整本 PDF → 发 PDF 文件。
+ *   · 整条链路不经过模型；失败一律固定话术。
+ *
+ * 为什么不再发拼图/阅读链接：
+ *   · 2026-11-12 实测：QQ 把搜本结果拼图按 `40034006 消息内容违规` 拦了（图片出口有内容审核）；
+ *   · 阅读链接指向本机 `127.0.0.1:8088`，群友设备打不开；把阅读器挂公网又有泄露面；
+ *   · PDF 走 `file_type=4`（群文件，平台软/硬限 200MB），bot 的「聊天记录搬运」已经用同一套
+ *     `uploadFile` + `sendMedia` 发过 PDF；文件名用通用 `JM<id>.pdf`，不带作品标题。
  *
  * 分工（与搬图子系统同构）：
  *   · `src\jm-command.js` 纯解析群消息；
- *   · `scripts\jm-fetch-one.mjs` 子进程里调**本机 JM 边车服务**并下载拼图/封面（网络只在它里面）；
+ *   · `scripts\jm-fetch-one.mjs` 子进程里调**本机 JM 边车服务**（网络只在它里面发生）；
  *   · **本文件**串起来：群白名单 → 按群串行 → 冷却 → spawn 抓取器 → 上传/发送。
  *
- * 三条刻意的设计：
- *   ① **默认关闭、群白名单 fail closed**：没开 `QQBOT_JM` 时连解析都不进（`src\index.js` 的闸）；
- *      开了但群不在 `QQBOT_JM_GROUPS` 里（含空名单）→ 一句固定回话，**不 spawn 子进程**；
- *   ② **冷却只拦搜本、只记成功**（`QQBOT_JM_COOLDOWN_MS`，按群）：搜本要打边车和 JM 搜索，
- *      冷却防刷屏；**下本是用户看完编号后的下一步**，冷却拦它会把主流程掐死，所以下载只按群串行、
- *      不吃冷却。失败（服务没起/超时/没结果）不占冷却 —— 失败者再试一次是合法的；
- *   ③ **失败一律回固定话术、绝不调模型**：边车不在、超时、坏 JSON、下载失败都由 `DEFAULT_JM_LINES`
- *      兜住；只有成功时才有动态文案（多少本 / 阅读链接）。依赖全部可注入（`deps`），
- *      单测用假 `runFetch` / 假上传，不碰网络、不碰真 QQ、不写真实数据目录。
- *
- * 图片走**被动回复**（带 `msg_id` + `msg_seq`，回复用户那条指令消息）—— 与搬图同一条规则：
- * 不带 msg_id 的图是主动消息、吃逐群配额。文本回话接着图片的 seq 往下数。
- *
- * ⚠️ 边车地址、超时、单图大小上限都来自配置（`QQBOT_JM_*`）；下面的 `DEFAULT_*` 只是
- *    配置缺省时的兜底，不是第二份配置来源（唯一来源仍是 `src\config.js` 的 `jm` 段）。
+ * 刻意的边界：
+ *   ① 默认关闭、群白名单 fail closed（空名单 = 谁都不给，一次都不 spawn）；
+ *   ② 冷却只拦搜本、只记成功；下本是用户看完清单后的下一步，不拦；
+ *   ③ 失败只从固定句库挑话（含 PDF 没拿到/没发出去）；上传发送失败不假装成功；
+ *   ④ 依赖全部可注入（deps），单测用假 runFetch / 假上传，不碰网络、不碰真 QQ、不写真 data/。
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -39,10 +44,15 @@ const DEFAULT_COOLDOWN_MS = 30_000;
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
 
+/** QQ 群文件（file_type=4）硬限 200MB；边车自己的 PDF 目标体积更小，这里只做最后一道闸。 */
+const JM_PDF_HARD_MAX = 200 * 1024 * 1024;
+
+/** 多本清单里标题最多保留多少字（再长会撑爆消息，也不方便看）。 */
+const SEARCH_LIST_TITLE_CHARS = 60;
+
 /**
  * 固定回话的默认句库。**失败路径只从这里挑句子**（不调模型、不临时编）：
- * 句子里不提内部路径/API，只说用户能采取的动作。数组是为了以后能加变体，
- * 也方便测试钉"回话 ∈ 该 key 的成员"而不是钉死某一串字。
+ * 句子里不提内部路径/API，只说用户能采取的动作。
  */
 export const DEFAULT_JM_LINES = Object.freeze({
   /** 群不在白名单（含空名单）。 */
@@ -65,8 +75,10 @@ export const DEFAULT_JM_LINES = Object.freeze({
   noSearch: ['先搜本，再用「下本 序号」；也可以直接发「下本 <编号>」。'],
   /** 序号越界。 */
   ordinalMissing: ['这个序号不对：先搜本看编号，或直接发「下本 <编号>」。'],
-  /** 上传/发送图片失败（文本结果仍可能发出去）。 */
-  uploadFailed: ['结果有了，但图没发出去，稍后再试。'],
+  /** PDF 没拿到 / 上传或发送失败（含平台内容审核拦下）。 */
+  pdfFailed: ['文件没发出去，稍后再试。'],
+  /** PDF 超过平台上限。 */
+  pdfTooLarge: ['整本文件太大，发不了。'],
   /** 兜底异常。 */
   internal: ['JM 处理出错了，稍后再试。'],
 });
@@ -92,10 +104,13 @@ function queueStateFor(groupId) {
   return state;
 }
 
-/** 群白名单：数组/Set 都认；空名单 = 谁都不给（fail closed）。 */
+/**
+ * 群白名单判定。**空名单 = 谁都不给（fail closed）**，这是默认且不变的口径。
+ * 显式「全部群」只有一种写法：名单里含 `*`。
+ */
 function allowGroup(groups, groupId) {
-  if (groups instanceof Set) return groups.has(groupId);
-  if (Array.isArray(groups)) return groups.includes(groupId);
+  if (groups instanceof Set) return groups.has('*') || groups.has(groupId);
+  if (Array.isArray(groups)) return groups.includes('*') || groups.includes(groupId);
   return false;
 }
 
@@ -116,9 +131,6 @@ function lastJsonLine(stdout) {
 /**
  * 默认 `runFetch`：spawn `scripts\jm-fetch-one.mjs`，收 stdout/stderr，硬超时。
  * 形状与 `src\meitu-service.js` 的 `spawnMeituFetch` 保持一致（父进程只认 stdout 最后一行 JSON）。
- *
- * @param {{args: string[], env: Record<string,string>, timeoutMs?: number, cwd?: string}} options
- * @returns {Promise<{code: number|null, stdout: string, stderr: string, timedOut: boolean}>}
  */
 export function spawnJmFetch({ args, env, timeoutMs = DEFAULT_TIMEOUT_MS, cwd = ROOT_DIR }) {
   return new Promise((resolve) => {
@@ -167,31 +179,26 @@ export function spawnJmFetch({ args, env, timeoutMs = DEFAULT_TIMEOUT_MS, cwd = 
   });
 }
 
-/** 截断动态标题（QQ 文本要短；标题本身可能很长）。 */
-function shortTitle(title, max = 12) {
-  const text = String(title ?? '').replace(/\s+/gu, ' ').trim();
-  const chars = Array.from(text);
-  return chars.length > max ? `${chars.slice(0, max).join('')}…` : text;
-}
-
 /**
- * 搜本成功后的动态文案（≤50 字为主，编号供「下本 序号」用）。
+ * 多本搜索结果 → 群里的文字清单：序号 + JM 编号 + 作品标题。
+ * 清单就是「下本 <编号或序号>」的输入；不发图、不发链接。
+ *
+ * @param {Array<{id:string|number, title?:string}>} results
  * @returns {string}
  */
-export function buildSearchText(count) {
-  const n = Number.isSafeInteger(count) && count > 0 ? count : 0;
-  if (n === 1) return '搜到1本，编号看图；回复 下本1';
-  return `搜到${n}本，编号看图；回复 下本1~${n}`;
-}
-
-/**
- * 下本成功后的动态文案：短句 + 网页阅读链接（链接由边车生成，长度不受控）。
- * @returns {string}
- */
-export function buildDownloadText(title, viewerUrl) {
-  const name = shortTitle(title);
-  const url = String(viewerUrl ?? '').trim();
-  return name ? `已下好《${name}》\n${url}` : `已下好，网页看图\n${url}`;
+export function buildSearchListText(results) {
+  const list = Array.isArray(results) ? results : [];
+  const lines = list.map((item, index) => {
+    const id = String(item?.id ?? '').trim();
+    const rawTitle = String(item?.title ?? '').replace(/\s+/gu, ' ').trim();
+    const chars = Array.from(rawTitle);
+    const title = chars.length > SEARCH_LIST_TITLE_CHARS
+      ? `${chars.slice(0, SEARCH_LIST_TITLE_CHARS).join('')}…`
+      : rawTitle;
+    return `${index + 1}. JM${id}${title ? ` ${title}` : ''}`;
+  });
+  const head = `搜到${list.length}本，回复 下本 <编号或序号> 打包整本 PDF：`;
+  return `${head}\n${lines.join('\n')}`;
 }
 
 /**
@@ -220,7 +227,7 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
   const rawReply = typeof deps.reply === 'function'
     ? deps.reply
     : async (text) => { log.warn(`JM：没有注入 reply，这句回话被丢弃：${text}`); };
-  /** 被动槽位记账：文本回话接着图片的 msg_seq 往下数（与搬图同一口径）。 */
+  /** 被动槽位记账：文本/文件回话接着彼此的 msg_seq 往下数（与搬图同一口径）。 */
   const passiveId = message?.messageId ?? null;
   let seq = 0;
   const reply = async (text) => {
@@ -270,16 +277,18 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
 
   const state = queueStateFor(groupId);
   const job = state.tail.then(async () => {
+    /** 本次命令一个临时目录（搜索结果图、整本 PDF 都只活这一次）；无论成败都清掉。 */
+    let tempDir = '';
     try {
-      // ② 冷却只在**搜本**上拦、只在**成功**时记（见文件头 ②）。
-      const cooldownMs = Number.isFinite(Number(jm.cooldownMs)) ? Math.max(0, Number(jm.cooldownMs)) : DEFAULT_COOLDOWN_MS;
-      const startedAt = Number(now());
-      if (parsed.action === 'search' && state.lastSearchAt !== null
-        && startedAt - state.lastSearchAt < cooldownMs) {
-        const wait = Math.ceil((cooldownMs - (startedAt - state.lastSearchAt)) / 1000);
-        log.info(`JM：群 ${groupId.slice(0, 8)}… 冷却中（还要 ${wait}s）`);
-        await reply(pickLine('cooldown'));
-        return { ok: false, reason: 'cooldown' };
+      try {
+        const root = String(jm.root ?? '').trim();
+        if (!root) throw new Error('没有配置 QQBOT_JM_ROOT，无法落临时文件');
+        fs.mkdirSync(path.resolve(root), { recursive: true });
+        tempDir = fs.mkdtempSync(path.join(path.resolve(root), 'jm-'));
+      } catch (err) {
+        log.error(`JM：建临时目录失败：${err?.message ?? err}`);
+        await reply(pickLine('internal'));
+        return { ok: false, reason: 'no_root', action: parsed.action };
       }
 
       /** spawn 一次抓取器并解析最后一行 JSON。 */
@@ -302,7 +311,6 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
 
       /** 抓取失败 → 按 reason 挑固定话术（边车不可用/超时/子进程输出坏了/其它）。 */
       const replyFetchFailure = async (payload, fetched, { download = false } = {}) => {
-        // 没有可读 JSON 时区分两种现场：子进程根本没输出（多半没起来/被杀）vs 输出坏了。
         const fallbackReason = fetched?.timedOut
           ? 'timeout'
           : (String(fetched?.stdout ?? '').trim() ? 'bad_payload' : 'service_down');
@@ -316,95 +324,136 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
         return { ok: false, reason, action: download ? 'download' : 'search' };
       };
 
-      if (parsed.action === 'search') {
-        const count = Math.min(Number.isSafeInteger(parsed.count) && parsed.count > 0 ? parsed.count : maxCount, maxCount);
-        // 每次搜索一个临时目录（拼图/封面只能从本地文件上传）；无论成败都清掉。
-        const root = String(jm.root ?? '').trim();
-        let tempDir = '';
-        try {
-          if (!root) throw new Error('没有配置 QQBOT_JM_ROOT，无法落临时图片');
-          fs.mkdirSync(path.resolve(root), { recursive: true });
-          tempDir = fs.mkdtempSync(path.join(path.resolve(root), 'search-'));
-        } catch (err) {
-          log.error(`JM：建临时目录失败：${err?.message ?? err}`);
+      /**
+       * 下载一本 → 边车生成/缓存整本 PDF → 上传成 QQ 群文件 → 发文件 + 一句短标题。
+       * 返回 {ok:true, title, bytes} 或 {ok:false, reason}（失败时固定话术已经回过）。
+       */
+      const sendAlbumPdf = async (albumId, { titleHint = '' } = {}) => {
+        if (!uploadFile || !sendMedia) {
+          log.error('JM：uploadFile/sendMedia 没有注入（src/index.js 应传入 api 的出口）');
           await reply(pickLine('internal'));
-          return { ok: false, reason: 'no_root', action: 'search' };
+          return { ok: false, reason: 'no_sender' };
         }
+        const download = await callFetch([
+          '--op', 'download',
+          '--id', albumId,
+          '--api', apiBase,
+          '--timeout', String(timeoutMs),
+        ]);
+        if (!download.payload || download.payload.ok !== true) {
+          return await replyFetchFailure(download.payload, download.fetched, { download: true });
+        }
+        const title = String(download.payload.title ?? titleHint ?? '');
+
+        const pdf = await callFetch([
+          '--op', 'pdf',
+          '--id', albumId,
+          '--api', apiBase,
+          '--out-dir', tempDir,
+          '--timeout', String(timeoutMs),
+        ]);
+        if (!pdf.payload || pdf.payload.ok !== true) {
+          log.warn(`JM：整本 PDF 没拿到（id=${albumId}）：${pdf.payload?.reason ?? 'unknown'} ${pdf.payload?.detail ?? ''}`);
+          await reply(pickLine('pdfFailed'));
+          return { ok: false, reason: 'pdf_failed' };
+        }
+        const pdfPath = String(pdf.payload.path ?? '');
+        let buffer;
         try {
-          const { fetched, payload } = await callFetch([
-            '--op', 'search',
-            '--q', parsed.keyword,
-            '--limit', String(count),
-            '--api', apiBase,
-            '--out-dir', tempDir,
-            '--timeout', String(timeoutMs),
-            '--max-bytes', String(maxBytes),
-          ]);
-          if (!payload || payload.ok !== true) return await replyFetchFailure(payload, fetched);
-
-          const results = Array.isArray(payload.results)
-            ? payload.results.filter((item) => item && String(item.id ?? '').trim() !== '')
-            : [];
-          // 记住最近一次搜索的 rank→id 映射（「下本 序号」用）；失败/空结果不覆盖上一次。
-          if (results.length > 0) {
-            state.lastResults = results.map((item, index) => ({
-              rank: Number(item.rank) || index + 1,
-              id: String(item.id),
-              title: String(item.title ?? ''),
-            }));
+          const stat = await fs.promises.stat(pdfPath);
+          if (stat.size > JM_PDF_HARD_MAX) {
+            log.warn(`JM：PDF ${stat.size} 字节超过平台上限 ${JM_PDF_HARD_MAX}`);
+            await reply(pickLine('pdfTooLarge'));
+            return { ok: false, reason: 'pdf_too_large' };
           }
-          if (results.length === 0) {
-            log.info('JM：搜索成功但 0 本');
-            await reply(pickLine('noResult'));
-            return { ok: false, reason: 'no_result', action: 'search' };
-          }
-
-          // ③ 先发图（拼图优先，退到第一张封面），再发短文本。
-          const imagePath = String(payload.previewPath || payload.covers?.[0]?.path || '').trim();
-          let sent = 0;
-          if (imagePath) {
-            try {
-              const stat = await fs.promises.stat(imagePath);
-              if (stat.size > maxBytes) {
-                log.warn(`JM：结果图 ${stat.size} 字节超过上限 ${maxBytes}，不发图`);
-              } else if (!uploadFile || !sendMedia) {
-                log.error('JM：uploadFile/sendMedia 没有注入（src/index.js 应传入 api 的出口）');
-              } else {
-                const buffer = await fs.promises.readFile(imagePath);
-                const fileInfo = await uploadFile({
-                  scene: 'group',
-                  openid: groupId,
-                  fileName: path.basename(imagePath),
-                  buffer,
-                  fileType: 1,
-                });
-                seq += 1;
-                const usePassive = passiveId !== null && seq <= PASSIVE_SEQ_MAX;
-                await sendMedia(usePassive
-                  ? { scene: 'group', openid: groupId, fileInfo, msgId: passiveId, msgSeq: seq }
-                  : { scene: 'group', openid: groupId, fileInfo });
-                sent += 1;
-                log.info(`JM：已发结果图（${Math.round(buffer.length / 1024)}KB，${path.basename(imagePath)}）`);
-              }
-            } catch (err) {
-              // 图发不出去不算搜本失败：文本结果仍要送到（用户至少知道编号）。
-              log.warn(`JM：结果图没发出去（${imagePath}）：${err?.message ?? err}`);
-            }
-          }
-          if (!imagePath && sent === 0) log.warn('JM：边车没给可用的结果图，只发文本');
-          await reply(buildSearchText(results.length));
-          state.lastSearchAt = startedAt;
-          return { ok: true, reason: 'ok', sent, action: 'search' };
-        } finally {
-          // 临时图片只服务这一次发送；发完/失败都清掉（删不掉只 warn）。
-          if (tempDir) {
-            try {
-              fs.rmSync(tempDir, { recursive: true, force: true });
-            } catch (err) {
-              log.warn(`JM：临时目录没删掉（${tempDir}）：${err?.message ?? err}`);
-            }
-          }
+          buffer = await fs.promises.readFile(pdfPath);
+        } catch (err) {
+          log.warn(`JM：读 PDF 失败（${pdfPath}）：${err?.message ?? err}`);
+          await reply(pickLine('pdfFailed'));
+          return { ok: false, reason: 'pdf_read_failed' };
         }
+
+        try {
+          const fileInfo = await uploadFile({
+            scene: 'group',
+            openid: groupId,
+            // 通用文件名：不带作品标题（平台审出站内容，标题不必进文件名）。
+            fileName: `JM${albumId}.pdf`,
+            buffer,
+            fileType: 4,
+          });
+          seq += 1;
+          const usePassive = passiveId !== null && seq <= PASSIVE_SEQ_MAX;
+          await sendMedia(usePassive
+            ? { scene: 'group', openid: groupId, fileInfo, msgId: passiveId, msgSeq: seq }
+            : { scene: 'group', openid: groupId, fileInfo });
+          log.info(`JM：已发整本 PDF（JM${albumId}.pdf，${Math.round(buffer.length / 1024)}KB）`);
+        } catch (err) {
+          // 含平台内容审核（40034006）与按天容量上限（40093002）等 —— 都收口成固定话术。
+          log.warn(`JM：PDF 没发出去（id=${albumId}）：${err?.message ?? err}`);
+          await reply(pickLine('pdfFailed'));
+          return { ok: false, reason: 'pdf_send_failed' };
+        }
+
+        // 成功时不补任何说明：结果就是文件本身；只有失败才回固定话术。
+        // （主人 2026-11-12：「正常有结果的时候不用在给出结果之后接一句已打包…」）
+        return { ok: true, title, bytes: buffer.length };
+      };
+
+      if (parsed.action === 'search') {
+        // ② 冷却只在**搜本**上拦、只在**成功**时记（见文件头 ②）。
+        const cooldownMs = Number.isFinite(Number(jm.cooldownMs)) ? Math.max(0, Number(jm.cooldownMs)) : DEFAULT_COOLDOWN_MS;
+        const startedAt = Number(now());
+        if (state.lastSearchAt !== null && startedAt - state.lastSearchAt < cooldownMs) {
+          const wait = Math.ceil((cooldownMs - (startedAt - state.lastSearchAt)) / 1000);
+          log.info(`JM：群 ${groupId.slice(0, 8)}… 冷却中（还要 ${wait}s）`);
+          await reply(pickLine('cooldown'));
+          return { ok: false, reason: 'cooldown' };
+        }
+
+        const count = Math.min(Number.isSafeInteger(parsed.count) && parsed.count > 0 ? parsed.count : maxCount, maxCount);
+        const { fetched, payload } = await callFetch([
+          '--op', 'search',
+          '--q', parsed.keyword,
+          '--limit', String(count),
+          '--api', apiBase,
+          '--out-dir', tempDir,
+          '--timeout', String(timeoutMs),
+          '--max-bytes', String(maxBytes),
+        ]);
+        if (!payload || payload.ok !== true) return await replyFetchFailure(payload, fetched);
+
+        const results = Array.isArray(payload.results)
+          ? payload.results.filter((item) => item && String(item.id ?? '').trim() !== '')
+          : [];
+        // 记住最近一次搜索的 rank→id 映射（「下本 序号」用）；失败/空结果不覆盖上一次。
+        if (results.length > 0) {
+          state.lastResults = results.map((item, index) => ({
+            rank: Number(item.rank) || index + 1,
+            id: String(item.id),
+            title: String(item.title ?? ''),
+          }));
+        }
+        if (results.length === 0) {
+          log.info('JM：搜索成功但 0 本');
+          await reply(pickLine('noResult'));
+          return { ok: false, reason: 'no_result', action: 'search' };
+        }
+
+        // ③ 单本：搜本+下本合并 —— 立刻下载、打包 PDF、发文件。
+        if (results.length === 1) {
+          const only = state.lastResults[0];
+          await reply('搜到1本，正在下载打包…');
+          const sent = await sendAlbumPdf(only.id, { titleHint: only.title });
+          if (sent.ok !== true) return { ok: false, reason: sent.reason ?? 'pdf_failed', action: 'search' };
+          state.lastSearchAt = startedAt;
+          return { ok: true, reason: 'ok', sent: 1, action: 'search' };
+        }
+
+        // ④ 多本：只回文字清单（JM 编号 + 作品标题 + 序号），不发图、不发链接。
+        await reply(buildSearchListText(results));
+        state.lastSearchAt = startedAt;
+        return { ok: true, reason: 'ok', sent: 0, action: 'search' };
       }
 
       // —— 下本 ——
@@ -421,28 +470,22 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
         log.info(`JM：序号 ${ordinal} → 编号 ${id}（${entry.title || '无标题'}）`);
       }
 
-      const { fetched, payload } = await callFetch([
-        '--op', 'download',
-        '--id', id,
-        '--api', apiBase,
-        '--timeout', String(timeoutMs),
-      ]);
-      if (!payload || payload.ok !== true) return await replyFetchFailure(payload, fetched, { download: true });
-
-      const viewerUrl = String(payload.viewerUrl ?? '').trim();
-      if (!viewerUrl) {
-        // 契约要求 done 时带 viewer_url；没有就**不假装成功**（用户要的是能看的链接）。
-        log.warn(`JM：下载完成但没有 viewer_url（id=${id}）`);
-        await reply(pickLine('downloadFailed'));
-        return { ok: false, reason: 'no_viewer_url', action: 'download' };
-      }
-      // 序号映射保留：同一批可以接着下别的（再下一次要等边车队列，不吃冷却）。
-      await reply(buildDownloadText(payload.title, viewerUrl));
-      return { ok: true, reason: 'ok', sent: 0, action: 'download' };
+      await reply(`正在下载打包 JM${id}…`);
+      const sent = await sendAlbumPdf(id);
+      if (sent.ok !== true) return { ok: false, reason: sent.reason ?? 'download_failed', action: 'download' };
+      return { ok: true, reason: 'ok', sent: 1, action: 'download' };
     } catch (err) {
       log.error('JM：处理失败', err);
       await reply(pickLine('internal'));
       return { ok: false, reason: 'internal', action: parsed?.action };
+    } finally {
+      if (tempDir) {
+        try {
+          fs.rmSync(tempDir, { recursive: true, force: true });
+        } catch (err) {
+          log.warn(`JM：临时目录没删掉（${tempDir}）：${err?.message ?? err}`);
+        }
+      }
     }
   });
 

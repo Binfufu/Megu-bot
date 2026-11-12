@@ -129,6 +129,22 @@ def _attempts(config) -> list[tuple[int, int]]:
                             int(getattr(config, "pdf_quality", 80)))
 
 
+def _width_for_page_count(config, page_count: int) -> int:
+    """页数多时把起步宽度降一档：16GB 内存机器上，1000 页 × 1000px 会吃掉几个 GB。
+
+    质量优先的顺序不变（仍会在超过 max_bytes 时按 850/75 → 720/65 → 640/60 降级）；
+    这里只是在"页数很多"的现场先把峰值内存压下来，避免整本打包失败。
+    """
+    width = int(getattr(config, "pdf_width", 1000))
+    if page_count > 800:
+        return min(width, 640)
+    if page_count > 500:
+        return min(width, 800)
+    if page_count > 300:
+        return min(width, 850)
+    return width
+
+
 def build_album_pdf(album_dir: str | Path, out_path: str | Path, *, title: str = "jm-service",
                     width: int = 1000, quality: int = 80, max_pages: int = 300,
                     max_bytes: int = 20 * 1024 * 1024, logger: logging.Logger | None = None,
@@ -179,11 +195,18 @@ def build_album_pdf(album_dir: str | Path, out_path: str | Path, *, title: str =
                 "quality": jpeg_quality,
                 "elapsed_ms": int((time.time() - started) * 1000),
             }
-            loaded_pages = pages
             if size <= max_bytes or is_last:
+                loaded_pages = pages
                 break
             log.info("PDF %.1fMB 超过目标 %.1fMB，降级重试 width=%s quality=%s",
                      size / 1048576, max_bytes / 1048576, page_width, jpeg_quality)
+            # 降级前先释放这一轮页面：页数大时（16GB 级机器）不释放会让峰值内存翻倍。
+            for page in pages:
+                try:
+                    page.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            pages = []
         os.replace(temp_path, out_path)
     finally:
         try:
@@ -212,6 +235,11 @@ def ensure_album_pdf(config, album_id: str, album_dir: str | Path, title: str,
     images = list_album_images(album_dir)
     if not images:
         raise PdfError("pdf_no_images", "漫画目录中没有可用的图片")
+    width = _width_for_page_count(config, len(images))
+    quality = int(getattr(config, "pdf_quality", 80))
+    if logger is not None and width != int(getattr(config, "pdf_width", 1000)):
+        logger.info("PDF 页数 %d，起步宽度自适应为 %d（原 %s）",
+                    len(images), width, getattr(config, "pdf_width", 1000))
     lock = _lock_for(album_id)
     with lock:
         if not force and is_pdf_fresh(out_path, images):
@@ -229,12 +257,12 @@ def ensure_album_pdf(config, album_id: str, album_dir: str | Path, title: str,
             album_dir,
             out_path,
             title=f"JM{album_id}",
-            width=int(getattr(config, "pdf_width", 1000)),
-            quality=int(getattr(config, "pdf_quality", 80)),
+            width=width,
+            quality=quality,
             max_pages=int(getattr(config, "pdf_max_pages", 300)),
             max_bytes=int(getattr(config, "pdf_max_bytes", 20 * 1024 * 1024)),
             logger=logger,
-            attempts=_attempts(config),
+            attempts=default_attempts(width, quality),
         )
 
 

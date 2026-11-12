@@ -79,8 +79,9 @@ class Config:
         pdf = self.raw.setdefault("pdf", {})
         self.pdf_width = max(200, min(3000, int(pdf.get("width") or 1000)))
         self.pdf_quality = max(20, min(95, int(pdf.get("quality") or 80)))
-        self.pdf_max_pages = max(1, min(1000, int(pdf.get("max_pages") or 100)))
-        self.pdf_max_bytes = max(256 * 1024, int(pdf.get("max_bytes") or 15 * 1024 * 1024))
+        # 兜底值必须与 DEFAULT_CONFIG 一致（300 / 20MB）：配置写 0/null 时不能静默变成 100 页/15MB。
+        self.pdf_max_pages = max(1, min(1000, int(pdf.get("max_pages") or 300)))
+        self.pdf_max_bytes = max(256 * 1024, int(pdf.get("max_bytes") or 20 * 1024 * 1024))
 
         self.viewer_enabled = bool(viewer.get("enabled", True))
         self.viewer_host = str(viewer.get("host") or "0.0.0.0")

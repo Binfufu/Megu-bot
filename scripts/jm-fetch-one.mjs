@@ -19,9 +19,11 @@
  *       --api http://127.0.0.1:8790 --out-dir %TEMP%\jm-search --timeout 120000
  *     node scripts\jm-fetch-one.mjs --op download --id 1490076 \
  *       --api http://127.0.0.1:8790 --timeout 120000
+ *     node scripts\jm-fetch-one.mjs --op pdf --id 1490076 \
+ *       --api http://127.0.0.1:8790 --out-dir %TEMP%\jm-pdf --timeout 180000
  *
  * 参数：
- *   --op search|download|health  必填（三个操作各自对应边车的 /search、/download+/jobs、/health）
+ *   --op search|download|pdf|health  必填（分别对应边车的 /search、/download+/jobs、/pdf、/health）
  *   --q <关键词>                 search 必填，1..60 字符
  *   --limit N                    search 用，1..5（默认 5；边车契约允许到 10，QQ 侧只给 5）
  *   --id <编号>                  download 必填，纯数字（JM 作品 id）
@@ -33,12 +35,14 @@
  * 成功/失败都输出 JSON（退出码恒 0，调用方只认那条 JSON；可读的失败比"崩了"好排查）：
  *
  *   health   → {"ok":true,"op":"health","service":"jm-service","version":"1.0.0",
- *               "viewerBase":"http://192.168.1.5:8080","downloadedAlbums":12}
+ *               "viewerBase":"http://127.0.0.1:8088","downloadedAlbums":12}
  *   search   → {"ok":true,"op":"search","query":"全彩","total":10000,"cached":false,
  *               "text":"1.…","results":[{rank,id,title,authors,tags,pageCount}],
  *               "previewPath":"…\\preview.jpg","previewUrl":"…","covers":[{rank,id,path}]}
  *   download → {"ok":true,"op":"download","id":"1490076","status":"done",
  *               "title":"…","viewerUrl":"http://…/jm_view?path=…","dir":"…"}
+ *   pdf      → {"ok":true,"op":"pdf","id":"1490076","path":"…\\JM1490076.pdf","bytes":123456}
+ *              （先 POST /download 等到 done 再调；边车按需生成并缓存整本 PDF）
  *   失败     → {"ok":false,"op":"…","reason":"service_down|timeout|bad_json|…",
  *               "detail":"人话"}
  *
@@ -55,6 +59,7 @@ import { fileURLToPath } from 'node:url';
 const DEFAULT_API = 'http://127.0.0.1:8790'; // 边车默认端口；部署可改 --api / QQBOT_JM_API
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
+const DEFAULT_PDF_MAX_BYTES = 200 * 1024 * 1024; // QQ file_type=4 的硬限就是 200MB
 const DEFAULT_LIMIT = 5;
 const MAX_LIMIT = 5; // QQ 侧一次最多看 5 本（边车契约允许 10，这里按群聊阅读量收紧）
 const MAX_LIMIT_SERVER = 10;
@@ -113,6 +118,7 @@ export function parseJmArgs(argv) {
     outDir: '',
     timeoutMs: DEFAULT_TIMEOUT_MS,
     maxBytes: DEFAULT_MAX_BYTES,
+    pdfMaxBytes: DEFAULT_PDF_MAX_BYTES,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = String(argv[i] ?? '');
@@ -129,6 +135,7 @@ export function parseJmArgs(argv) {
       case '--out-dir': case '--out': options.outDir = next().trim(); break;
       case '--timeout': options.timeoutMs = Number.parseInt(next(), 10); break;
       case '--max-bytes': options.maxBytes = Number.parseInt(next(), 10); break;
+      case '--pdf-max-bytes': options.pdfMaxBytes = Number.parseInt(next(), 10); break;
       default:
         log(`忽略不认识的参数:${arg}`);
     }
@@ -235,6 +242,59 @@ async function downloadImage({ url, targetBase, maxBytes, timeoutMs, fetchImpl }
     return fail('io_error', `写图片失败:${err?.message ?? err}`);
   }
   log(`已下载:${target}(${Math.round(buffer.length / 1024)}KB)`);
+  return { ok: true, path: target, bytes: buffer.length };
+}
+
+/**
+ * 拉整本 PDF 到本地文件（`GET /pdf/<id>`）。先写 `.part` 再 rename；
+ * 边车按需生成/缓存 PDF，所以这里用**整体预算**而不是 15s 的单请求上限。
+ *
+ * @returns {Promise<{ok:true, path:string, bytes:number} | {ok:false, reason:string, detail:string}>}
+ */
+async function fetchPdfToFile({ url, dir, id, maxBytes, timeoutMs, fetchImpl }) {
+  let response;
+  try {
+    response = await fetchImpl(url, { signal: AbortSignal.timeout(Math.max(1, timeoutMs)) });
+  } catch (err) {
+    const name = String(err?.name ?? '');
+    if (name === 'TimeoutError' || name === 'AbortError') return fail('timeout', `PDF 请求超时:${url}`);
+    return fail('service_down', `PDF 请求失败:${err?.message ?? err}`);
+  }
+  if (!response.ok) {
+    let detail = `HTTP ${response.status} ${url}`;
+    try {
+      const text = await response.text();
+      const data = JSON.parse(text);
+      if (data?.message) detail = `${data.error ?? 'http_error'}: ${data.message}`;
+    } catch { /* 非 JSON 错误体就用 HTTP 状态 */ }
+    return fail('http_error', detail);
+  }
+  const chunks = [];
+  let total = 0;
+  try {
+    for await (const chunk of response.body) {
+      total += chunk.length;
+      if (total > maxBytes) return fail('too_large', `PDF 超过上限 ${maxBytes} 字节`);
+      chunks.push(chunk);
+    }
+  } catch (err) {
+    return fail('service_down', `读 PDF 流失败:${err?.message ?? err}`);
+  }
+  const buffer = Buffer.concat(chunks);
+  if (buffer.length < 5 || buffer.subarray(0, 5).toString('latin1') !== '%PDF-') {
+    return fail('bad_pdf', '边车返回的不是 PDF（可能被拦截或返回了错误页）');
+  }
+  const target = path.join(dir, `JM${id}.pdf`);
+  const part = `${target}.part`;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(part, buffer);
+    fs.renameSync(part, target);
+  } catch (err) {
+    try { fs.rmSync(part, { force: true }); } catch { /* 清理失败不改变结果 */ }
+    return fail('io_error', `写 PDF 失败:${err?.message ?? err}`);
+  }
+  log(`PDF 已落盘:${target}(${Math.round(buffer.length / 1024)}KB)`);
   return { ok: true, path: target, bytes: buffer.length };
 }
 
@@ -370,6 +430,29 @@ export async function runJmFetch(options, deps = {}) {
       previewUrl,
       covers,
     };
+  }
+
+  if (op === 'pdf') {
+    const id = String(options?.id ?? '').trim();
+    if (!/^\d{1,12}$/u.test(id)) return { ...fail('bad_args', 'pdf 缺少合法的 --id'), op };
+    const outDir = String(options?.outDir ?? '').trim();
+    if (!outDir) return { ...fail('bad_args', 'pdf 缺少 --out-dir'), op };
+    const dir = path.resolve(outDir);
+    const maxBytes = Number.isSafeInteger(options?.pdfMaxBytes) && options.pdfMaxBytes > 0
+      ? options.pdfMaxBytes : DEFAULT_PDF_MAX_BYTES;
+    // PDF 可能当场生成（几秒到几十秒），不吃 15s 的单请求上限，只受整体预算约束。
+    const pdfTimeout = Math.max(1, Math.min(timeoutMs, deadline - now()));
+    const saved = await fetchPdfToFile({
+      url: apiUrl(apiBase, `/pdf/${encodeURIComponent(id)}`),
+      dir,
+      id,
+      maxBytes,
+      timeoutMs: pdfTimeout,
+      fetchImpl,
+    });
+    if (!saved.ok) return { ...saved, op };
+    emit(`PDF 就绪:${saved.path}(${Math.round(saved.bytes / 1024)}KB)`);
+    return { ok: true, op, id, path: saved.path, bytes: saved.bytes };
   }
 
   if (op === 'download') {

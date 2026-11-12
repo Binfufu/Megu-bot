@@ -9114,6 +9114,18 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
     : null;
   if (feedNews) log.info('异界新闻：开启（只读盯梢收件箱，网站世界地图页显示最近若干条）');
 
+  // JM 搜本/下本（2026-11-12）：默认关闭。横幅把「哪些群能用」说清楚 ——
+  // 尤其是 `QQBOT_JM_GROUPS=*`（全部群）这种显式放宽，必须能在启动日志里一眼看见。
+  if (config.jm?.enabled) {
+    const jmGroups = Array.isArray(config.jm.groups) ? config.jm.groups : [];
+    const jmScope = jmGroups.includes('*')
+      ? '全部群（QQBOT_JM_GROUPS=*）'
+      : `${jmGroups.length} 个群白名单`;
+    log.info(`JM 搜本：开启（${jmScope}；边车 ${config.jm.api ?? 'http://127.0.0.1:8790'}；整链不经过模型）`);
+  } else {
+    log.debug('JM 搜本：关闭（QQBOT_JM=false）');
+  }
+
   /**
    * **盯梢新消息 → QQ 私聊推送**(2026-11-10;主人拍板:推给爱丽丝的私聊、只推 new 新条目
    * + OpenRouter 价格大幅变动)。
