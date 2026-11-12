@@ -10,6 +10,7 @@
 - **只含 Node 客户端，不含 Python 边车**：仓库里新增纯解析（`src/jm-command.js`）、服务层（`src/jm-service.js`）与唯一网络边界 CLI（`scripts/jm-fetch-one.mjs`，用 Node 内置 `fetch` 调边车 HTTP API）。边车需要部署者自行部署，API 契约与部署说明见 [docs/44-JM搜本.md](<docs/44-JM搜本.md>)。公开集不附带任何 JM 内容、图片、凭据或真实数据；内容、图片来源与平台条款由部署者自行负责。
 - **配置**：新增 `QQBOT_JM`、`QQBOT_JM_GROUPS`、`QQBOT_JM_API`（模板默认 `http://127.0.0.1:8790`，可改）、`QQBOT_JM_MAX`、`QQBOT_JM_COOLDOWN_MS`、`QQBOT_JM_ROOT`、`QQBOT_JM_MAX_BYTES`、`QQBOT_JM_TIMEOUT_MS`。默认关闭、启动不联网；群白名单空 = 全部拒绝（fail closed）。冷却只拦搜本且只在成功时记账，下本不吃冷却。
 - **文档与命令表**：新增 `docs/44-JM搜本.md`；README 增加可选功能小节；`src/commands.js` 登记 JM 指令并按生成流程重跑 `node scripts/command-index.js --write`；`docs/37` 的子系统表与网络边界补上 JM 子进程。
+- **可选边车工具 `tools/jm-sidecar/`**：随仓库提供一份 Python 边车实现（搜索/下载/拼图/PDF/网页阅读守护），带部署说明、systemd 示例、启动脚本与离线自测；上游 JMComic-Crawler-Python / jm-view-server 不随仓库分发，需部署者自行克隆。该工具是可选部署单元，不参与 bot 运行时、不被 Node 代码 import。
 
 ### 判据
 
