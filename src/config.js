@@ -814,6 +814,37 @@ function buildRuntimeConfig({ rootDir, envFile, loadedEnvFile }) {
           gallery: asBool('QQBOT_GALLERY', true),
         };
       })(),
+      /**
+       * **代码层 JM 搜本/下本**（2026-11-12）：「搜本 <关键词>」「下本 <编号/序号>」——
+       * 整条链路不经过模型，网络只在 `scripts\jm-fetch-one.mjs` 子进程里发生，
+       * 由部署者自行运行的 **JM 边车服务**（默认 `http://127.0.0.1:8790`）提供能力。
+       *
+       * 字段：
+       *   · `enabled`    总开关（默认 **false**：没配的机器人/群不会突然开始搜本）；
+       *   · `groups`     群白名单（**空 = 谁都不给**，fail closed）；群 openid 逗号分隔；
+       *   · `api`        边车地址（端口以边车部署为准，默认 8790，可改）；
+       *   · `max`        一次最多搜几本（超出夹到它，默认 5）；
+       *   · `cooldownMs` 同群两次**搜本**的最小间隔（下本不吃冷却）；
+       *   · `root`       搜本结果图（拼图/封面）的临时落盘根目录，发完即清；
+       *   · `maxBytes`   单张结果图上限；
+       *   · `timeoutMs`  一次搜索/下载的总预算（也是子进程硬超时的基准）。
+       *
+       * ⚠️ **数字全是【暂定】**（2026-11-12），部署者可调；默认关闭、启动不联网。
+       */
+      jm: {
+        enabled: asBool('QQBOT_JM', false),
+        groups: (raw('QQBOT_JM_GROUPS') ?? '')
+          .split(',')
+          .map((entry) => entry.trim())
+          .filter(Boolean),
+        api: (raw('QQBOT_JM_API') ?? 'http://127.0.0.1:8790').trim().replace(/\/+$/u, '')
+          || 'http://127.0.0.1:8790',
+        max: asInt('QQBOT_JM_MAX', 5), // 【暂定】
+        cooldownMs: asNonNegativeInt('QQBOT_JM_COOLDOWN_MS', 30_000), // 【暂定】只拦搜本
+        root: path.resolve(rootDir, raw('QQBOT_JM_ROOT') ?? 'data/demo/jm-images'),
+        maxBytes: asInt('QQBOT_JM_MAX_BYTES', 10_485_760), // 【暂定】10MB
+        timeoutMs: asInt('QQBOT_JM_TIMEOUT_MS', 120_000), // 【暂定】120s
+      },
       policy: {
         // 主题在 policy 之外先算一次:身体口径要**跟情绪谱对齐**(见 parseBodyTheme),
         // 两个都由 QQBOT_MOOD_THEME 决定,只是身体那项可以显式写出来做二次确认。

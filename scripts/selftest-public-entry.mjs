@@ -115,6 +115,8 @@ try {
       'src/chat-input-projection.js', 'src/turn-policy.js',
       'src/local-gameplay-content.js', 'src/local-mood-body-content.js', 'src/log.js',
       'src/meitu-alias.js', 'src/meitu-command.js', 'src/meitu-interpret.js', 'src/meitu-service.js',
+      // JM 搜本/下本（默认关闭）：命令解析、服务层与网络边界 CLI，公开套件只注入假 fetch
+      'src/jm-command.js', 'src/jm-service.js', 'scripts/jm-fetch-one.mjs', 'scripts/selftest-jm.js',
       'src/qq.js', 'src/runner-contract.js', 'src/sqlite-store.js', 'src/stat-binding.js',
       'src/stats.js', 'src/tool-loop.js',
       // 源码扫描判据要读这些文件（只作为文本比对，不在夹具里 import）
@@ -139,18 +141,20 @@ try {
       // 上面两个套件会 fs 读这些源码当锚点 / 生成页(只读文本,不在夹具里 import)
       'src/memory-archive.js', 'src/player-world.js', 'src/quest-take.js',
       'docs/16-边界契约-公开版.md', 'docs/命令与关键字.md',
+      // JM 接线哨兵只读示例环境文件(只含键名与注释,无凭据)
+      '.env.example',
     ]) copy(relative);
     assert.equal(fs.existsSync(path.join(temp, 'resources')), false);
     assert.equal(fs.existsSync(path.join(temp, 'data')), false);
     const result = run(['--public']);
     assert.equal(result.status, 0, result.stdout + result.stderr);
     assert.match(result.stdout, /PUBLIC SUBSET ONLY/);
-    assert.match(result.stdout, /12 suites，\d+ registered cases/);
+    assert.match(result.stdout, /13 suites，\d+ registered cases/);
     assert.match(result.stdout, /\d+ passed, 0 failed/);
   });
   test('公开 --out 以仓库根解析相对路径，skip 单独计数不冒充 passed', () => {
     // 覆盖全部公开套件名称前缀：新增套件也必须让本用例保持"全部跳过"的前提。
-    const result = run(['--public', '--out', 'entry-output.log'], { QQBOT_SELFTEST_SKIP: 'meitu-,engine-tools,content-pack,world-pack,params:,config params:,模型参数:' });
+    const result = run(['--public', '--out', 'entry-output.log'], { QQBOT_SELFTEST_SKIP: 'meitu-,engine-tools,content-pack,world-pack,jm-,params:,config params:,模型参数:' });
     assert.equal(result.status, 0, result.stdout + result.stderr);
     const summary = result.stdout.match(/(\d+) passed, (\d+) failed, (\d+) skipped/);
     assert.ok(summary, result.stdout);
@@ -158,7 +162,7 @@ try {
     assert.ok(Number(summary[3]) >= 50, `skip 要有单独计数(实际 ${summary[3]})`);
     const registered = result.stdout.match(/公开覆盖：(\d+) suites，(\d+) registered cases/);
     assert.ok(registered, result.stdout);
-    assert.equal(Number(registered[1]), 12, '公开套件数必须与登记一致');
+    assert.equal(Number(registered[1]), 13, '公开套件数必须与登记一致');
     assert.equal(Number(summary[1]) + Number(summary[3]), Number(registered[2]), 'passed + skipped 必须等于注册总数(skip 不能冒充 passed)');
     const output = fs.readFileSync(path.join(temp, 'entry-output.log'), 'utf8');
     assert.match(output, /PUBLIC SUBSET ONLY/);

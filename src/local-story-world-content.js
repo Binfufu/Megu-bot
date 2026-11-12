@@ -60,7 +60,7 @@ function valid(value) {
   if (!keysAre(value.eventLabels, ['found_coin', 'someone_treats', 'sold_loot', 'bought_staff', 'tax', 'lost_pouch', 'donated']) || !Object.values(value.eventLabels).every(text)) return false;
   if (!keysAre(value.chronicleText, ['currency', 'manaLabel', 'healFailed']) || !Object.values(value.chronicleText).every(text)) return false;
   if (![value.commandEffects, value.cardClaimNotes, value.opsEffects].every(textMap)) return false;
-  if (!keysAre(value.commandEffects, ['/重置', '/状态', '/成长', '/钱包', '/熟人', '/钓鱼', '/委托', '/接 <编号>', '/help', '/重启', '/更新', '/发', '/更新 预览', '/更新 账本', '/更新 回退', '/更新 基线 <版本>', '/更新 <编号>', '/群列表', '/忘了', '/旁白测试', '/发图', '发N张<角色>美图/涩图', '/认人', '/绑定'])
+  if (!keysAre(value.commandEffects, ['/重置', '/状态', '/成长', '/钱包', '/熟人', '/钓鱼', '/委托', '/接 <编号>', '/help', '/重启', '/更新', '/发', '/更新 预览', '/更新 账本', '/更新 回退', '/更新 基线 <版本>', '/更新 <编号>', '/群列表', '/忘了', '/旁白测试', '/发图', '发N张<角色>美图/涩图', '搜本 <关键词> / 下本 <编号或序号>', '/认人', '/绑定'])
       || !keysAre(value.cardClaimNotes, ['/状态', '/钱包', '/更新', '/群列表', '/成长'])
       || !keysAre(value.opsEffects, ['handoff.js', 'release-status.js', 'log-tail.js', 'restart.js / restart.cmd', 'announce-preview.js', 'announce-reset.js', 'known-group-add.js', 'relay-status.js', 'rhythm-report.js', 'social-observer.js', 'card-eval.js', 'memory-v0.js', 'selftest.js', 'stats-report.js', 'economy-sim.js', 'growth-report.js', 'command-index.js', 'probe.js', 'warmup-status.js', 'memory-archive.js', 'idle-burn.js', 'purge-tool-notes.js', 'profile-scan.js', 'transcript.js', 'verify-qq.js', 'todo-index.js'])) return false;
   if (!Array.isArray(value.keywordGroups) || !value.keywordGroups.every((row) => keysAre(row, ['label', 'words']) && text(row.label) && strings(row.words))) return false;

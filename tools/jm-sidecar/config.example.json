@@ -1,0 +1,31 @@
+{
+  "host": "127.0.0.1",
+  "port": 8790,
+  "viewer": {
+    "enabled": true,
+    "host": "0.0.0.0",
+    "port": 8088,
+    "auto_spawn": true,
+    "public_base": "",
+    "password": ""
+  },
+  "cache": {
+    "search_ttl_sec": 21600,
+    "detail_ttl_sec": 86400
+  },
+  "jm": {
+    "proxy": "",
+    "domain": "",
+    "threads": 16,
+    "timeout_sec": 30
+  },
+  "pdf": {
+    "width": 1000,
+    "quality": 80,
+    "max_pages": 300,
+    "max_bytes": 20971520
+  },
+  "paths": {
+    "data_dir": "data"
+  }
+}

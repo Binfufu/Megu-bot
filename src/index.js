@@ -160,6 +160,10 @@ import { planReset } from './reset-reply.js';
 import { looksLikeMeituAttempt, parseMeituCommand } from './meitu-command.js';
 import { handleMeituCommand, describeMeituTask } from './meitu-service.js';
 import { createMeituInterpreter } from './meitu-interpret.js';
+// 代码层 JM 搜本/下本(2026-11-12):「搜本/找本 <关键词>」「下本 <编号|序号>」。
+// 与搬图同构:纯解析 + 服务层 + 独立网络子进程 CLI;默认关闭,开启前先部署 JM 边车服务。
+import { looksLikeJmAttempt, parseJmCommand } from './jm-command.js';
+import { DEFAULT_JM_LINES, handleJmCommand } from './jm-service.js';
 // 美图展览处(2026-10-23 / 展览处刀 1 数据层 + 刀 2 只读 API):
 // 元数据库 `data\<bot>\meitu.db` 与两档缩略图都由这里打开一次、注入服务层与面板。
 import { mimeForImagePath, openMeituGallery } from './meitu-gallery.js';
@@ -7827,6 +7831,43 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       }
       // 没匹配上也要留痕(1.179.1):@ 消息进了 hook 但解析失败 —— 下次现场日志能直接看到正文形状。
       log.debug(`美图：@ 消息未匹配指令（正文=${JSON.stringify(String(message.content ?? '')).slice(0, 80)}）`);
+    }
+
+    // 「搜本/找本 <关键词>」「下本 <编号/序号>」—— 代码层 JM 搜本/下本，默认关闭（QQBOT_JM）。
+    // 与搬图分支并列：只认群里的 @，解析失败但确实像这条指令时回一句格式提示（别当闲聊丢掉）。
+    // 网络只在 `scripts/jm-fetch-one.mjs` 子进程里发生，它调的是部署者自己运行的 JM 边车服务；
+    // 群白名单空 = 谁都不给（服务层 fail closed），失败只回固定话术、不调模型。
+    if (message.scene === 'group' && message.isMention && config.jm?.enabled) {
+      const parsedJm = parseJmCommand(message.content, { max: config.jm.max });
+      if (parsedJm.ok) {
+        void handleJmCommand({
+          message,
+          parsed: parsedJm,
+          deps: {
+            config,
+            log,
+            // 上传/发送复用主循环里那一个 QqApi 实例；回话复用现成的 sendChunked，
+            // 并透传 `{startSeq, active}` 让文本接着图片的被动回复序列往下数。
+            uploadFile: (args) => api.uploadFile(args),
+            sendMedia: (args) => api.sendMedia(args),
+            reply: (text, opts) => sendChunked(message, text, opts),
+          },
+        }).then((result) => {
+          if (result?.ok !== true && result?.reason !== 'cooldown') {
+            log.info(`JM：${parsedJm.action} 没成（${result?.reason ?? 'unknown'}）`);
+          }
+        }).catch((err) => {
+          // 正常失败路径在 handleJmCommand 内部已经 try/catch 收口，这里只防装配层意外
+          // 走 unhandledRejection 把整个进程带崩。
+          log.error('JM：处理管道意外失败', err);
+        });
+        return;
+      }
+      if (looksLikeJmAttempt(message.content)) {
+        await sendChunked(message, DEFAULT_JM_LINES.format[0]);
+        return;
+      }
+      log.debug(`JM：@ 消息未匹配指令（正文=${JSON.stringify(String(message.content ?? '')).slice(0, 80)}）`);
     }
 
     // Bridge-level commands are handled here and never reach the agent.

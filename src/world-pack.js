@@ -36,7 +36,7 @@ const CHRONICLE_KINDS = ['meal', 'fed', 'selfcare', 'event', 'story', 'quest', '
 const EVENT_LABELS = ['found_coin', 'someone_treats', 'sold_loot', 'bought_staff', 'tax', 'lost_pouch', 'donated'];
 const COMMAND_EFFECTS = ['/重置', '/状态', '/成长', '/钱包', '/熟人', '/钓鱼', '/委托', '/接 <编号>', '/help',
   '/重启', '/更新', '/发', '/更新 预览', '/更新 账本', '/更新 回退', '/更新 基线 <版本>', '/更新 <编号>',
-  '/群列表', '/忘了', '/旁白测试', '/发图', '发N张<角色>美图/涩图', '/认人', '/绑定'];
+  '/群列表', '/忘了', '/旁白测试', '/发图', '发N张<角色>美图/涩图', '搜本 <关键词> / 下本 <编号或序号>', '/认人', '/绑定'];
 const CARD_CLAIM_NOTES = ['/状态', '/钱包', '/更新', '/群列表', '/成长'];
 const OPS_EFFECTS = ['handoff.js', 'release-status.js', 'log-tail.js', 'restart.js / restart.cmd',
   'announce-preview.js', 'announce-reset.js', 'known-group-add.js', 'relay-status.js', 'rhythm-report.js',

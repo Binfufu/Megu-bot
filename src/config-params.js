@@ -134,6 +134,13 @@ export function createConfigParamDefinitions(parsers) {
   positive('QQBOT_MEITU_MAX_BYTES', 10_485_760);
   positive('QQBOT_MEITU_TIMEOUT_MS', 90_000);
   boolean('QQBOT_GALLERY', true);
+  // JM 搜本/下本（2026-11-12）：默认关闭；白名单空 = 全拒（fail closed）。
+  // 边车地址与结果图落盘根目录是部署项，其余是 runtime 旋钮。
+  boolean('QQBOT_JM', false);
+  positive('QQBOT_JM_MAX', 5);
+  nonnegative('QQBOT_JM_COOLDOWN_MS', 30_000);
+  positive('QQBOT_JM_MAX_BYTES', 10_485_760);
+  positive('QQBOT_JM_TIMEOUT_MS', 120_000);
   boolean('QQBOT_PROMPT_CONTEXT', true);
   positive('QQBOT_MAX_IMAGES', 3);
   positive('QQBOT_GROUP_CONTEXT', 15);
@@ -287,6 +294,7 @@ export function createConfigParamDefinitions(parsers) {
     QQBOT_MEITU_DB: undefined, QQBOT_LOG_FILE: undefined,
     QQBOT_MEITU_ROOT: 'data/meitu-images', QQBOT_MEITU_ALIAS: 'data/meitu-alias.json',
     QQBOT_MEITU_LINES: 'data/meitu-lines.json', QQBOT_MEITU_THUMBS: 'data/meitu',
+    QQBOT_JM_ROOT: 'data/demo/jm-images',
   })) deployment(id, 'path', fallback, id === 'QQBOT_LEGACY_STATE_FILE' ? { emptyAsUnset: false } : {});
   text('QQBOT_DSH_PROFILE', DEFAULTS.profile, { validate: (value) => { parsers.profile(value); return true; } });
   text('QQBOT_DSH_COMMAND', DEFAULTS.command);
@@ -326,6 +334,8 @@ export function createConfigParamDefinitions(parsers) {
   complex('QQBOT_ANNOUNCE_TRIGGER', 'confirm', parsers.announceTrigger);
   complex('QQBOT_GROWTH_ANNOUNCE', 'both', parsers.growthAnnounce);
   complex('QQBOT_MEITU_SOURCE', 'auto', parsers.meituSource);
+  // JM 边车地址：默认 8790（本机 8765 常被占用；边车部署可改端口）。
+  deployment('QQBOT_JM_API', 'url', 'http://127.0.0.1:8790');
   complex('QQBOT_GROUP_MODE', 'mention', parsers.groupMode);
   // Not a boolean env: only literal '0' disables it, even 'false' is on.
   complex('QQBOT_MEITU_PER_GROUP', true, (value) => String(value) !== '0');
@@ -344,6 +354,7 @@ export function createConfigParamDefinitions(parsers) {
     return value.split(',').map((entry) => entry.trim()).filter(Boolean);
   };
   for (const id of ['QQBOT_ALLOWLIST', 'QQBOT_IDS', 'QQBOT_SELF_GROUP_IDS', 'QQBOT_MEITU_GROUPS',
+    'QQBOT_JM_GROUPS',
     'QQBOT_GROUP_IGNORE_IDS', 'QQBOT_ADMIN_IDS', 'QQBOT_TOOLS_ALLOW', 'QQBOT_WEBFETCH_ALLOW',
     'QQBOT_STRIP_NAME_LABELS', 'QQBOT_PANEL_ALLOWED_HOSTS', 'QQBOT_ACCOUNTS_STAFF']) {
     complex(id, id === 'QQBOT_IDS' ? undefined : [], csv, {

@@ -1,0 +1,8 @@
+flask>=3.0
+pillow>=10.0
+curl-cffi>=0.7
+pycryptodome>=3.20
+pyyaml>=6.0
+psutil>=5.9
+cryptography>=42
+Send2Trash>=1.8.3,<2
