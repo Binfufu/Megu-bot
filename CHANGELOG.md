@@ -2,6 +2,26 @@
 
 本文件只记录公开程序的中性要点，不是完整开发或部署历史。版本标题与日期采用既有记录；保留部分历史条目用于版本查询和更新摘要兼容，不表示相关可选功能默认开启，也不代表本节点已经发布或完成外部链路验收。
 
+## [1.210.0] — 2026-11-12
+
+### 新增
+
+- **可选的 JM 搜本/下本**（默认关闭，`QQBOT_JM=false`）：群里 @ 机器人发「搜本 <关键词>」（或「找本」，可带 1..5 的数量）→ 代码调本机 JM 边车服务搜索，发回结果拼图 + 不超过 50 字的编号提示；发「下本 <编号>」或「下本 <序号>」（序号取本群最近一次成功搜索）→ 边车下载完成后回网页阅读链接。整条链路不经过模型，失败只回固定话术。
+- **只含 Node 客户端，不含 Python 边车**：仓库里新增纯解析（`src/jm-command.js`）、服务层（`src/jm-service.js`）与唯一网络边界 CLI（`scripts/jm-fetch-one.mjs`，用 Node 内置 `fetch` 调边车 HTTP API）。边车需要部署者自行部署，API 契约与部署说明见 [docs/44-JM搜本.md](<docs/44-JM搜本.md>)。公开集不附带任何 JM 内容、图片、凭据或真实数据；内容、图片来源与平台条款由部署者自行负责。
+- **配置**：新增 `QQBOT_JM`、`QQBOT_JM_GROUPS`、`QQBOT_JM_API`（模板默认 `http://127.0.0.1:8790`，可改）、`QQBOT_JM_MAX`、`QQBOT_JM_COOLDOWN_MS`、`QQBOT_JM_ROOT`、`QQBOT_JM_MAX_BYTES`、`QQBOT_JM_TIMEOUT_MS`。默认关闭、启动不联网；群白名单空 = 全部拒绝（fail closed）。冷却只拦搜本且只在成功时记账，下本不吃冷却。
+- **文档与命令表**：新增 `docs/44-JM搜本.md`；README 增加可选功能小节；`src/commands.js` 登记 JM 指令并按生成流程重跑 `node scripts/command-index.js --write`；`docs/37` 的子系统表与网络边界补上 JM 子进程。
+
+### 判据
+
+- 新增 `scripts/selftest-jm.js`（26 例，全部合成夹具）：指令解析表、边车契约（注入假 `fetch`：health/search/download 轮询、坏 JSON、超时、HTTP 错误、单图上限）、服务层（空名单 fail closed 且不 spawn、冷却只拦搜本且失败不占、先图后文与被动回复序号、结果图超限降级发文本、下本按 id/序号、没有 `viewer_url` 不假装成功）、接线哨兵。
+- 公开入口实测：`node scripts/selftest-public.js` → **13 suites / 435 passed / 0 failed**（Windows 11 + Node 24.19.0）；参数目录 227→235 项，`selftest-config-params` 的类型计数与配置键同步更新。
+- 未联网、未启动 bot、未连接真实边车；真实 QQ 群与真实 JM 边车链路**未验证**。
+
+### 已知遗留
+
+- Python 边车源码与 `jm-view-server` 是否随上游 PR 发布待维护者确认；本版按"Node 客户端 + 契约文档"交付。
+- JM 接口/域名变化、真实下载与网页阅读的端到端效果，以部署者在本地环境中的实测为准。
+
 ## [1.209.5] — 2026-11-11
 
 ### 修复
