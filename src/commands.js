@@ -221,6 +221,16 @@ const BASE_COMMANDS = [
     source: 'src/meitu-command.js · parseMeituCommand / src/meitu-service.js · handleMeituCommand',
   },
   {
+    name: '搜本 <关键词> / 下本 <编号或序号>',
+    aliases: ['找本 <关键词>', '下载本子 <编号>'],
+    scope: 'group',
+    who: 'anyone',
+    effect: '按关键词搜索 JM 作品并由代码发回结果拼图与编号；下本按编号或上次搜索的序号下载，' +
+      '完成后回网页阅读链接。仅允许的群可用，默认关闭，需要部署者在同一台机器上自行运行 JM 边车服务。' +
+      '整条链路不经过模型。',
+    source: 'src/jm-command.js · parseJmCommand / src/jm-service.js · handleJmCommand',
+  },
+  {
     name: '/认人',
     aliases: ['/知人'],
     scope: 'group',

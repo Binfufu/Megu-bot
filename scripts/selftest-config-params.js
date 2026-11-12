@@ -35,12 +35,12 @@ const read = (id, input) => resolveParams(CONFIG_PARAM_DEFINITIONS, { env: { [id
 
 export function registerConfigParamsTests({ test, assert }) {
   test('config params: complete typed catalogue and defaults are registered without secrets', () => {
-    assert.equal(CONFIG_PARAM_DEFINITIONS.length, 227); // 216 + 盯梢 8 项 + 健康生命周期 2 项 + 旧派生读闸 1 项（2026-11-11）。
-    assert.equal(new Set(CONFIG_PARAM_DEFINITIONS.map((def) => def.id)).size, 227);
+    assert.equal(CONFIG_PARAM_DEFINITIONS.length, 235); // 227 + JM 搜本 8 项（2026-11-12）。
+    assert.equal(new Set(CONFIG_PARAM_DEFINITIONS.map((def) => def.id)).size, 235);
     assert.equal(CONFIG_PARAM_DEFINITIONS.some((def) => def.type === 'custom'), false);
     const typeCounts = {};
     for (const def of CONFIG_PARAM_DEFINITIONS) typeCounts[def.type] = (typeCounts[def.type] ?? 0) + 1;
-    assert.deepEqual(typeCounts, { int: 89, boolean: 48, number: 10, string: 30, url: 6, path: 14, enum: 12, object: 4, array: 14 });
+    assert.deepEqual(typeCounts, { int: 93, boolean: 49, number: 10, string: 30, url: 7, path: 15, enum: 12, object: 4, array: 15 });
     const defaults = resolveParams(CONFIG_PARAM_DEFINITIONS);
     assert.deepEqual(defaults.inputs, {});
     assert.equal(defaults.values.QQBOT_MOOD_TTL_MS, 600000);
@@ -191,7 +191,7 @@ export function registerConfigParamsTests({ test, assert }) {
 
   test('config params: original runtime default shape and paths remain intact', () => isolated((rootDir) => {
     const config = loadConfig({ rootDir });
-    assert.deepEqual(Object.keys(config), ['lockFile', 'legacyStateFile', 'qq', 'dsh', 'engine', 'meitu', 'policy', 'logLevel', 'logFile', 'envFile', 'loadedEnvFile']);
+    assert.deepEqual(Object.keys(config), ['lockFile', 'legacyStateFile', 'qq', 'dsh', 'engine', 'meitu', 'jm', 'policy', 'logLevel', 'logFile', 'envFile', 'loadedEnvFile']);
     assert.equal(config.loadedEnvFile, false);
     assert.equal(config.policy.stats.dbFile, path.join(rootDir, '.qqbot.db'));
     assert.equal(config.meitu.db, path.join(rootDir, 'data', 'meitu.db'));

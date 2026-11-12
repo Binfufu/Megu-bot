@@ -1,0 +1,21 @@
+# JM 边车服务 systemd 示例（Linux）
+# 用法：把本文件复制为 /etc/systemd/system/jm-sidecar.service，
+#     把 WorkingDirectory / PYTHONPATH 里的 /opt/jm-sidecar 换成实际部署目录、User 换成实际用户，
+#     然后 sudo systemctl daemon-reload && sudo systemctl enable --now jm-sidecar
+[Unit]
+Description=JM comic sidecar service (optional, local-only)
+After=network-online.target
+
+[Service]
+Type=simple
+User=jm
+WorkingDirectory=/opt/jm-sidecar
+Environment=PYTHONPATH=/opt/jm-sidecar:/opt/jm-sidecar/vendor/JMComic-Crawler-Python/src:/opt/jm-sidecar/vendor/jm-view-server/src
+Environment=PYTHONIOENCODING=utf-8
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/jm-sidecar/.venv/bin/python -m jm_service
+Restart=on-failure
+RestartSec=3
+# 服务只监听本机 8790；viewer 默认 8088（如需外网访问请自行配置防火墙/反代）
+[Install]
+WantedBy=multi-user.target

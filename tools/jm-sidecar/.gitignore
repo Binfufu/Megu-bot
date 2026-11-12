@@ -1,0 +1,9 @@
+# JM 边车服务（自包含目录）——运行期文件全部忽略
+.venv/
+vendor/
+config/jm-service.json
+data/
+logs/
+__pycache__/
+*.pyc
+*.pyo

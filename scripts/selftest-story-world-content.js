@@ -196,7 +196,7 @@ function publicChild(options) {
     check(()=>assert.deepEqual(cmd.KEYWORD_GROUPS,[]));
     check(()=>assert.deepEqual(cmd.ARIS_PHRASES,[]));
     check(()=>assert.ok(cmd.helpText({botName:'示例助手'}).includes('示例助手')));
-    check(()=>assert.equal(cmd.BRIDGE_COMMANDS.length,24));
+    check(()=>assert.equal(cmd.BRIDGE_COMMANDS.length,25));
     const fixture={schemaVersion:1,storyEvents:[event],storyPacks:{megumin:{id:'megumin',label:'合成默认故事'},aris:{id:'aris',label:'合成机械故事',events:[event]}},
       storyClosingWords:['合成收尾'],storyClosingExamples:['合成收尾。'],storyRespondClosing:'合成回应收尾',storySettleClosing:'合成自决收尾',
       // 旧快照固定 6 处(home/fishing/guild/canteen/market/gallery):clinic 是世界包时代的第 7 处,
