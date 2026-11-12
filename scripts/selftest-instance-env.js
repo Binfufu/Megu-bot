@@ -221,7 +221,7 @@ export function registerInstanceEnvTests({ test, assert = assertStrict }) {
     a.equal(text.includes('=1'), false);
   });
 
-  test('instance env: 私库真实 content/local/instance.json = 惠惠自助进食 + 两实例盯梢库 + 爱丽丝 QQ 推送开关（公开缺文件跳过）', () => {
+  test('instance env: 私库真实 content/local/instance.json = 惠惠自助进食 + 两实例盯梢库 + 爱丽丝盯梢推送与 JM 全群开关（公开缺文件跳过）', () => {
     if (!fs.existsSync(REAL_OVERRIDE_FILE)) {
       console.log('SKIP instance env: 公开集无 content/local/instance.json（无覆盖即行为不变）');
       return;
@@ -234,9 +234,13 @@ export function registerInstanceEnvTests({ test, assert = assertStrict }) {
       QQBOT_SELFCARE: '1',
       QQBOT_FEED_DB: 'E:/PersonalDSH/feed-lab/data/feed.db',
     });
+    // JM 搜本（2026-11-12 / 1.210.1）：只给爱丽丝开，且是显式全部群（`*`）——
+    // 惠惠不拿到这两个键。`*` 不是"空 = 全开"，是写出来的选择。
     a.deepEqual(parsed.bots.aris, {
       QQBOT_FEED_DB: 'E:/PersonalDSH/feed-lab/data/feed.db',
       QQBOT_FEED_QQ: '1',
+      QQBOT_JM: '1',
+      QQBOT_JM_GROUPS: '*',
     });
 
     const env = {};
@@ -255,7 +259,9 @@ export function registerInstanceEnvTests({ test, assert = assertStrict }) {
     a.deepEqual(arisEnv, {
       QQBOT_FEED_DB: 'E:/PersonalDSH/feed-lab/data/feed.db',
       QQBOT_FEED_QQ: '1',
-    }, '爱丽丝只拿到盯梢库与推送开关，不共享惠惠的开关');
+      QQBOT_JM: '1',
+      QQBOT_JM_GROUPS: '*',
+    }, '爱丽丝只拿到盯梢库、推送开关与 JM 全群开关，不共享惠惠的开关');
   });
 
   test('instance env: zone-manifest 把覆盖文件登记为 C 区私有内容', () => {

@@ -22,8 +22,8 @@
   "pdf": {
     "width": 1000,
     "quality": 80,
-    "max_pages": 300,
-    "max_bytes": 20971520
+    "max_pages": 1000,
+    "max_bytes": 52428800
   },
   "paths": {
     "data_dir": "data"
