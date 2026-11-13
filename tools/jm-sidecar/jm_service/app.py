@@ -26,6 +26,10 @@ SERVICE_NAME = "jm-service"
 
 _PREVIEW_RE = re.compile(r"^(p_[0-9a-f]{6}_\d+)\.jpg$")
 
+# 参数错误的固定对外说明：绝不回传 ValueError 原文（int() 的异常会回显原始输入）。
+SEARCH_PARAM_MESSAGE = "参数不合法：limit 需在 1~10、page 需在 1~100000 之间"
+LIBRARY_PARAM_MESSAGE = "参数不合法：limit 需在 1~200，offset 不能为负数"
+
 
 def _json_error(code: str, message: str, status: int = 400):
     return jsonify({"ok": False, "error": code, "message": message}), status
@@ -194,8 +198,11 @@ class Service:
         try:
             limit = _int_param("limit", 5, 1, 10)
             page = _int_param("page", 1, 1, 100000)
-        except ValueError as exc:
-            return _json_error("invalid_param", str(exc), 400)
+        except ValueError:
+            # CodeQL py/stack-trace-exposure：int() 的 ValueError 会回显原始输入；
+            # 只返回固定边界说明，细节不进入响应（也不把原始输入写进日志）。
+            self.log.warning("搜索参数不合法（已有固定对外说明）")
+            return _json_error("invalid_param", SEARCH_PARAM_MESSAGE, 400)
         mode = (request.args.get("mode") or "site").strip().lower()
         if mode not in SEARCH_MODES:
             return _json_error("invalid_mode", f"mode 仅支持 {'/'.join(SEARCH_MODES)}", 400)
@@ -748,8 +755,9 @@ class Service:
             offset = int(offset_raw or 0)
             if offset < 0:
                 raise ValueError("offset 不能为负数")
-        except ValueError as exc:
-            return _json_error("invalid_param", str(exc), 400)
+        except ValueError:
+            self.log.warning("查询库参数不合法（已有固定对外说明）")
+            return _json_error("invalid_param", LIBRARY_PARAM_MESSAGE, 400)
         items = []
         for record in self.store.list_albums(limit=limit, offset=offset):
             items.append({

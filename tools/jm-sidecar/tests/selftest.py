@@ -1208,10 +1208,32 @@ class TestAppContract(TempDirTest):
         self.assertEqual(status, 400)
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error"], "invalid_param")
+        self.assertEqual(payload["message"], "参数不合法：limit 需在 1~10、page 需在 1~100000 之间")
+
+        # 负对照（CodeQL py/stack-trace-exposure 的回归）：int() 的 ValueError 会回显原始输入，
+        # 响应里绝不能出现异常原文或原始参数值。
+        for query in ("/search?q=abc&limit=not-a-number", "/search?q=abc&page=-5x"):
+            status, payload = self._get(query)
+            self.assertEqual(status, 400)
+            self.assertEqual(payload["error"], "invalid_param")
+            self.assertNotIn("invalid literal", payload["message"])
+            self.assertNotIn("not-a-number", payload["message"])
+            self.assertNotIn("-5x", payload["message"])
+            self.assertNotIn("ValueError", payload["message"])
 
         status, payload = self._get("/search?q=" + "长" * 61)
         self.assertEqual(status, 400)
         self.assertEqual(payload["error"], "invalid_query")
+
+    def test_library_param_errors_do_not_echo_exception(self):
+        for query in ("/library?offset=abc", "/library?limit=999", "/library?offset=-1"):
+            status, payload = self._get(query)
+            self.assertEqual(status, 400, query)
+            self.assertEqual(payload["error"], "invalid_param", query)
+            self.assertEqual(payload["message"], "参数不合法：limit 需在 1~200，offset 不能为负数")
+            self.assertNotIn("invalid literal", payload["message"])
+            self.assertNotIn("abc", payload["message"])
+            self.assertNotIn("999", payload["message"])
 
     def test_album_and_cover_invalid(self):
         status, payload = self._get("/album/abc")
