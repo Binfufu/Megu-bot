@@ -135,7 +135,8 @@ export function createConfigParamDefinitions(parsers) {
   positive('QQBOT_MEITU_TIMEOUT_MS', 90_000);
   boolean('QQBOT_GALLERY', true);
   // JM 搜本/下本（2026-11-12）：默认关闭；白名单空 = 全拒（fail closed）。
-  // 边车地址与结果图落盘根目录是部署项，其余是 runtime 旋钮。
+  // 边车地址与临时落盘根目录是部署项，其余是 runtime 旋钮。
+  // QQBOT_JM_MAX_BYTES 兼容保留（Node 侧已不发结果图）。
   boolean('QQBOT_JM', false);
   positive('QQBOT_JM_MAX', 5);
   nonnegative('QQBOT_JM_COOLDOWN_MS', 30_000);

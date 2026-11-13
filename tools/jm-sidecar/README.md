@@ -88,22 +88,25 @@ sudo systemctl enable --now jm-sidecar
 
 - `viewer.public_base`：给用户点的网页阅读链接前缀；留空自动探测局域网 IP（手机需同一网络）。
 - `jm.proxy`：`""` 直连；支持 `system` 或 `host:port`（由 jmcomic 读取）。
-- `pdf.*`：整本 PDF 目标宽度/质量/页数上限/大小上限；超限会自动降级压缩。
+- `pdf.*`：PDF 目标宽度/质量/页数上限/大小上限；超限会自动降级压缩。固定标准 A4 页幅（与 JPEG 宽度解耦）、图像保比例、长条图从上到下分页。旧版式缓存自动重建，已发文件需重下；`data/pdfs/*.pdf.json` 是版式/源图/配置签名与真实输出页数。选集合并超页数/体积时失败，不默默截断；旧普通整本截断行为保留。
 - 数据目录：`data/comics/`（漫画）、`data/pdfs/`（PDF）、`data/covers|previews/`（封面/拼图）、
   `data/cache/`（SQLite 缓存）、`logs/`（日志）。全部留在本机，不进 Git。
 
-## 5. API v1（本服务对外）
+## 5. API v3（兼容 v2/v1）
 
 | 方法/路径 | 说明 |
 |---|---|
-| `GET /health` | 健康检查、viewer base、库/缓存计数 |
-| `GET /search?q=&limit=&page=&mode=&refresh=` | 搜索（`mode=site/work/author/tag/actor`）+ 拼图；`limit` 1~10 |
+| `GET /health` | 健康检查、viewer base、库/缓存计数、`capabilities`（本版含 `units`，Node 打包前核它） |
+| `GET /search?q=&limit=&page=&mode=&refresh=&images=` | 搜索（`mode=site/work/author/tag/actor`）+ 拼图；`limit` 1~10；`images=0/false` 跳过详情/封面/拼图（返回 id/title 即可） |
 | `GET /cover/<id>.jpg` | 封面 |
 | `GET /preview/<name>.jpg` | 搜索结果拼图 |
-| `GET /album/<id>` | 详情 + 本地状态（`downloaded`、`viewer_url`、`pdf_ready`、`pdf_size`） |
-| `POST /download` `{"id":"..."}` | 入队下载（单 worker 串行）；已下载 `status=done` |
-| `GET /jobs/<job_id>` | 任务状态 `running/done/failed` + `pdf_ready/pdf_size` |
+| `GET /resolve/<number>` | 按编号精确解析（不走向站内搜索）：`kind=album` 或 `kind=photo`（章节/单元号 → 父作品，附 `matched_unit`）；404 `not_found`、400 `invalid_id` |
+| `GET /album/<id>` | 详情 + 单元清单（`units`/`unit_count`）+ 本地状态（`downloaded`、`viewer_url`、`pdf_ready`、`pdf_size`） |
+| `POST /download` `{"id":"...","unit":"..."}` | 入队下载（单 worker 串行）；整本已下载 `status=done`；带 `unit` 只下该单元；多单元未指定 → 409 `multiple_units`（不建 job）；非法 `unit` → 400 `invalid_unit` |
+| `GET /jobs/<job_id>` | 任务状态 `running/done/failed` + `unit_id` + `pdf_ready/pdf_size` |
 | `GET /pdf/<id>` | 整本 PDF（`application/pdf`）；未下载 404 `album_not_downloaded`；`?refresh=1` 重生成 |
+| `GET /pdf/<id>?unit=<unit>` | 单单元 PDF（下载名 `JM<id>-<unit>.pdf`）；未下载 404 `unit_not_downloaded` |
+| `GET /pdf/<id>?units=<id,id,...>` | 合并已下载选集，按作品单元清单顺序去重；与 `unit` 互斥；非法/跨作品 400，未全部下载 404，超页数/体积上限 413，坏图 422；不返回残缺选集 |
 | `GET /library` | 本地漫画库 |
 
 字段级契约见 [docs/45-JM搜本.md](../../docs/45-JM搜本.md) 第 2 节。

@@ -194,6 +194,75 @@ class JmGateway:
     # ------------------------------------------------------------------ #
     # 详情
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _chapter_field(chapter, *names):
+        """防御式取章节字段：真实 JmPhotoDetail 与测试里的假对象都能吃。
+
+        依次尝试 names 里的属性名；取到非空标量就返回。属性可能是会抛异常的
+        property，这里全部吞掉（拿不到就试下一个）。
+        """
+        for name in names:
+            try:
+                value = getattr(chapter, name)
+            except Exception:  # noqa: BLE001 - 属性实现不定，防御式取
+                continue
+            if value is None or callable(value):
+                continue
+            if isinstance(value, (str, int)):
+                text = str(value).strip()
+                if text:
+                    return text
+                continue
+            return value
+        return None
+
+    @staticmethod
+    def _as_id(value) -> str | None:
+        """把编号值规约成纯数字字符串；规约不了返回 None。"""
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return str(value)
+        text = str(value).strip()
+        return text if text.isdigit() else None
+
+    def _build_units(self, album) -> list[dict]:
+        """迭代本子得到单元/章节清单：index 从 1 起，unit_id 为章节 id。"""
+        units: list[dict] = []
+        try:
+            iterator = iter(album)
+        except TypeError:
+            return units
+        for position, chapter in enumerate(iterator, start=1):
+            if chapter is None:
+                continue
+            unit_id = self._as_id(
+                self._chapter_field(chapter, "photo_id", "id", "unit_id", "photoId"))
+            if not unit_id:
+                continue
+            title = self._chapter_field(chapter, "name", "title", "photo_name") or ""
+            index = position
+            raw_index = self._chapter_field(chapter, "index", "sort", "order")
+            try:
+                if raw_index is not None:
+                    index = int(str(raw_index))
+            except (TypeError, ValueError):
+                index = position
+            page_count = None
+            raw_pages = self._chapter_field(chapter, "page_count", "page_num", "image_count")
+            try:
+                if raw_pages is not None:
+                    page_count = int(str(raw_pages))
+            except (TypeError, ValueError):
+                page_count = None
+            units.append({
+                "index": index,
+                "unit_id": unit_id,
+                "title": str(title).strip(),
+                "page_count": page_count,
+            })
+        return units
+
     def _build_album(self, album) -> dict:
         authors = [str(a) for a in (getattr(album, "authors", None) or [])]
         tags = [str(t) for t in (getattr(album, "tags", None) or [])]
@@ -202,13 +271,24 @@ class JmGateway:
             cover_url = self._JmcomicText.get_album_cover_url(album_id)
         except Exception:  # noqa: BLE001
             cover_url = ""
+        units = self._build_units(album)
+        if units:
+            count = len(units)
+        else:
+            # 迭代拿不到章节时保留老的 len(album) 语义（不改变整本下载规则）
+            try:
+                count = int(len(album))
+            except Exception:  # noqa: BLE001
+                count = 0
         return {
             "id": album_id,
             "title": str(album.name or "").strip(),
             "authors": authors,
             "tags": tags,
             "page_count": int(getattr(album, "page_count", 0) or 0),
-            "chapter_count": len(album),
+            "chapter_count": count,
+            "units": units,
+            "unit_count": count,
             "cover_url": cover_url,
             "jm_url": jm_album_url(album_id),
         }
@@ -253,6 +333,94 @@ class JmGateway:
                 future.cancel()
                 results[aid] = None
         return results
+
+    # ------------------------------------------------------------------ #
+    # 章节/单元详情 + 编号解析
+    # ------------------------------------------------------------------ #
+    def photo_detail(self, photo_id: str, timeout: float | None = None) -> dict:
+        """单个章节/单元详情：{id,title,album_id}；失败抛 JmError。"""
+        timeout = timeout or max(5.0, float(self.cfg.jm_timeout_sec))
+        future = self._submit(self._detail_pool, self._photo_one_strict, str(photo_id))
+        return self._wait_one(future, timeout, "jm_detail_failed", "JM 章节详情获取失败，请稍后重试")
+
+    def _photo_one_strict(self, photo_id: str) -> dict:
+        try:
+            client = self._get_client()
+            try:
+                # fetch_album=True：解析父作品需要章节挂上所属本子
+                photo = client.get_photo_detail(str(photo_id), fetch_album=True)
+            except TypeError:  # pragma: no cover - 旧版签名兜底
+                photo = client.get_photo_detail(str(photo_id))
+        except JmError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise JmError("jm_detail_failed", f"JM 章节详情获取失败（{self._short(exc)}）") from None
+        return {
+            "id": str(photo_id),
+            "title": str(self._chapter_field(photo, "name", "title", "photo_name") or "").strip(),
+            "album_id": self._photo_album_id(photo),
+        }
+
+    def _photo_album_id(self, photo) -> str | None:
+        """从章节实体防御式取所属本子 id（各版本字段名不一致）。"""
+        for name in ("album_id", "series_id", "from_album", "albumId"):
+            try:
+                value = getattr(photo, name)
+            except Exception:  # noqa: BLE001
+                continue
+            if isinstance(value, (str, int)) and not isinstance(value, bool):
+                album_id = self._as_id(value)
+                if album_id:
+                    return album_id
+        try:
+            album = getattr(photo, "album", None)
+        except Exception:  # noqa: BLE001
+            return None
+        if album is None:
+            return None
+        # fetch_album=True 时可能是挂着的 JmAlbumDetail 对象，也可能直接是 id
+        if isinstance(album, (str, int)) and not isinstance(album, bool):
+            return self._as_id(album)
+        return self._as_id(self._chapter_field(album, "album_id"))
+
+    def resolve_number(self, number: str) -> dict:
+        """按编号精确解析（album 优先，其次章节→父作品）；绝不调用站内搜索。
+
+        返回 {kind: "album"|"photo", album: <详情 dict，含 units>, matched_unit}；
+        两个都不是时抛 JmError("not_found")。
+        """
+        number_text = str(number).strip()
+        album: dict | None = None
+        try:
+            album = self.album_detail(number_text)
+        except JmError:
+            album = None
+        if album:
+            return {"kind": "album", "album": album, "matched_unit": None}
+
+        photo: dict | None = None
+        try:
+            photo = self.photo_detail(number_text)
+        except JmError:
+            photo = None
+        parent_id = self._as_id((photo or {}).get("album_id"))
+        if not parent_id:
+            raise JmError("not_found", "没有这个编号")
+        try:
+            album = self.album_detail(parent_id)
+        except JmError:
+            raise JmError("not_found", "没有这个编号") from None
+        matched_unit = None
+        for unit in album.get("units") or []:
+            if str(unit.get("unit_id")) == number_text:
+                matched_unit = {
+                    "index": unit.get("index"),
+                    "unit_id": str(unit.get("unit_id")),
+                    "title": unit.get("title") or "",
+                    "page_count": unit.get("page_count"),
+                }
+                break
+        return {"kind": "photo", "album": album, "matched_unit": matched_unit}
 
     # ------------------------------------------------------------------ #
     # 封面
@@ -344,6 +512,38 @@ dir_rule:
             self.log.info("开始下载 id=%s rule=%s → %s", album_id, rule, staging_dir)
             option.download_album(int(album_id))
             self.log.info("下载完成 id=%s，%.1fs", album_id, time.time() - start)
+        except JmError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise JmError("download_failed", f"下载失败（{self._short(exc)}）") from None
+        finally:
+            self._download_lock.release()
+
+    def download_photo(self, photo_id: str, staging_dir: Path, rule: str = "Bd") -> None:
+        """调用 jmcomic 下载单个章节/单元到 staging_dir（阻塞，单 worker 调用）。
+
+        option.download_photo 优先；AttributeError 时回退模块级 download_photo(photo_id, option)。
+        """
+        staging_dir = Path(staging_dir)
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        if not self._download_lock.acquire(timeout=1):
+            raise JmError("download_busy", "已有下载任务在进行，请稍后重试")
+        try:
+            option = self._download_option(staging_dir, rule)
+            start = time.time()
+            self.log.info("开始下载章节 photo_id=%s rule=%s → %s", photo_id, rule, staging_dir)
+            called = False
+            try:
+                option_method = getattr(option, "download_photo", None)
+                if callable(option_method):
+                    option_method(int(photo_id))
+                    called = True
+            except AttributeError:
+                called = False
+            if not called:
+                from jmcomic import download_photo as download_photo_module
+                download_photo_module(int(photo_id), option)
+            self.log.info("章节下载完成 photo_id=%s，%.1fs", photo_id, time.time() - start)
         except JmError:
             raise
         except Exception as exc:  # noqa: BLE001
