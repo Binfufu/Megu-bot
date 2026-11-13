@@ -12,7 +12,7 @@ from flask import Flask, jsonify, request, send_file
 
 from .config import Config
 from .jm_api import SEARCH_MODES, JmError, JmGateway
-from .pdf import PdfError, ensure_album_pdf, pdf_status
+from .pdf import PdfError, ensure_album_pdf, ensure_unit_pdf, ensure_units_pdf, pdf_status
 from .preview import build_preview, preview_name
 from .store import Store
 from .util import (album_folder_name, is_album_id, jm_album_url, normalize_album_id, now_iso,
@@ -34,9 +34,11 @@ def _json_error(code: str, message: str, status: int = 400):
 def _error_status(code: str) -> int:
     if "timeout" in code:
         return 504
-    if code in ("bad_request", "invalid_query", "invalid_param", "invalid_id", "invalid_json"):
+    if code in ("bad_request", "invalid_query", "invalid_param", "invalid_id", "invalid_json",
+                "invalid_unit", "multiple_units"):
         return 400
-    if code in ("cover_not_found", "preview_not_found", "job_not_found", "not_found"):
+    if code in ("cover_not_found", "preview_not_found", "job_not_found", "not_found",
+                "unit_not_downloaded", "album_not_downloaded"):
         return 404
     return 502
 
@@ -141,6 +143,8 @@ class Service:
                 "downloaded_albums": self.store.count_albums(),
                 "search_cache_entries": self.store.count_search(),
                 "jm_domain": self.gateway.jm_domain,
+                # 能力声明：Node 侧合并打包前先核它，旧边车不会被静默当成支持 ?units=。
+                "capabilities": ["units"],
             })
 
         @app.get("/search")
@@ -158,6 +162,10 @@ class Service:
         @app.get("/album/<album_id>")
         def album(album_id: str):
             return self._handle_album(album_id)
+
+        @app.get("/resolve/<number>")
+        def resolve(number: str):
+            return self._handle_resolve(number)
 
         @app.post("/download")
         def download():
@@ -192,11 +200,14 @@ class Service:
         if mode not in SEARCH_MODES:
             return _json_error("invalid_mode", f"mode 仅支持 {'/'.join(SEARCH_MODES)}", 400)
         refresh = request.args.get("refresh", "0") in ("1", "true", "yes")
+        # images=0：跳过详情/封面/拼图（Node 侧已不再发图，省掉全部图片请求）
+        with_images = (request.args.get("images", "1").strip().lower()
+                       not in ("0", "false", "no", "off"))
 
-        cache_key = self._search_cache_key(query, page, limit, mode)
+        cache_key = self._search_cache_key(query, page, limit, mode, with_images)
         if not refresh:
             cached_payload = self.store.get_search(cache_key, self.cfg.search_ttl_sec)
-            if cached_payload and self._preview_exists(cached_payload.get("preview_file")):
+            if cached_payload and self._cache_payload_ok(cached_payload, with_images):
                 cached_payload = dict(cached_payload)
                 cached_payload["elapsed_ms"] = int((time.time() - started) * 1000)
                 return jsonify({"ok": True, "cached": True, **cached_payload})
@@ -207,30 +218,34 @@ class Service:
             self.log.warning("搜索失败 q=%r：%s", query, exc.message)
             return _json_error(exc.code, exc.message, _error_status(exc.code))
 
-        items = search_result["items"][:limit]
-        album_ids = [item["id"] for item in items]
-        details = self.gateway.fetch_details(album_ids, timeout_each=4.0) if album_ids else {}
-        covers = self.gateway.fetch_covers(album_ids, timeout=10.0) if album_ids else {}
+        if with_images:
+            items = search_result["items"][:limit]
+            album_ids = [item["id"] for item in items]
+            details = self.gateway.fetch_details(album_ids, timeout_each=4.0) if album_ids else {}
+            covers = self.gateway.fetch_covers(album_ids, timeout=10.0) if album_ids else {}
 
-        results = []
-        for rank, item in enumerate(items, start=1):
-            detail = details.get(item["id"]) or {}
-            detail_ok = bool(detail)
-            title = detail.get("title") or item.get("title") or ""
-            results.append({
-                "rank": rank,
-                "id": item["id"],
-                "title": title,
-                "authors": detail.get("authors") or ([item["author"]] if item.get("author") else []),
-                "tags": detail.get("tags") or item.get("tags") or [],
-                "page_count": detail.get("page_count") if detail_ok else None,
-                "cover_url": detail.get("cover_url") or item.get("image") or "",
-                "cover_file": covers.get(item["id"]),
-                "cover_http": f"/cover/{item['id']}.jpg",
-                "detail_ok": detail_ok,
-            })
+            results = []
+            for rank, item in enumerate(items, start=1):
+                detail = details.get(item["id"]) or {}
+                detail_ok = bool(detail)
+                title = detail.get("title") or item.get("title") or ""
+                results.append({
+                    "rank": rank,
+                    "id": item["id"],
+                    "title": title,
+                    "authors": detail.get("authors") or ([item["author"]] if item.get("author") else []),
+                    "tags": detail.get("tags") or item.get("tags") or [],
+                    "page_count": detail.get("page_count") if detail_ok else None,
+                    "cover_url": detail.get("cover_url") or item.get("image") or "",
+                    "cover_file": covers.get(item["id"]),
+                    "cover_http": f"/cover/{item['id']}.jpg",
+                    "detail_ok": detail_ok,
+                })
 
-        preview_file = self._ensure_preview(query, page, limit, results)
+            preview_file = self._ensure_preview(query, page, limit, results)
+        else:
+            results = self._build_results_without_images(search_result, limit)
+            preview_file = None
         preview_name_value = Path(preview_file).name if preview_file else None
         payload = {
             "query": query,
@@ -243,21 +258,48 @@ class Service:
                             f"{preview_name_value}") if preview_name_value else None,
             "text": self._build_text(results),
         }
-        if preview_name_value:
+        if preview_name_value or not with_images:
             try:
                 self.store.put_search(cache_key, query, page, limit, payload)
             except Exception as exc:  # noqa: BLE001 - 缓存失败不影响响应
                 self.log.warning("写搜索缓存失败：%s", exc)
         response = {"ok": True, "cached": False, **payload,
                     "elapsed_ms": int((time.time() - started) * 1000)}
-        self.log.info("搜索完成 q=%r mode=%s page=%s limit=%s 命中%s本 %dms cached=false",
-                      query, mode, page, limit, len(results), response["elapsed_ms"])
+        self.log.info("搜索完成 q=%r mode=%s page=%s limit=%s images=%s 命中%s本 %dms cached=false",
+                      query, mode, page, limit, int(with_images), len(results),
+                      response["elapsed_ms"])
         return jsonify(response)
 
     @staticmethod
-    def _search_cache_key(query: str, page: int, limit: int, mode: str = "site") -> str:
-        raw = f"{mode}\x1f{query}\x1f{page}\x1f{limit}".encode("utf-8")
+    def _search_cache_key(query: str, page: int, limit: int, mode: str = "site",
+                          with_images: bool = True) -> str:
+        raw = f"{mode}\x1f{query}\x1f{page}\x1f{limit}\x1f{int(bool(with_images))}".encode("utf-8")
         return hashlib.sha1(raw).hexdigest()
+
+    def _cache_payload_ok(self, payload: dict, with_images: bool) -> bool:
+        """缓存可用性：带图看拼图是否还在；images=0 的 payload 本来就没有拼图。"""
+        if with_images:
+            return self._preview_exists(payload.get("preview_file"))
+        return payload.get("preview_file") is None
+
+    @staticmethod
+    def _build_results_without_images(search_result: dict, limit: int) -> list[dict]:
+        """images=0：只用搜索页自带的 id/title，字段形状保持但为默认值。"""
+        results = []
+        for rank, item in enumerate((search_result.get("items") or [])[:limit], start=1):
+            results.append({
+                "rank": rank,
+                "id": item["id"],
+                "title": item.get("title") or "",
+                "authors": [],
+                "tags": [],
+                "page_count": None,
+                "cover_url": "",
+                "cover_file": None,
+                "cover_http": f"/cover/{item['id']}.jpg",
+                "detail_ok": False,
+            })
+        return results
 
     def _preview_exists(self, preview_file) -> bool:
         if not preview_file:
@@ -328,6 +370,16 @@ class Service:
         album_id = normalize_album_id(album_id)
         if not album_id:
             return _json_error("invalid_id", "编号需为数字", 400)
+        if "units" in request.args:
+            if "unit" in request.args or len(request.args.getlist("units")) != 1:
+                return _json_error("invalid_unit", "unit 与 units 不能混用或重复", 400)
+            return self._handle_units_pdf(album_id, request.args["units"])
+        raw_unit = (request.args.get("unit") or "").strip()
+        if raw_unit:
+            unit_id = normalize_album_id(raw_unit)
+            if not unit_id:
+                return _json_error("invalid_unit", "unit 需为数字编号", 400)
+            return self._handle_unit_pdf(album_id, unit_id)
         record = self.store.get_album(album_id)
         if not record or not record.get("dir") or not Path(record["dir"]).is_dir():
             return _json_error("album_not_downloaded", "该本子还没下载，请先 POST /download", 404)
@@ -361,6 +413,76 @@ class Service:
             max_age=0,
         )
 
+    def _handle_units_pdf(self, album_id: str, raw_units: str):
+        # 严格语法，不允许空项/路径/混用参数；先验证全部归属，再读目录或生成。
+        if not re.fullmatch(r"[1-9][0-9]{0,11}(?:,[1-9][0-9]{0,11})*", raw_units):
+            return _json_error("invalid_unit", "units 需为逗号分隔的单元编号", 400)
+        requested = {normalize_album_id(item) for item in raw_units.split(",")}
+        if not all(requested):
+            return _json_error("invalid_unit", "单元编号不合法", 400)
+        try:
+            detail = self._detail_with_cache(album_id)
+        except JmError as exc:
+            return _json_error(exc.code, exc.message, _error_status(exc.code))
+        # 无论用户输入顺序如何，均按作品清单顺序合并，不把未选单元混入。
+        ordered_ids = list(dict.fromkeys(
+            str(item.get("unit_id")) for item in detail.get("units") or []
+            if str(item.get("unit_id")) in requested))
+        if set(ordered_ids) != requested:
+            return _json_error("invalid_unit", "所选单元不属于该作品", 400)
+        records = []
+        for unit_id in ordered_ids:
+            record = self.store.get_unit(album_id, unit_id)
+            if not record or not record.get("dir") or not Path(record["dir"]).is_dir():
+                return _json_error("unit_not_downloaded", "所选单元尚未全部下载", 404)
+            records.append(record)
+        force = request.args.get("refresh", "0") in ("1", "true", "yes")
+        try:
+            stats = ensure_units_pdf(self.cfg, album_id, records, force=force, logger=self.log)
+        except PdfError as exc:
+            status = 413 if exc.code in ("pdf_too_many_pages", "pdf_too_large") else 422
+            return _json_error(exc.code, exc.message, status)
+        except Exception as exc:  # noqa: BLE001
+            self.log.exception("选集 PDF 生成异常 id=%s：%s", album_id, exc)
+            return _json_error("pdf_generate_failed", "PDF 生成失败，请稍后重试", 500)
+        return send_file(str(stats["path"]), mimetype="application/pdf", as_attachment=True,
+                         download_name=Path(stats["path"]).name, conditional=True, max_age=0)
+
+    def _handle_unit_pdf(self, album_id: str, unit_id: str):
+        record = self.store.get_unit(album_id, unit_id)
+        if not record or not record.get("dir") or not Path(record["dir"]).is_dir():
+            return _json_error("unit_not_downloaded", "该单元还没下载", 404)
+        force = request.args.get("refresh", "0") in ("1", "true", "yes")
+        started = time.time()
+        try:
+            stats = ensure_unit_pdf(
+                self.cfg, album_id, unit_id, record["dir"], record.get("title") or "",
+                force=force, logger=self.log)
+        except PdfError as exc:
+            self.log.warning("单元 PDF 生成失败 id=%s unit=%s：%s", album_id, unit_id, exc.message)
+            return _json_error(exc.code, exc.message, 404 if exc.code == "pdf_no_images" else 500)
+        except Exception as exc:  # noqa: BLE001
+            self.log.exception("单元 PDF 生成异常 id=%s unit=%s：%s", album_id, unit_id, exc)
+            return _json_error("pdf_generate_failed", "PDF 生成失败，请稍后重试", 500)
+        try:
+            self.store.set_unit_pdf(album_id, unit_id, stats["path"], stats["size"])
+        except Exception as exc:  # noqa: BLE001
+            self.log.warning("写入单元 PDF 记录失败 id=%s unit=%s：%s", album_id, unit_id, exc)
+        path = Path(stats["path"])
+        self.log.info("GET /pdf/%s?unit=%s → %s（%d 页，%.2fMB，%dms%s）",
+                      album_id, unit_id, path.name, stats.get("pages") or 0,
+                      stats["size"] / 1048576, int((time.time() - started) * 1000),
+                      "，缓存复用" if stats.get("cached") else "")
+        # 平台审出站内容：下载名同样用通用名 JM<album>-<unit>.pdf（不带标题）
+        return send_file(
+            str(path),
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=f"JM{album_id}-{unit_id}.pdf",
+            conditional=True,
+            max_age=0,
+        )
+
     # ------------------------------------------------------------------ #
     # /album
     # ------------------------------------------------------------------ #
@@ -380,6 +502,11 @@ class Service:
         detail = detail or {}
         record = record or {}
         title = detail.get("title") or record.get("title") or ""
+        units = detail.get("units") or []
+        if units:
+            unit_count = int(detail.get("unit_count") or len(units))
+        else:
+            unit_count = int(detail.get("unit_count") or detail.get("chapter_count") or 0)
         return {
             "id": album_id,
             "title": title,
@@ -389,6 +516,9 @@ class Service:
             "cover_url": detail.get("cover_url") or record.get("cover_url") or "",
             "cover_http": f"/cover/{album_id}.jpg",
             "jm_url": detail.get("jm_url") or jm_album_url(album_id),
+            "chapter_count": unit_count,
+            "unit_count": unit_count,
+            "units": units,
         }
 
     def _handle_album(self, album_id: str):
@@ -426,6 +556,36 @@ class Service:
             return record.get("viewer_url")
 
     # ------------------------------------------------------------------ #
+    # /resolve
+    # ------------------------------------------------------------------ #
+    def _handle_resolve(self, number: str):
+        raw = str(number or "").strip()
+        if not is_album_id(raw):
+            return _json_error("invalid_id", "编号需为数字", 400)
+        number = normalize_album_id(raw)
+        try:
+            resolved = self.gateway.resolve_number(number)
+        except JmError as exc:
+            return _json_error(exc.code, exc.message, _error_status(exc.code))
+        album = resolved.get("album") or {}
+        album_id = str(album.get("id") or "")
+        if album_id:
+            try:
+                self.store.put_detail(album_id, album)
+            except Exception as exc:  # noqa: BLE001 - 缓存失败不影响响应
+                self.log.warning("写详情缓存失败 id=%s：%s", album_id, exc)
+        self.log.info("GET /resolve/%s → kind=%s album=%s matched_unit=%s", number,
+                      resolved.get("kind"), album_id or "-",
+                      (resolved.get("matched_unit") or {}).get("unit_id") or "-")
+        return jsonify({
+            "ok": True,
+            "requested": number,
+            "kind": resolved.get("kind"),
+            "album": self._album_payload(album_id, detail=album),
+            "matched_unit": resolved.get("matched_unit"),
+        })
+
+    # ------------------------------------------------------------------ #
     # /download /jobs
     # ------------------------------------------------------------------ #
     def _handle_download(self):
@@ -433,14 +593,52 @@ class Service:
         if body is None and request.form:
             body = request.form.to_dict()
         if not isinstance(body, dict):
-            return _json_error("invalid_json", "请求体需为 JSON：{\"id\": \"<编号>\"}", 400)
+            return _json_error(
+                "invalid_json",
+                "请求体需为 JSON：{\"id\": \"<编号>\", \"unit\": \"<单元编号，可选>\"}", 400)
         album_id = normalize_album_id(body.get("id"))
         if not album_id:
             return _json_error("invalid_id", "编号需为数字", 400)
 
+        raw_unit = body.get("unit")
+        unit_id = None
+        if raw_unit is not None and str(raw_unit).strip() != "":
+            unit_id = normalize_album_id(raw_unit)
+            if not unit_id:
+                return _json_error("invalid_unit", "unit 需为数字编号", 400)
+        if unit_id:
+            return self._download_unit(album_id, unit_id)
+        return self._download_album(album_id)
+
+    def _download_album(self, album_id: str):
+        """整本下载（不带 unit）：多单元先 409 要 unit；否则保持老行为。"""
+        try:
+            detail = self._detail_with_cache(album_id)
+        except JmError as exc:
+            # 详情拉不到但本地已有整本 → 仍按 done 返回（老行为兜底）
+            record = self.store.get_album(album_id)
+            if record and record.get("dir") and Path(record["dir"]).is_dir():
+                return jsonify({
+                    "ok": True,
+                    "status": "done",
+                    "album": self._album_payload(album_id, record=record),
+                    "viewer_url": self._record_viewer_url(record),
+                })
+            return _json_error(exc.code, exc.message, _error_status(exc.code))
+
+        units = detail.get("units") or []
+        if len(units) > 1:
+            self.log.info("POST /download id=%s 有 %d 个单元本，要求指定 unit",
+                          album_id, len(units))
+            return jsonify({
+                "ok": False,
+                "error": "multiple_units",
+                "message": f"该作品有 {len(units)} 个单元本，请指定 unit",
+                "units": units,
+            }), 409
+
         record = self.store.get_album(album_id)
         if record and record.get("dir") and Path(record["dir"]).is_dir():
-            detail = self._detail_best_effort(album_id)
             return jsonify({
                 "ok": True,
                 "status": "done",
@@ -450,18 +648,12 @@ class Service:
 
         active = self.worker.active_job_for_album(album_id)
         if active:
-            detail = self._detail_best_effort(album_id)
             return jsonify({
                 "ok": True,
                 "status": "queued",
                 "job_id": active["job_id"],
                 "album": self._album_payload(album_id, detail=detail),
             })
-
-        try:
-            detail = self._detail_with_cache(album_id)
-        except JmError as exc:
-            return _json_error(exc.code, exc.message, _error_status(exc.code))
 
         job, created = self.worker.submit(album_id, detail)
         self.log.info("POST /download id=%s → job=%s（新建=%s）", album_id, job["job_id"], created)
@@ -472,13 +664,57 @@ class Service:
             "album": self._album_payload(album_id, detail=detail),
         })
 
-    def _detail_best_effort(self, album_id: str) -> dict | None:
-        cached = self.store.get_detail(album_id, self.cfg.detail_ttl_sec)
-        if cached:
-            return cached
+    def _download_unit(self, album_id: str, unit_id: str):
+        """单单元下载：校验 unit 属于该作品；已下载/进行中直接回状态。"""
         try:
-            return self._detail_with_cache(album_id)
-        except JmError:
+            detail = self._detail_with_cache(album_id)
+        except JmError as exc:
+            return _json_error(exc.code, exc.message, _error_status(exc.code))
+        units = detail.get("units") or []
+        unit = next((item for item in units if str(item.get("unit_id")) == unit_id), None)
+        if unit is None:
+            return _json_error("invalid_unit", f"该作品没有单元 {unit_id}", 400)
+
+        record = self.store.get_unit(album_id, unit_id)
+        if record and record.get("dir") and Path(record["dir"]).is_dir():
+            return jsonify({
+                "ok": True,
+                "status": "done",
+                "unit": unit_id,
+                "album": self._album_payload(album_id, detail=detail),
+                "viewer_url": self._unit_viewer_url(record),
+            })
+
+        active = self.worker.active_job_for_album(album_id, unit_id)
+        if active:
+            return jsonify({
+                "ok": True,
+                "status": "queued",
+                "job_id": active["job_id"],
+                "unit": unit_id,
+                "album": self._album_payload(album_id, detail=detail),
+            })
+
+        job, created = self.worker.submit(album_id, detail, unit=unit)
+        self.log.info("POST /download id=%s unit=%s → job=%s（新建=%s）",
+                      album_id, unit_id, job["job_id"], created)
+        return jsonify({
+            "ok": True,
+            "status": "queued",
+            "job_id": job["job_id"],
+            "unit": unit_id,
+            "album": self._album_payload(album_id, detail=detail),
+        })
+
+    def _unit_viewer_url(self, record: dict | None) -> str | None:
+        if not record or not record.get("dir"):
+            return None
+        directory = Path(record["dir"])
+        if not directory.is_dir():
+            return None
+        try:
+            return viewer_url_for_dir(self.cfg, directory)
+        except Exception:  # noqa: BLE001
             return None
 
     def _handle_job(self, job_id: str):
@@ -489,6 +725,7 @@ class Service:
             "ok": True,
             "job_id": job["job_id"],
             "album_id": job["album_id"],
+            "unit_id": job.get("unit_id"),
             "status": job["status"],
             "phase": job["phase"],
             "elapsed_ms": job["elapsed_ms"],

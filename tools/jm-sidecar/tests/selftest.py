@@ -33,8 +33,9 @@ from jm_service import pdf as pdf_mod  # noqa: E402
 from jm_service import util  # noqa: E402
 from jm_service.app import Service  # noqa: E402
 from jm_service.config import Config, DEFAULT_CONFIG, deep_merge  # noqa: E402
-from jm_service.pdf import (build_album_pdf, ensure_album_pdf,  # noqa: E402
-                            list_album_images, pdf_path_for, pdf_status)
+from jm_service.jm_api import JmError, JmGateway  # noqa: E402
+from jm_service.pdf import (build_album_pdf, ensure_album_pdf, ensure_unit_pdf,  # noqa: E402
+                            list_album_images, pdf_path_for, pdf_path_for_unit, pdf_status)
 from jm_service.preview import PREVIEW_WIDTH, build_preview, preview_name  # noqa: E402
 from jm_service.store import Store  # noqa: E402
 from jm_service.util import viewer_url_for_dir  # noqa: E402
@@ -67,6 +68,7 @@ def parse_pdf_structure(path: str | Path) -> dict:
     result["pages"] = len(re.findall(rb"/Type\s*/Page(?!s)", data))
     result["dct_pages"] = data.count(b"/DCTDecode")
     decoded = 0
+    centers = []
     for match_obj in re.finditer(rb"(\d+)\s+\d+\s+obj", data):
         obj_end = data.find(b"endobj", match_obj.end())
         chunk = data[match_obj.end():obj_end + 6] if obj_end > 0 else b""
@@ -86,9 +88,11 @@ def parse_pdf_structure(path: str | Path) -> dict:
             with Image.open(io.BytesIO(jpeg)) as image:
                 image.load()
                 decoded += 1
+                centers.append(image.convert("RGB").getpixel((image.width // 2, image.height // 2)))
         except Exception:  # noqa: BLE001
             continue
     result["jpeg_decoded"] = decoded
+    result["jpeg_centers"] = centers
     return result
 
 
@@ -102,6 +106,68 @@ def _make_config(tmp_root: Path, **overrides) -> Config:
     })
     raw = deep_merge(raw, overrides)
     return Config(raw, root=tmp_root)
+
+
+# ---------------------------------------------------------------------- #
+# 合成对象（不联网、不 import jmcomic）：模拟真实 JmPhotoDetail / JmAlbumDetail
+# ---------------------------------------------------------------------- #
+class FakeChapter:
+    """合成章节；只给传入的字段，方便测防御式 getattr。"""
+
+    def __init__(self, photo_id=None, name="", index=None, album_id=None, **extra):
+        if photo_id is not None:
+            self.photo_id = photo_id
+        if name:
+            self.name = name
+        if index is not None:
+            self.index = index
+        if album_id is not None:
+            self.album_id = album_id
+        for key, value in extra.items():
+            setattr(self, key, value)
+
+
+class FakeAlbum:
+    """合成本子：可 len()、可迭代，每次迭代产出一个章节实体。"""
+
+    def __init__(self, album_id: str, name: str, chapters, page_count: int = 0,
+                 authors=None, tags=None):
+        self.album_id = album_id
+        self.name = name
+        self._chapters = list(chapters)
+        self.page_count = page_count
+        self.authors = authors or []
+        self.tags = tags or []
+
+    def __len__(self):
+        return len(self._chapters)
+
+    def __iter__(self):
+        return iter(self._chapters)
+
+
+def _units_two():
+    return [
+        {"index": 1, "unit_id": "9001", "title": "第1话", "page_count": 2},
+        {"index": 2, "unit_id": "9002", "title": "第2话", "page_count": 3},
+    ]
+
+
+def _album_detail(album_id: str = "900", title: str = "合成作品", units=None) -> dict:
+    """与 JmGateway.album_detail 返回形状一致的合成详情（含 units）。"""
+    units = _units_two() if units is None else list(units)
+    return {
+        "id": str(album_id),
+        "title": title,
+        "authors": [],
+        "tags": [],
+        "page_count": sum(int(u.get("page_count") or 0) for u in units),
+        "chapter_count": len(units),
+        "unit_count": len(units),
+        "units": units,
+        "cover_url": "",
+        "jm_url": f"https://18comic.vip/album/{album_id}",
+    }
 
 
 class TempDirTest(unittest.TestCase):
@@ -209,6 +275,139 @@ class TestPreview(TempDirTest):
         self.assertTrue(out.exists() and out.stat().st_size > 0)
 
 
+class TestJmUnits(TempDirTest):
+    """判据 1/3/4：_build_album 的 units 与 resolve_number 的解析顺序（全程离线）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.cfg = _make_config(self.tmp)
+        self.gateway = JmGateway(self.cfg, logging.getLogger("test-jm-units"))
+        self.addCleanup(self.gateway.shutdown)
+
+    def test_build_album_units(self):
+        album = FakeAlbum("1205081", "合成作品", [
+            FakeChapter(photo_id="212214", name="第1话 …", index=1),
+            FakeChapter(photo_id="212215", name="第2话 …", index=2, page_count=12),
+        ])
+        detail = self.gateway._build_album(album)
+        self.assertEqual(detail["unit_count"], 2)
+        self.assertEqual(detail["chapter_count"], 2)  # 老字段与 unit_count 同值
+        self.assertEqual([u["index"] for u in detail["units"]], [1, 2])
+        self.assertEqual([u["unit_id"] for u in detail["units"]], ["212214", "212215"])
+        self.assertEqual(detail["units"][0]["title"], "第1话 …")
+        self.assertIsNone(detail["units"][0]["page_count"])  # 取不到给 null
+        self.assertEqual(detail["units"][1]["page_count"], 12)
+
+    def test_build_album_units_defensive_aliases(self):
+        class WeirdChapter:
+            def __init__(self):
+                self.photo_id = 777
+                self.title = "别名字段"
+                self.sort = "3"
+
+        class WeirdAlbum:
+            album_id = "555"
+            name = "别名作品"
+            authors = []
+            tags = []
+            page_count = 10
+
+            def __len__(self):
+                return 1
+
+            def __iter__(self):
+                return iter([WeirdChapter()])
+
+        detail = self.gateway._build_album(WeirdAlbum())
+        self.assertEqual(detail["units"], [{"index": 3, "unit_id": "777",
+                                            "title": "别名字段", "page_count": None}])
+        self.assertEqual(detail["unit_count"], 1)
+
+    def test_build_album_single_chapter_has_one_unit(self):
+        album = FakeAlbum("42", "单章作品", [FakeChapter(photo_id="4201", name="唯一章", index=1)])
+        detail = self.gateway._build_album(album)
+        self.assertEqual(detail["unit_count"], 1)
+        self.assertEqual(len(detail["units"]), 1)
+        self.assertEqual(detail["units"][0]["unit_id"], "4201")
+
+    def test_resolve_number_album_first_and_never_search(self):
+        album = _album_detail("1205081")
+        with patch.object(self.gateway, "search",
+                          side_effect=AssertionError("resolve 不能调用站内搜索")), \
+             patch.object(self.gateway, "album_detail", return_value=album) as album_mock, \
+             patch.object(self.gateway, "photo_detail",
+                          side_effect=AssertionError("album 命中不应再查章节")):
+            resolved = self.gateway.resolve_number("1205081")
+        self.assertEqual(resolved["kind"], "album")
+        self.assertEqual(resolved["album"]["unit_count"], 2)
+        self.assertIsNone(resolved["matched_unit"])
+        album_mock.assert_called_once_with("1205081")
+
+    def test_resolve_number_photo_to_parent(self):
+        parent = _album_detail("900")
+        with patch.object(self.gateway, "search",
+                          side_effect=AssertionError("resolve 不能调用站内搜索")), \
+             patch.object(self.gateway, "album_detail",
+                          side_effect=[JmError("jm_detail_failed", "不是作品号"), parent]), \
+             patch.object(self.gateway, "photo_detail",
+                          return_value={"id": "9002", "title": "第2话", "album_id": "900"}) as photo_mock:
+            resolved = self.gateway.resolve_number("9002")
+        self.assertEqual(resolved["kind"], "photo")
+        self.assertEqual(resolved["album"]["id"], "900")
+        self.assertEqual(resolved["matched_unit"]["unit_id"], "9002")
+        self.assertEqual(resolved["matched_unit"]["index"], 2)
+        self.assertEqual(resolved["matched_unit"]["title"], "第2话")
+        photo_mock.assert_called_once_with("9002")
+
+    def test_resolve_number_not_found(self):
+        with patch.object(self.gateway, "search",
+                          side_effect=AssertionError("resolve 不能调用站内搜索")), \
+             patch.object(self.gateway, "album_detail",
+                          side_effect=JmError("jm_detail_failed", "没有")), \
+             patch.object(self.gateway, "photo_detail",
+                          side_effect=JmError("jm_detail_failed", "没有")):
+            with self.assertRaises(JmError) as ctx:
+                self.gateway.resolve_number("999999")
+        self.assertEqual(ctx.exception.code, "not_found")
+
+    def test_photo_album_id_defensive_aliases(self):
+        from types import SimpleNamespace
+        self.assertEqual(self.gateway._photo_album_id(SimpleNamespace(album_id=900)), "900")
+        self.assertEqual(self.gateway._photo_album_id(SimpleNamespace(series_id="901")), "901")
+        self.assertEqual(
+            self.gateway._photo_album_id(SimpleNamespace(album=SimpleNamespace(album_id="902"))),
+            "902")
+        self.assertIsNone(self.gateway._photo_album_id(SimpleNamespace()))
+
+    def test_download_photo_prefers_option_method(self):
+        calls = []
+
+        class FakeOption:
+            def download_photo(self, photo_id):
+                calls.append(photo_id)
+
+        with patch.object(self.gateway, "_download_option", return_value=FakeOption()):
+            self.gateway.download_photo("9002", self.tmp / "staging-option")
+        self.assertEqual(calls, [9002])
+
+    def test_download_photo_falls_back_to_module_function(self):
+        import types
+
+        calls = []
+
+        class BrokenOption:
+            def download_photo(self, photo_id):
+                raise AttributeError("老版本 JmOption 没有 download_photo")
+
+        fake_jmcomic = types.ModuleType("jmcomic")
+        fake_jmcomic.download_photo = lambda photo_id, option: calls.append(photo_id)
+        with patch.dict(sys.modules, {"jmcomic": fake_jmcomic}), \
+             patch.object(self.gateway, "_download_option", return_value=BrokenOption()):
+            self.gateway.download_photo("9002", self.tmp / "staging-fallback")
+        # 注入的是假模块，不会碰到真实 jmcomic 包
+        self.assertEqual(calls, [9002])
+
+
 class TestStore(TempDirTest):
     def setUp(self):
         super().setUp()
@@ -261,6 +460,68 @@ class TestStore(TempDirTest):
         for thread in threads:
             thread.join()
         self.assertEqual(self.store.count_search(), 8)
+
+
+class TestStoreUnits(TempDirTest):
+    """units 表：upsert/get/set_pdf，以及老库幂等迁移（不动 albums 语义）。"""
+
+    def test_upsert_get_and_set_pdf(self):
+        store = Store(self.tmp / "cache" / "units.sqlite3")
+        self.addCleanup(store.close)
+        store.upsert_unit({
+            "album_id": "900", "unit_id": "9001", "title": "第1话",
+            "dir": str(self.tmp / "JM900-u9001-第1话"), "page_count": 2,
+        })
+        record = store.get_unit("900", "9001")
+        self.assertEqual(record["title"], "第1话")
+        self.assertEqual(record["page_count"], 2)
+        self.assertIsNone(record["pdf_path"])
+        store.set_unit_pdf("900", "9001", "C:/pdfs/JM900-u9001.pdf", 4321)
+        record = store.get_unit("900", "9001")
+        self.assertEqual(record["pdf_path"], "C:/pdfs/JM900-u9001.pdf")
+        self.assertEqual(record["pdf_size"], 4321)
+        # 再次 upsert 只更新元数据，不覆盖已记录的 PDF
+        store.upsert_unit({
+            "album_id": "900", "unit_id": "9001", "title": "第1话-改",
+            "dir": str(self.tmp / "changed"), "page_count": 3,
+        })
+        record = store.get_unit("900", "9001")
+        self.assertEqual(record["title"], "第1话-改")
+        self.assertEqual(record["pdf_path"], "C:/pdfs/JM900-u9001.pdf")
+        self.assertEqual([u["unit_id"] for u in store.list_units("900")], ["9001"])
+        self.assertIsNone(store.get_unit("900", "nope"))
+
+    def test_old_db_gets_units_table_idempotently(self):
+        db_path = self.tmp / "oldunits" / "old.sqlite3"
+        db_path.parent.mkdir(parents=True)
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE albums (
+                album_id TEXT PRIMARY KEY, title TEXT NOT NULL, dir TEXT NOT NULL,
+                viewer_url TEXT, page_count INTEGER, authors TEXT, tags TEXT,
+                cover_url TEXT, downloaded_at TEXT, updated_at REAL NOT NULL
+            );
+        """)
+        conn.commit()
+        conn.close()
+
+        store = Store(db_path)
+        self.addCleanup(store.close)
+        tables = {row["name"] for row in
+                  store._get_conn().execute(
+                      "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        self.assertIn("units", tables)
+        # albums 语义不动：老库没有 pdf 列时会被补上
+        album_columns = {row["name"] for row in
+                         store._get_conn().execute("PRAGMA table_info(albums)").fetchall()}
+        self.assertIn("pdf_path", album_columns)
+        store.upsert_unit({"album_id": "1", "unit_id": "2", "title": "t",
+                           "dir": "d", "page_count": 1})
+        self.assertIsNotNone(store.get_unit("1", "2"))
+        # 二次打开同一个库应幂等：不报错且数据还在
+        store2 = Store(db_path)
+        self.addCleanup(store2.close)
+        self.assertIsNotNone(store2.get_unit("1", "2"))
 
 
 class TestFlatten(TempDirTest):
@@ -374,6 +635,83 @@ class TestPdf(TempDirTest):
         self.assertEqual(size, first["size"])
         self.assertEqual(Path(path), out)
 
+    def test_mobile_media_boxes_and_long_image_pagination(self):
+        album = self.tmp / "mixed"
+        album.mkdir()
+        # 三段色带验证长图没有丢底部；再混入横图和小尺寸图。
+        image = Image.new("RGB", (200, 850), "red")
+        ImageDraw.Draw(image).rectangle((0, 283, 199, 565), fill="green")
+        ImageDraw.Draw(image).rectangle((0, 566, 199, 849), fill="blue")
+        image.save(album / "1.png")
+        Image.new("RGB", (300, 150), "yellow").save(album / "2.png")
+        Image.new("RGB", (80, 110), "purple").save(album / "3.png")
+        for width in (1000, 640):
+            out = self.tmp / f"mobile-{width}.pdf"
+            stats = build_album_pdf(album, out, attempts=[(width, 80)])
+            self.assertEqual(stats["pages"], 6)
+            boxes = re.findall(rb"/MediaBox\s*\[([^\]]+)\]", out.read_bytes())
+            self.assertEqual(len(boxes), 6)
+            for box in boxes:
+                x, y, w, h = map(float, box.split())
+                self.assertEqual((x, y), (0, 0))
+                self.assertAlmostEqual(w, 595.276, delta=0.1)
+                self.assertAlmostEqual(h, 841.89, delta=0.5)
+            structure = parse_pdf_structure(out)
+            self.assertEqual(structure["jpeg_decoded"], 6)
+            self.assertTrue(structure["xref_ok"])
+        # 真实页面像素消费端验证：顶部与底部颜色都在，短图保持比例而非拉伸。
+        pages = list(pdf_mod._a4_pages(pdf_mod._load_page(album / "1.png", 200), 200))
+        self.assertEqual(len(pages), 4)
+        self.assertEqual(pages[0].getpixel((100, 100)), (255, 0, 0))
+        self.assertEqual(pages[-1].getpixel((100, 141)), (0, 0, 255))
+        for page in pages:
+            page.close()
+
+    def test_old_layout_cache_rebuilt_and_config_changes_invalidate(self):
+        cfg = self._config()
+        album = self._make_album(count=1)
+        out = pdf_path_for(cfg, "42", "旧版")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"%PDF-old-layout")
+        first = ensure_album_pdf(cfg, "42", album, "旧版")
+        self.assertFalse(first.get("cached"))
+        self.assertTrue(ensure_album_pdf(cfg, "42", album, "旧版").get("cached"))
+        cfg.pdf_width = 640
+        self.assertFalse(ensure_album_pdf(cfg, "42", album, "旧版").get("cached"))
+
+    def test_malformed_cache_stats_rebuilds(self):
+        import json
+        cfg = self._config()
+        album = self._make_album(count=1)
+        first = ensure_album_pdf(cfg, "42", album, "cache")
+        stamp_path = Path(first["path"]).with_suffix(".pdf.json")
+        for value in (None, [], "bad"):
+            stamp = json.loads(stamp_path.read_text(encoding="utf-8"))
+            stamp["stats"] = value
+            stamp_path.write_text(json.dumps(stamp), encoding="utf-8")
+            self.assertFalse(ensure_album_pdf(cfg, "42", album, "cache").get("cached"))
+
+    def test_normal_portrait_fits_one_page_without_cutting(self):
+        image = Image.new("RGB", (400, 600), "red")
+        ImageDraw.Draw(image).rectangle((0, 500, 399, 599), fill="blue")
+        pages = list(pdf_mod._a4_pages(image, 400))
+        self.assertEqual(len(pages), 1)
+        self.assertEqual(pdf_mod._page_count(image, 400), 1)
+        self.assertEqual(pages[0].getpixel((200, 50)), (255, 0, 0))
+        self.assertEqual(pages[0].getpixel((200, 550)), (0, 0, 255))
+        pages[0].close()
+        image.close()
+
+    def test_long_image_no_tiny_tail_page(self):
+        image = Image.new("RGB", (400, 1700), "red")
+        pages = list(pdf_mod._a4_pages(image, 400))
+        self.assertEqual(len(pages), 4)
+        for page in pages:
+            # 所有页面都有均分内容，而不是末页只有几像素色带。
+            self.assertEqual(page.getpixel((200, 100)), (255, 0, 0))
+            page.close()
+        image.close()
+
     def test_default_attempts_chain(self):
         self.assertEqual(pdf_mod.default_attempts(1000, 80),
                          [(1000, 80), (850, 75), (720, 65), (640, 60)])
@@ -391,6 +729,44 @@ class TestPdf(TempDirTest):
         self.assertTrue(path.name.startswith("JM1490076-"))
         self.assertLessEqual(len(path.stem), len("JM1490076-") + 40)
         self.assertFalse(re.search(r'[<>:"/\\|?*]', path.name))
+
+
+class TestUnitPdf(TempDirTest):
+    """pdf_path_for_unit / ensure_unit_pdf：单单元落盘名与新鲜度复用。"""
+
+    def _config(self):
+        cfg = _make_config(self.tmp)
+        cfg.ensure_dirs()
+        return cfg
+
+    def _unit_dir(self, count=2):
+        directory = self.tmp / "unit-dir"
+        directory.mkdir(parents=True, exist_ok=True)
+        for index in range(count):
+            Image.new("RGB", (140, 180), (index * 50, 20, 30)).save(
+                directory / f"{index + 1:03}.jpg")
+        return directory
+
+    def test_pdf_path_for_unit_name(self):
+        cfg = self._config()
+        path = pdf_path_for_unit(cfg, "900", "9001", "很长的标题" * 20)
+        self.assertTrue(path.name.startswith("JM900-u9001-"))
+        self.assertLessEqual(len(path.stem), len("JM900-u9001-") + 40)
+        self.assertFalse(re.search(r'[<>:"/\\|?*]', path.name))
+
+    def test_ensure_unit_pdf_reuse(self):
+        cfg = self._config()
+        unit_dir = self._unit_dir(count=2)
+        first = ensure_unit_pdf(cfg, "900", "9001", unit_dir, "第1话")
+        out = pdf_path_for_unit(cfg, "900", "9001", "第1话")
+        self.assertFalse(first.get("cached"))
+        self.assertTrue(out.is_file())
+        self.assertEqual(first["pages"], 2)
+        self.assertEqual(parse_pdf_structure(out)["pages"], 2)
+        second = ensure_unit_pdf(cfg, "900", "9001", unit_dir, "第1话")
+        self.assertTrue(second.get("cached"))
+        self.assertEqual(second["elapsed_ms"], 0)
+        self.assertEqual(second["size"], first["size"])
 
 
 class TestStoreMigration(TempDirTest):
@@ -498,6 +874,283 @@ class TestWorkerSubmit(TempDirTest):
         self.assertIsNone(snapshot["pdf_size"])
 
 
+class TestUnitFlow(TempDirTest):
+    """判据 5/6/7：/download 的 409 与 unit 任务（_process 同步跑，不启后台线程）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.cfg = _make_config(self.tmp)
+        self.service = Service(self.cfg)
+        self.addCleanup(self.service.store.close)
+        self.client = self.service.app.test_client()
+        self.gw = self.service.gateway
+
+    def _get(self, path):
+        response = self.client.get(path)
+        return response.status_code, response.get_json()
+
+    def _download(self, body):
+        return self.client.post("/download", json=body)
+
+    def _run_job(self, job_id):
+        job = self.service.worker._jobs[job_id]
+        self.service.worker._process(job)
+        return self.service.worker.get_job(job_id)
+
+    def test_download_multiple_units_without_unit_409_and_no_job(self):
+        with patch.object(self.gw, "album_detail", return_value=_album_detail("900")):
+            response = self._download({"id": "900"})
+        self.assertEqual(response.status_code, 409)
+        payload = response.get_json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "multiple_units")
+        self.assertIn("2", payload["message"])
+        self.assertEqual([u["unit_id"] for u in payload["units"]], ["9001", "9002"])
+        # 关键：409 不建 job
+        self.assertEqual(self.service.worker._jobs, {})
+        self.assertEqual(self.service.worker._active_by_key, {})
+
+    def test_download_unit_queued_and_jobs_unit_id(self):
+        with patch.object(self.gw, "album_detail", return_value=_album_detail("900")):
+            response = self._download({"id": "900", "unit": "9002"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "queued")
+        self.assertEqual(payload["unit"], "9002")
+        status, job = self._get(f"/jobs/{payload['job_id']}")
+        self.assertEqual(status, 200)
+        self.assertEqual(job["unit_id"], "9002")
+        self.assertEqual(job["album_id"], "900")
+        self.assertEqual(job["title"], "第2话")  # unit job 标题用单元标题
+        self.assertEqual(job["total_pages"], 3)
+        # 同单元再提交 → 复用进行中 job
+        with patch.object(self.gw, "album_detail", return_value=_album_detail("900")):
+            again = self._download({"id": "900", "unit": "9002"})
+        self.assertEqual(again.status_code, 200)
+        self.assertEqual(again.get_json()["job_id"], payload["job_id"])
+
+    def test_download_invalid_unit_400(self):
+        with patch.object(self.gw, "album_detail", return_value=_album_detail("900")):
+            response = self._download({"id": "900", "unit": "123"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "invalid_unit")
+        self.assertEqual(self.service.worker._jobs, {})
+
+    def test_unit_job_process_only_that_unit_and_pdf(self):
+        detail = _album_detail("900")
+        downloaded = []
+
+        def fake_download_photo(photo_id, staging_dir, rule="Bd"):
+            self.assertEqual(str(photo_id), "9002")
+            self.assertEqual(rule, "Bd")
+            downloaded.append(str(photo_id))
+            staging = Path(staging_dir)
+            staging.mkdir(parents=True, exist_ok=True)
+            for index in range(2):
+                Image.new("RGB", (200, 280), (index * 50, 20, 30)).save(
+                    staging / f"{index + 1:03}.jpg")
+
+        with patch.object(self.gw, "album_detail", return_value=detail), \
+             patch.object(self.gw, "download_photo", side_effect=fake_download_photo), \
+             patch.object(self.gw, "download_album",
+                          side_effect=AssertionError("unit 任务不应下载整本")):
+            queued = self._download({"id": "900", "unit": "9002"})
+            self.assertEqual(queued.status_code, 200)
+            job_id = queued.get_json()["job_id"]
+            job = self._run_job(job_id)
+
+        self.assertEqual(job["status"], "done", job)
+        self.assertEqual(job["unit_id"], "9002")
+        self.assertEqual(job["total_pages"], 2)
+        self.assertEqual(downloaded, ["9002"])  # 只下该单元
+
+        record = self.service.store.get_unit("900", "9002")
+        self.assertIsNotNone(record)
+        self.assertTrue(Path(record["dir"]).name.startswith("JM900-u9002-"))
+        self.assertEqual(record["page_count"], 2)
+        # 记录/PDF 只针对该单元，不写整本记录
+        self.assertIsNone(self.service.store.get_album("900"))
+        self.assertEqual([u["unit_id"] for u in self.service.store.list_units("900")], ["9002"])
+
+        pdf_path = Path(record["pdf_path"])
+        self.assertTrue(pdf_path.is_file(), pdf_path)
+        self.assertTrue(pdf_path.name.startswith("JM900-u9002-"))
+        self.assertEqual(parse_pdf_structure(pdf_path)["pages"], 2)
+
+        response = self.client.get("/pdf/900?unit=9002")
+        try:
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.data.startswith(b"%PDF-1."))
+            self.assertIn("JM900-9002.pdf", response.headers.get("Content-Disposition", ""))
+        finally:
+            response.close()
+
+        # 未下载单元 → 404 unit_not_downloaded；整本仍 404 album_not_downloaded
+        status, payload = self._get("/pdf/900?unit=9001")
+        self.assertEqual(status, 404)
+        self.assertEqual(payload["error"], "unit_not_downloaded")
+        status, payload = self._get("/pdf/900")
+        self.assertEqual(status, 404)
+        self.assertEqual(payload["error"], "album_not_downloaded")
+
+        # 已下载单元再 POST → done（不新建 job）
+        with patch.object(self.gw, "album_detail", return_value=detail):
+            done = self._download({"id": "900", "unit": "9002"})
+        self.assertEqual(done.status_code, 200)
+        done_payload = done.get_json()
+        self.assertEqual(done_payload["status"], "done")
+        self.assertEqual(done_payload["unit"], "9002")
+        self.assertIn("/jm_view?path=", done_payload["viewer_url"])
+
+    def test_whole_album_job_unchanged_for_single_unit(self):
+        detail = _album_detail("77", title="整本作品", units=[
+            {"index": 1, "unit_id": "7701", "title": "唯一章", "page_count": 2}])
+        album_downloads = []
+
+        def fake_download_album(album_id, staging_dir, rule="Bd"):
+            album_downloads.append(str(album_id))
+            staging = Path(staging_dir)
+            staging.mkdir(parents=True, exist_ok=True)
+            for index in range(2):
+                Image.new("RGB", (120, 160)).save(staging / f"{index + 1:03}.jpg")
+
+        with patch.object(self.gw, "album_detail", return_value=detail), \
+             patch.object(self.gw, "download_album", side_effect=fake_download_album), \
+             patch.object(self.gw, "download_photo",
+                          side_effect=AssertionError("整本任务不应调章节下载")):
+            response = self._download({"id": "77"})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json()["status"], "queued")
+            job = self._run_job(response.get_json()["job_id"])
+
+        self.assertEqual(job["status"], "done", job)
+        self.assertIsNone(job["unit_id"])
+        self.assertEqual(album_downloads, ["77"])
+        record = self.service.store.get_album("77")
+        self.assertIsNotNone(record)
+        self.assertTrue(Path(record["dir"]).name.startswith("JM77-"))
+        self.assertEqual(record["page_count"], 2)
+        self.assertTrue(Path(record["pdf_path"]).is_file())
+        response = self.client.get("/pdf/77")
+        try:
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.data.startswith(b"%PDF-1."))
+            self.assertIn("JM77.pdf", response.headers.get("Content-Disposition", ""))
+        finally:
+            response.close()
+
+
+class TestSelectedUnitsPdf(TempDirTest):
+    """API 到真实 PDF：颜色指纹证明只合并所选单元，且按系列次序。"""
+    def setUp(self):
+        super().setUp()
+        self.cfg = _make_config(self.tmp)
+        self.service = Service(self.cfg)
+        self.addCleanup(self.service.store.close)
+        self.client = self.service.app.test_client()
+        units = [{"index": i, "unit_id": str(9000 + i), "title": f"单元{i}"}
+                 for i in range(1, 4)]
+        self.service.store.put_detail("900", _album_detail("900", units=units))
+        for i, color in enumerate(("red", "green", "blue"), start=1):
+            directory = self.tmp / f"unit{i}"
+            directory.mkdir()
+            Image.new("RGB", (120, 160), color).save(directory / "1.png")
+            self.service.store.upsert_unit({"album_id": "900", "unit_id": str(9000 + i),
+                                            "title": f"单元{i}", "dir": str(directory), "page_count": 1})
+
+    def _save_response(self, query):
+        response = self.client.get("/pdf/900?" + query)
+        self.assertEqual(response.status_code, 200, response.get_json(silent=True))
+        try:
+            path = self.tmp / "received.pdf"
+            path.write_bytes(response.data)
+            return parse_pdf_structure(path), response.headers["Content-Disposition"]
+        finally:
+            response.close()
+
+    def test_selection_order_no_unselected_pages_and_cache(self):
+        structure, name = self._save_response("units=9003,9001,9003")
+        self.assertEqual(structure["pages"], 2)
+        red, blue = structure["jpeg_centers"]
+        self.assertGreater(red[0], 240)
+        self.assertLess(red[1], 10)
+        self.assertGreater(blue[2], 240)
+        self.assertLess(blue[1], 10)
+        self.assertIn("JM900-pack-", name)
+        # 与整本和单元不混用缓存/记录；同一集合乱序与重复可复用。
+        with patch("jm_service.pdf.build_album_pdf", side_effect=AssertionError("应复用缓存")):
+            again, again_name = self._save_response("units=9001,9003")
+        self.assertEqual(name, again_name)
+        self.assertEqual(again["pages"], 2)
+        self.assertIsNone(self.service.store.get_album("900"))
+        self.assertIsNone(self.service.store.get_unit("900", "9001")["pdf_path"])
+        whole, whole_name = self._save_response("units=9001,9002,9003")
+        self.assertEqual(whole["pages"], 3)
+        self.assertNotEqual(name, whole_name)
+
+    def test_invalid_selection_rejected_before_generation(self):
+        for query in ("units=", "units=9001,", "units=9001,,9002", "units=../9001",
+                      "units=9001,9999", "units=9001&unit=9002", "units=9001&units=9002"):
+            with self.subTest(query=query), patch("jm_service.app.ensure_units_pdf") as build:
+                response = self.client.get("/pdf/900?" + query)
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.get_json()["error"], "invalid_unit")
+                build.assert_not_called()
+
+    def test_zero_and_leading_zero_rejected_before_details(self):
+        with patch.object(self.service, "_detail_with_cache", side_effect=AssertionError("不应查详情")):
+            for ids in ("0", "00", "0009001", "9001,0"):
+                response = self.client.get("/pdf/900?units=" + ids)
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.get_json()["error"], "invalid_unit")
+
+    def test_partially_missing_unit_fails_instead_of_sending_remaining_pages(self):
+        self.service.store.upsert_unit({"album_id": "900", "unit_id": "9001", "title": "missing",
+                                       "dir": str(self.tmp / "unit1"), "page_count": 2})
+        response = self.client.get("/pdf/900?units=9001,9003")
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.get_json()["error"], "pdf_incomplete_unit")
+        self.assertEqual(list(self.cfg.pdfs_dir.glob("*.pdf")), [])
+
+    def test_missing_download_never_returns_partial_pdf(self):
+        import shutil
+        shutil.rmtree(self.tmp / "unit3")
+        with patch("jm_service.app.ensure_units_pdf") as build:
+            response = self.client.get("/pdf/900?units=9001,9003")
+            self.assertEqual(response.status_code, 404)
+            self.assertEqual(response.get_json()["error"], "unit_not_downloaded")
+            build.assert_not_called()
+
+    def test_over_page_limit_rejected_not_truncated(self):
+        self.cfg.pdf_max_pages = 1
+        response = self.client.get("/pdf/900?units=9001,9003")
+        self.assertEqual(response.status_code, 413)
+        self.assertEqual(response.get_json()["error"], "pdf_too_many_pages")
+        self.assertEqual(list(self.cfg.pdfs_dir.glob("*.pdf")), [])
+
+    def test_long_image_pagination_limit_rejected(self):
+        self.cfg.pdf_max_pages = 2
+        Image.new("RGB", (100, 800), "red").save(self.tmp / "unit1" / "1.png")
+        response = self.client.get("/pdf/900?units=9001")
+        self.assertEqual(response.status_code, 413)
+        self.assertEqual(response.get_json()["error"], "pdf_too_many_pages")
+
+    def test_bad_image_does_not_skip_selected_content(self):
+        (self.tmp / "unit3" / "1.png").write_bytes(b"broken")
+        response = self.client.get("/pdf/900?units=9001,9003")
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.get_json()["error"], "pdf_bad_image")
+        self.assertEqual(list(self.cfg.pdfs_dir.glob("*.pdf")), [])
+        self.assertEqual(list(self.cfg.pdfs_dir.glob("*.tmp")), [])
+
+    def test_size_limit_fails_not_partial(self):
+        self.cfg.pdf_max_bytes = 1
+        response = self.client.get("/pdf/900?units=9001,9003")
+        self.assertEqual(response.status_code, 413)
+        self.assertEqual(response.get_json()["error"], "pdf_too_large")
+        self.assertEqual(list(self.cfg.pdfs_dir.glob("*.pdf")), [])
+
+
 class TestAppContract(TempDirTest):
     def setUp(self):
         super().setUp()
@@ -514,9 +1167,12 @@ class TestAppContract(TempDirTest):
         status, payload = self._get("/health")
         self.assertEqual(status, 200)
         for key in ("ok", "version", "service", "viewer_base", "comics_dir",
-                    "downloaded_albums", "search_cache_entries", "jm_domain"):
+                    "downloaded_albums", "search_cache_entries", "jm_domain",
+                    "capabilities"):
             self.assertIn(key, payload)
         self.assertEqual(payload["service"], "jm-service")
+        # Node 合并打包靠这条能力声明 fail closed：旧边车不认 ?units=，绝不能猜成支持。
+        self.assertEqual(payload["capabilities"], ["units"])
         self.assertEqual(payload["downloaded_albums"], 0)
         self.assertEqual(payload["search_cache_entries"], 0)
 
@@ -577,6 +1233,114 @@ class TestAppContract(TempDirTest):
         status, payload = self._get("/pdf/999999999")
         self.assertEqual(status, 404)
         self.assertEqual(payload["error"], "album_not_downloaded")
+
+    def test_resolve_route_album(self):
+        album = _album_detail("1205081")
+        gw = self.service.gateway
+        with patch.object(gw, "search",
+                          side_effect=AssertionError("resolve 不能调用站内搜索")), \
+             patch.object(gw, "album_detail", return_value=album), \
+             patch.object(gw, "photo_detail",
+                          side_effect=AssertionError("album 命中不应再查章节")):
+            status, payload = self._get("/resolve/1205081")
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["requested"], "1205081")
+        self.assertEqual(payload["kind"], "album")
+        self.assertEqual(payload["album"]["unit_count"], 2)
+        self.assertEqual([u["unit_id"] for u in payload["album"]["units"]], ["9001", "9002"])
+        self.assertIsNone(payload["matched_unit"])
+
+    def test_resolve_route_photo_and_errors(self):
+        parent = _album_detail("900")
+        gw = self.service.gateway
+        with patch.object(gw, "search",
+                          side_effect=AssertionError("resolve 不能调用站内搜索")), \
+             patch.object(gw, "album_detail",
+                          side_effect=[JmError("jm_detail_failed", "不是作品号"), parent]), \
+             patch.object(gw, "photo_detail",
+                          return_value={"id": "9002", "title": "第2话", "album_id": "900"}):
+            status, payload = self._get("/resolve/9002")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["kind"], "photo")
+        self.assertEqual(payload["album"]["id"], "900")
+        self.assertEqual(payload["matched_unit"]["unit_id"], "9002")
+        self.assertEqual(payload["matched_unit"]["index"], 2)
+
+        status, payload = self._get("/resolve/abc")
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"], "invalid_id")
+
+        with patch.object(gw, "album_detail",
+                          side_effect=JmError("jm_detail_failed", "没有")), \
+             patch.object(gw, "photo_detail",
+                          side_effect=JmError("jm_detail_failed", "没有")):
+            status, payload = self._get("/resolve/999999")
+        self.assertEqual(status, 404)
+        self.assertEqual(payload["error"], "not_found")
+
+    def test_search_images0_skips_details_covers_preview(self):
+        fake = {"total": 2, "items": [
+            {"id": "1001", "title": "标题一", "tags": ["x"], "author": "a",
+             "image": "http://img/1.jpg"},
+            {"id": "1002", "title": "标题二", "tags": [], "author": "", "image": ""},
+        ]}
+        gw = self.service.gateway
+        with patch.object(gw, "search", return_value=fake), \
+             patch.object(gw, "fetch_details",
+                          side_effect=AssertionError("images=0 不应抓详情")) as details_mock, \
+             patch.object(gw, "fetch_covers",
+                          side_effect=AssertionError("images=0 不应抓封面")) as covers_mock, \
+             patch.object(self.service, "_ensure_preview",
+                          side_effect=AssertionError("images=0 不应做拼图")) as preview_mock:
+            status, payload = self._get("/search?q=龙&images=0")
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["cached"])
+        self.assertIsNone(payload["preview_file"])
+        self.assertIsNone(payload["preview_url"])
+        self.assertEqual([r["id"] for r in payload["results"]], ["1001", "1002"])
+        self.assertEqual([r["rank"] for r in payload["results"]], [1, 2])
+        self.assertEqual(payload["results"][0]["title"], "标题一")
+        for result in payload["results"]:
+            self.assertEqual(result["authors"], [])
+            self.assertEqual(result["tags"], [])
+            self.assertIsNone(result["page_count"])
+            self.assertEqual(result["cover_url"], "")
+            self.assertIsNone(result["cover_file"])
+            self.assertEqual(result["cover_http"], f"/cover/{result['id']}.jpg")
+            self.assertFalse(result["detail_ok"])
+        self.assertIn("1.1001", payload["text"])
+        self.assertEqual(details_mock.call_count, 0)
+        self.assertEqual(covers_mock.call_count, 0)
+        self.assertEqual(preview_mock.call_count, 0)
+
+        # images=0 的缓存 key 独立，同参数再查命中缓存且仍不抓图
+        with patch.object(gw, "search", return_value=fake):
+            status, hot = self._get("/search?q=龙&images=0")
+        self.assertEqual(status, 200)
+        self.assertTrue(hot["cached"])
+        self.assertIsNone(hot["preview_file"])
+
+    def test_search_images0_cache_key_separate_from_default(self):
+        fake = {"total": 1, "items": [
+            {"id": "1001", "title": "标题一", "tags": [], "author": "", "image": ""}]}
+        gw = self.service.gateway
+        with patch.object(gw, "search", return_value=fake) as search_mock, \
+             patch.object(gw, "fetch_details", return_value={}) as details_mock, \
+             patch.object(gw, "fetch_covers", return_value={}) as covers_mock, \
+             patch.object(self.service, "_ensure_preview", return_value=None):
+            status0, payload0 = self._get("/search?q=龙&images=0")
+            self.assertEqual(status0, 200)
+            self.assertFalse(payload0["cached"])
+            self.assertEqual(details_mock.call_count, 0)
+            self.assertEqual(covers_mock.call_count, 0)
+            # 默认路径不能复用 images=0 的缓存，也不能反过来被污染
+            status1, payload1 = self._get("/search?q=龙")
+            self.assertEqual(status1, 200)
+            self.assertFalse(payload1["cached"])
+            self.assertEqual(details_mock.call_count, 1)
+            self.assertEqual(covers_mock.call_count, 1)
+            self.assertEqual(search_mock.call_count, 2)
 
     def test_download_invalid(self):
         response = self.client.post("/download", json={"id": "abc"})

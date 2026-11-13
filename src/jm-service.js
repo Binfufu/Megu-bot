@@ -1,20 +1,26 @@
 /**
- * 「搜本/下本」的**服务层**（2026-11-12）。
+ * 「搜本/下本」的**服务层**（2026-11-12；1.210.3 加编号精确解析与单元本清单）。
  *
- * 2026-11-12 主人拍板的形态：**搜本/下本单本合并，搜到即下载；搜多本给清单**。
+ * 形态（主人 2026-11-12 拍板 + 当晚现场修正）：
  *
- *   · 搜本 <关键词> [数量] → 边车搜索：
- *       - 恰好 1 本：立刻「下载 → 生成整本 PDF → 把 PDF 文件发到群」（搜本+下本合并）；
- *       - 多本：只回**文字清单**（序号 + JM 编号 + 作品标题），提示用「下本 <编号或序号>」；
- *       - 0 本：固定话术。
- *   · 下本 <编号> / 下本 <序号> → 下载该本 → 生成整本 PDF → 发 PDF 文件。
- *   · 整条链路不经过模型；失败一律固定话术。
+ *   · 搜本 <关键词>  → 边车搜索：
+ *       - 恰好 1 本（站点 total=1、没显式写数量、且这本只有 1 个单元）→ 下载 + 整本 PDF 发群；
+ *       - 多本 → 回**文字清单**（序号 + JM 编号 + 作品标题）；
+ *       - 0 本 → 固定话术。
+ *   · 搜本 <纯数字编号> → **不走站内关键词搜索**，先按编号精确解析（`/resolve`）：
+ *       - 解析成作品、只有 1 个单元 → 下载发 PDF；
+ *       - 解析成作品、有多个单元本 → 回**单元清单**问下载哪一条（不整本下载）；
+ *       - 解析成单元（章节）→ 回所属作品的单元清单，并标出「你要的是第 N 个」；
+ *       - 查不到 → 固定话术（不拿搜索兜底）。
+ *   · 下本 <编号> → 同上精确解析；解析成单元就直接只下该单元；解析成多单元作品就先列清单。
+ *   · 下本 <序号> → 取本群**最近一次清单**：有单元清单先按单元清单，否则按上次搜索结果。
+ *   · 多单元作品默认**先清单、后下载**，不无提示自动整本。
+ *   · 整本打包 / 打包1 3 5 7 → 显式选择本群最近单元清单全部/部分，逐单元下载后只发一个合并 PDF。
  *
- * 为什么不再发拼图/阅读链接：
- *   · 2026-11-12 实测：QQ 把搜本结果拼图按 `40034006 消息内容违规` 拦了（图片出口有内容审核）；
- *   · 阅读链接指向本机 `127.0.0.1:8088`，群友设备打不开；把阅读器挂公网又有泄露面；
- *   · PDF 走 `file_type=4`（群文件，平台软/硬限 200MB），bot 的「聊天记录搬运」已经用同一套
- *     `uploadFile` + `sendMedia` 发过 PDF；文件名用通用 `JM<id>.pdf`，不带作品标题。
+ * 为什么 1.210.3 要改（2026-11-12 现场）：
+ *   1.210.2 把「纯数字」当关键词丢给站内搜索，JM 对某些编号会回一个**无关作品**（搜 1205081
+ *   出来 1195659），单命中又直接整本下载 → 39MB 错本、还超过 120s 超时。编号必须走精确解析，
+ *   不能拿搜索兜底；一个作品有多个单元本时必须让用户显式选，不能自动整本打包。
  *
  * 分工（与搬图子系统同构）：
  *   · `src\jm-command.js` 纯解析群消息；
@@ -30,6 +36,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -42,13 +49,19 @@ const PASSIVE_SEQ_MAX = 5;
 const DEFAULT_MAX = 5;
 const DEFAULT_COOLDOWN_MS = 30_000;
 const DEFAULT_TIMEOUT_MS = 120_000;
-const DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
 
 /** QQ 群文件（file_type=4）硬限 200MB；边车自己的 PDF 目标体积更小，这里只做最后一道闸。 */
 const JM_PDF_HARD_MAX = 200 * 1024 * 1024;
 
 /** 多本清单里标题最多保留多少字（再长会撑爆消息，也不方便看）。 */
 const SEARCH_LIST_TITLE_CHARS = 60;
+
+/** 单元清单一次最多列多少条；旧下本序号只到 9，打包序号不受此限制。 */
+const UNIT_LIST_LIMIT = 15;
+const UNIT_LIST_TITLE_CHARS = 20;
+
+/** 纯数字关键词 = 编号（作品 id 或单元 id），走精确解析而不是站内搜索。 */
+const NUMERIC_ID_RE = /^\d{1,12}$/u;
 
 /**
  * 固定回话的默认句库。**失败路径只从这里挑句子**（不调模型、不临时编）：
@@ -58,7 +71,12 @@ export const DEFAULT_JM_LINES = Object.freeze({
   /** 群不在白名单（含空名单）。 */
   groupDisabled: ['这个群没开 JM 搜本。'],
   /** 格式提示：解析失败但确实像在写这条指令。 */
-  format: ['格式：搜本 <关键词> [1-5]；下本 <编号>。'],
+  format: ['格式：搜本 <关键词或编号>；下本 <编号或序号>；整本打包；打包1 3 5 7。'],
+  /** 打包只能针对本群最近展示的单元清单，不能借用别群或搜索结果。 */
+  noUnits: ['先搜本或下本查看单元清单，再发「整本打包」或「打包1 3 5 7」。'],
+  packInvalid: ['打包序号不对：请只填当前单元清单内的正整数序号，用空格分隔。'],
+  /** 边车未声明 units 能力：旧边车会把 ?units= 静默当整本，不能冒险下载。 */
+  packUnsupported: ['JM 边车还是旧版，暂时不能合并打包；先让管理员升级边车。'],
   /** 搜本冷却中（只拦搜本；下本不吃冷却）。 */
   cooldown: ['刚搜过，等一会再搜。'],
   /** 边车连不上 / 回 4xx/5xx。 */
@@ -74,7 +92,9 @@ export const DEFAULT_JM_LINES = Object.freeze({
   /** 序号之前没有可用的搜索结果。 */
   noSearch: ['先搜本，再用「下本 序号」；也可以直接发「下本 <编号>」。'],
   /** 序号越界。 */
-  ordinalMissing: ['这个序号不对：先搜本看编号，或直接发「下本 <编号>」。'],
+  ordinalMissing: ['这个序号不对：先看清单，或直接发「下本 <编号>」。'],
+  /** 编号在 JM 里解析不出来（不存在/不是作品或单元编号）。 */
+  noSuchId: ['没有这个编号：JM 里找不到这本。'],
   /** PDF 没拿到 / 上传或发送失败（含平台内容审核拦下）。 */
   pdfFailed: ['文件没发出去，稍后再试。'],
   /** PDF 超过平台上限。 */
@@ -86,7 +106,7 @@ export const DEFAULT_JM_LINES = Object.freeze({
 /** 没注入 log 时的静默实现（单测可以完全不传）。 */
 const SILENT_LOG = { info() {}, warn() {}, debug() {}, error() {} };
 
-/** 每个群一条串行队列（同一个人连发两条时，后一条等前一条结束）+ 最近一次搜索结果。 */
+/** 每个群一条串行队列（同一个人连发两条时，后一条等前一条结束）+ 最近一次清单/搜索结果。 */
 const GROUP_QUEUES = new Map();
 
 function queueStateFor(groupId) {
@@ -96,8 +116,10 @@ function queueStateFor(groupId) {
       tail: Promise.resolve(),
       /** 上次**成功搜本**的时间（冷却口径；null = 还没成功过）。 */
       lastSearchAt: null,
-      /** 最近一次成功的搜索结果（rank 顺序）：`[{rank, id, title}]`，供「下本 序号」用。 */
+      /** 最近一次成功的**多本搜索结果**（rank 顺序）：`[{rank, id, title}]`。 */
       lastResults: [],
+      /** 最近一次展示给用户的**单元清单**：`{kind:'units', albumId, albumTitle, units:[{index, unitId, title}]}`。 */
+      lastChoices: null,
     };
     GROUP_QUEUES.set(groupId, state);
   }
@@ -106,6 +128,7 @@ function queueStateFor(groupId) {
 
 /**
  * 群白名单判定。**空名单 = 谁都不给（fail closed）**，这是默认且不变的口径。
+ *
  * 显式「全部群」只有一种写法：名单里含 `*`。
  */
 function allowGroup(groups, groupId) {
@@ -179,14 +202,21 @@ export function spawnJmFetch({ args, env, timeoutMs = DEFAULT_TIMEOUT_MS, cwd = 
   });
 }
 
+/** 截断动态标题（QQ 文本要短；标题本身可能很长）。 */
+function shortTitle(title, max = 20) {
+  const text = String(title ?? '').replace(/\s+/gu, ' ').trim();
+  const chars = Array.from(text);
+  return chars.length > max ? `${chars.slice(0, max).join('')}…` : text;
+}
+
 /**
  * 多本搜索结果 → 群里的文字清单：序号 + JM 编号 + 作品标题。
- * 清单就是「下本 <编号或序号>」的输入；不发图、不发链接。
  *
  * @param {Array<{id:string|number, title?:string}>} results
+ * @param {{total?: number}} [extra] 站点总命中数（比列表多时在开头写「共 N 本」）
  * @returns {string}
  */
-export function buildSearchListText(results) {
+export function buildSearchListText(results, { total = 0 } = {}) {
   const list = Array.isArray(results) ? results : [];
   const lines = list.map((item, index) => {
     const id = String(item?.id ?? '').trim();
@@ -197,8 +227,50 @@ export function buildSearchListText(results) {
       : rawTitle;
     return `${index + 1}. JM${id}${title ? ` ${title}` : ''}`;
   });
-  const head = `搜到${list.length}本，回复 下本 <编号或序号> 打包整本 PDF：`;
+  const siteTotal = Number(total);
+  const head = Number.isFinite(siteTotal) && siteTotal > list.length
+    ? `搜到${list.length}本（共${siteTotal}本），回复 下本 <编号或序号> 打包整本 PDF：`
+    : `搜到${list.length}本，回复 下本 <编号或序号> 打包整本 PDF：`;
   return `${head}\n${lines.join('\n')}`;
+}
+
+/**
+ * 多单元本清单：序号 + 单元编号(JM<unit_id>) + 单元标题；标明「你要的是第几个」。
+ *
+ * @param {{albumId:string, albumTitle?:string, units:Array<{index:number,unitId:string,title:string}>,
+ *          matchedUnitId?:string|null}} input
+ * @returns {string}
+ */
+export function buildUnitListText({ albumId, albumTitle = '', units, matchedUnitId = null }) {
+  const list = Array.isArray(units) ? units : [];
+  const shown = list.slice(0, UNIT_LIST_LIMIT);
+  const albumName = shortTitle(albumTitle, 30);
+  const head = `JM${albumId}${albumName ? `《${albumName}》` : ''}有 ${list.length} 个单元本：`;
+  const lines = shown.map((unit, index) => {
+    const id = String(unit?.unitId ?? '').trim();
+    const title = shortTitle(unit?.title, UNIT_LIST_TITLE_CHARS);
+    return `${index + 1}. JM${id}${title ? ` ${title}` : ''}`;
+  });
+  const matchedIndex = matchedUnitId
+    ? list.findIndex((unit) => String(unit?.unitId ?? '') === String(matchedUnitId))
+    : -1;
+  const matched = matchedIndex >= 0 ? [`你要的是第 ${matchedIndex + 1} 个单元。`] : [];
+  const more = list.length > shown.length
+    ? [`…还有 ${list.length - shown.length} 个，发单元编号选择`]
+    : [];
+  const ordinalMax = Math.min(9, list.length);
+  const tail = `回复 下本 <序号1-${ordinalMax}> 或 下本 <单元编号>`;
+  return [head, ...matched, ...lines, ...more, tail,
+    '整本打包（#全部单元）',
+    '打包1 3 5 7（#选择单元打包）',
+  ].join('\n');
+}
+
+/** 下载前的进度回执（带标题与编号；让「编号解析到别的作品」在下载前就暴露）。 */
+export function buildDownloadAck(title, id) {
+  const name = shortTitle(title, 20);
+  const tag = id ? `（JM${id}）` : '';
+  return name ? `《${name}》${tag}正在下载打包…` : `${tag || 'JM'}正在下载打包…`;
 }
 
 /**
@@ -270,14 +342,12 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
   const apiBase = String(jm.api ?? '').trim().replace(/\/+$/u, '') || 'http://127.0.0.1:8790';
   const timeoutMs = Number.isFinite(Number(jm.timeoutMs)) && Number(jm.timeoutMs) > 0
     ? Number(jm.timeoutMs) : DEFAULT_TIMEOUT_MS;
-  const maxBytes = Number.isFinite(Number(jm.maxBytes)) && Number(jm.maxBytes) > 0
-    ? Number(jm.maxBytes) : DEFAULT_MAX_BYTES;
   const maxCount = Number.isFinite(Number(jm.max)) && Number(jm.max) > 0
     ? Math.floor(Number(jm.max)) : DEFAULT_MAX;
 
   const state = queueStateFor(groupId);
   const job = state.tail.then(async () => {
-    /** 本次命令一个临时目录（搜索结果图、整本 PDF 都只活这一次）；无论成败都清掉。 */
+    /** 本次命令一个临时目录（整本/单元 PDF 都只活这一次）；无论成败都清掉。 */
     let tempDir = '';
     try {
       try {
@@ -311,49 +381,93 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
 
       /** 抓取失败 → 按 reason 挑固定话术（边车不可用/超时/子进程输出坏了/其它）。 */
       const replyFetchFailure = async (payload, fetched, { download = false } = {}) => {
+        // 没有可读 JSON 时区分两种现场：子进程根本没输出（多半没起来/被杀）vs 输出坏了。
         const fallbackReason = fetched?.timedOut
           ? 'timeout'
           : (String(fetched?.stdout ?? '').trim() ? 'bad_payload' : 'service_down');
         const reason = String(payload?.reason ?? fallbackReason);
         const detail = payload?.detail ?? (fetched?.code ? `抓取器退出码 ${fetched.code}` : '没有可读的抓取结果');
         log.warn(`JM：${download ? '下载' : '搜索'}失败（${reason}）：${detail}`);
-        if (reason === 'timeout') await reply(pickLine('timeout'));
+        if (reason === 'not_found') await reply(pickLine('noSuchId'));
+        else if (reason === 'timeout') await reply(pickLine('timeout'));
         else if (reason === 'service_down' || reason === 'http_error') await reply(pickLine('serviceDown'));
         else if (download) await reply(pickLine('downloadFailed'));
         else await reply(pickLine('searchFailed'));
         return { ok: false, reason, action: download ? 'download' : 'search' };
       };
 
+      /** 按编号精确解析（作品或单元）；**绝不**走站内搜索。 */
+      const resolveNumber = async (number) => callFetch([
+        '--op', 'resolve',
+        '--id', String(number),
+        '--api', apiBase,
+        '--timeout', String(timeoutMs),
+      ]);
+
+      /** 展示单元清单 + 记住选择状态（后续「下本 <序号/单元编号>」用）。 */
+      const showUnitList = async ({ albumId, albumTitle = '', units, matchedUnitId = null, action = 'search' }) => {
+        const list = (Array.isArray(units) ? units : [])
+          .map((unit, index) => ({
+            index: Number(unit?.index) || index + 1,
+            unitId: String(unit?.unitId ?? ''),
+            title: String(unit?.title ?? ''),
+          }))
+          .filter((unit) => unit.unitId !== '');
+        state.lastChoices = {
+          kind: 'units',
+          albumId: String(albumId ?? ''),
+          albumTitle: String(albumTitle ?? ''),
+          units: list,
+        };
+        state.lastResults = [];
+        await reply(buildUnitListText({ albumId, albumTitle, units: list, matchedUnitId }));
+        return { ok: true, reason: 'choose_unit', sent: 0, action };
+      };
+
       /**
-       * 下载一本 → 边车生成/缓存整本 PDF → 上传成 QQ 群文件 → 发文件 + 一句短标题。
+       * 下载一本（或其中一个单元）→ 边车生成/缓存 PDF → 上传成 QQ 群文件 → 发文件。
        * 返回 {ok:true, title, bytes} 或 {ok:false, reason}（失败时固定话术已经回过）。
        */
-      const sendAlbumPdf = async (albumId, { titleHint = '' } = {}) => {
+      const sendAlbumPdf = async (albumId, { unitId = null, unitIds = null, titleHint = '', idForName = '' } = {}) => {
         if (!uploadFile || !sendMedia) {
           log.error('JM：uploadFile/sendMedia 没有注入（src/index.js 应传入 api 的出口）');
           await reply(pickLine('internal'));
           return { ok: false, reason: 'no_sender' };
         }
-        const download = await callFetch([
-          '--op', 'download',
-          '--id', albumId,
-          '--api', apiBase,
-          '--timeout', String(timeoutMs),
-        ]);
-        if (!download.payload || download.payload.ok !== true) {
-          return await replyFetchFailure(download.payload, download.fetched, { download: true });
+        // 选集严格逐单元复用既有 download API；全部成功后才请求一次合并 PDF。
+        // 不能先取 PDF 再补下载，也不能某单元失败后发残缺选集。
+        let title = String(titleHint ?? '');
+        let unitKey = String(unitId ?? '').trim();
+        for (const selectedId of unitIds ?? [unitId]) {
+          const downloadArgs = [
+            '--op', 'download',
+            '--id', String(albumId),
+            '--api', apiBase,
+            '--timeout', String(timeoutMs),
+          ];
+          if (selectedId) downloadArgs.push('--unit', String(selectedId));
+          const download = await callFetch(downloadArgs);
+          if (!download.payload || download.payload.ok !== true) {
+            return await replyFetchFailure(download.payload, download.fetched, { download: true });
+          }
+          if (!unitIds) {
+            title = String(download.payload.title ?? titleHint ?? '');
+            unitKey = String(download.payload.unit ?? unitId ?? '').trim();
+          }
         }
-        const title = String(download.payload.title ?? titleHint ?? '');
 
-        const pdf = await callFetch([
+        const pdfArgs = [
           '--op', 'pdf',
-          '--id', albumId,
+          '--id', String(albumId),
           '--api', apiBase,
           '--out-dir', tempDir,
           '--timeout', String(timeoutMs),
-        ]);
+        ];
+        if (unitIds) pdfArgs.push('--units', unitIds.join(','));
+        else if (unitId) pdfArgs.push('--unit', String(unitId));
+        const pdf = await callFetch(pdfArgs);
         if (!pdf.payload || pdf.payload.ok !== true) {
-          log.warn(`JM：整本 PDF 没拿到（id=${albumId}）：${pdf.payload?.reason ?? 'unknown'} ${pdf.payload?.detail ?? ''}`);
+          log.warn(`JM：PDF 没拿到（id=${albumId}${unitId ? ` unit=${unitId}` : ''}）：${pdf.payload?.reason ?? 'unknown'} ${pdf.payload?.detail ?? ''}`);
           await reply(pickLine('pdfFailed'));
           return { ok: false, reason: 'pdf_failed' };
         }
@@ -373,12 +487,16 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
           return { ok: false, reason: 'pdf_read_failed' };
         }
 
+        // 选集使用独立命名空间：即使只选一单元或显式全选，也不撞单元/旧整本文件。
+        const fileKey = unitIds
+          ? `${albumId}-pack-${createHash('sha256').update(unitIds.join(',')).digest('hex').slice(0, 16)}`
+          : unitKey || String(idForName || albumId);
         try {
           const fileInfo = await uploadFile({
             scene: 'group',
             openid: groupId,
             // 通用文件名：不带作品标题（平台审出站内容，标题不必进文件名）。
-            fileName: `JM${albumId}.pdf`,
+            fileName: `JM${fileKey}.pdf`,
             buffer,
             fileType: 4,
           });
@@ -387,16 +505,15 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
           await sendMedia(usePassive
             ? { scene: 'group', openid: groupId, fileInfo, msgId: passiveId, msgSeq: seq }
             : { scene: 'group', openid: groupId, fileInfo });
-          log.info(`JM：已发整本 PDF（JM${albumId}.pdf，${Math.round(buffer.length / 1024)}KB）`);
+          log.info(`JM：已发${unitIds ? '选集' : unitKey ? '单元' : '整本'} PDF（JM${fileKey}.pdf，${Math.round(buffer.length / 1024)}KB）`);
         } catch (err) {
           // 含平台内容审核（40034006）与按天容量上限（40093002）等 —— 都收口成固定话术。
-          log.warn(`JM：PDF 没发出去（id=${albumId}）：${err?.message ?? err}`);
+          log.warn(`JM：PDF 没发出去（id=${albumId}${unitId ? ` unit=${unitId}` : ''}）：${err?.message ?? err}`);
           await reply(pickLine('pdfFailed'));
           return { ok: false, reason: 'pdf_send_failed' };
         }
 
         // 成功时不补任何说明：结果就是文件本身；只有失败才回固定话术。
-        // （主人 2026-11-12：「正常有结果的时候不用在给出结果之后接一句已打包…」）
         return { ok: true, title, bytes: buffer.length };
       };
 
@@ -411,67 +528,234 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
           return { ok: false, reason: 'cooldown' };
         }
 
+        const keyword = String(parsed.keyword ?? '').trim();
+        // ③ 纯数字 = 编号：精确解析，不走站内关键词搜索（1.210.2 的错本就出在这）。
+        if (NUMERIC_ID_RE.test(keyword)) {
+          const { fetched, payload } = await resolveNumber(keyword);
+          if (!payload || payload.ok !== true) return await replyFetchFailure(payload, fetched);
+          const album = payload.album && typeof payload.album === 'object' ? payload.album : {};
+          const units = Array.isArray(album.units) ? album.units : [];
+          const matched = payload.matchedUnit && typeof payload.matchedUnit === 'object' ? payload.matchedUnit : null;
+          if (units.length > 1) {
+            state.lastSearchAt = startedAt;
+            return await showUnitList({
+              albumId: album.id || keyword,
+              albumTitle: album.title || '',
+              units,
+              matchedUnitId: matched?.unitId ?? null,
+              action: 'search',
+            });
+          }
+          const title = String(matched?.title || album.title || '');
+          const downloadUnit = matched?.unitId ? String(matched.unitId) : null;
+          const targetId = String(album.id || keyword);
+          await reply(buildDownloadAck(title, downloadUnit || targetId));
+          const sent = await sendAlbumPdf(targetId, {
+            unitId: downloadUnit,
+            titleHint: title,
+            idForName: downloadUnit || targetId,
+          });
+          if (sent.ok !== true) return { ok: false, reason: sent.reason ?? 'download_failed', action: 'search' };
+          state.lastSearchAt = startedAt;
+          return { ok: true, reason: 'ok', sent: 1, action: 'search' };
+        }
+
+        // ④ 关键词搜索：不再要图（--images 0），也不发拼图/封面。
         const count = Math.min(Number.isSafeInteger(parsed.count) && parsed.count > 0 ? parsed.count : maxCount, maxCount);
         const { fetched, payload } = await callFetch([
           '--op', 'search',
-          '--q', parsed.keyword,
+          '--q', keyword,
           '--limit', String(count),
           '--api', apiBase,
-          '--out-dir', tempDir,
+          '--images', '0',
           '--timeout', String(timeoutMs),
-          '--max-bytes', String(maxBytes),
         ]);
         if (!payload || payload.ok !== true) return await replyFetchFailure(payload, fetched);
 
         const results = Array.isArray(payload.results)
           ? payload.results.filter((item) => item && String(item.id ?? '').trim() !== '')
           : [];
-        // 记住最近一次搜索的 rank→id 映射（「下本 序号」用）；失败/空结果不覆盖上一次。
-        if (results.length > 0) {
-          state.lastResults = results.map((item, index) => ({
-            rank: Number(item.rank) || index + 1,
-            id: String(item.id),
-            title: String(item.title ?? ''),
-          }));
-        }
-        if (results.length === 0) {
+        const siteTotal = Number.isFinite(Number(payload.total)) ? Number(payload.total) : 0;
+        // total=0 却有结果：多半是边车把「0 结果页」的推荐位当成了结果（1.210.2 现场同类），按 0 本收口。
+        if (results.length === 0 || siteTotal === 0) {
+          if (results.length > 0) {
+            log.warn(`JM：搜索 total=0 但有 ${results.length} 条结果，按 0 本处理（疑似推荐位冒充）`);
+          }
+          state.lastResults = [];
+          state.lastChoices = null;
           log.info('JM：搜索成功但 0 本');
           await reply(pickLine('noResult'));
           return { ok: false, reason: 'no_result', action: 'search' };
         }
 
-        // ③ 单本：搜本+下本合并 —— 立刻下载、打包 PDF、发文件。
-        if (results.length === 1) {
-          const only = state.lastResults[0];
-          await reply('搜到1本，正在下载打包…');
-          const sent = await sendAlbumPdf(only.id, { titleHint: only.title });
-          if (sent.ok !== true) return { ok: false, reason: sent.reason ?? 'pdf_failed', action: 'search' };
+        const autoSingle = results.length === 1 && siteTotal === 1 && !parsed.countGiven;
+        if (autoSingle) {
+          const hit = results[0];
+          // 单本也要先解析单元：多单元作品不能整本下。
+          const resolved = await resolveNumber(hit.id);
+          if (!resolved.payload || resolved.payload.ok !== true) {
+            return await replyFetchFailure(resolved.payload, resolved.fetched);
+          }
+          const album = resolved.payload.album && typeof resolved.payload.album === 'object' ? resolved.payload.album : {};
+          const units = Array.isArray(album.units) ? album.units : [];
+          if (units.length > 1) {
+            state.lastSearchAt = startedAt;
+            return await showUnitList({
+              albumId: album.id || hit.id,
+              albumTitle: album.title || hit.title || '',
+              units,
+              matchedUnitId: null,
+              action: 'search',
+            });
+          }
+          const title = String(album.title || hit.title || '');
+          const targetId = String(album.id || hit.id);
+          await reply(buildDownloadAck(title, targetId));
+          const sent = await sendAlbumPdf(targetId, { unitId: null, titleHint: title, idForName: targetId });
+          if (sent.ok !== true) return { ok: false, reason: sent.reason ?? 'download_failed', action: 'search' };
           state.lastSearchAt = startedAt;
           return { ok: true, reason: 'ok', sent: 1, action: 'search' };
         }
 
-        // ④ 多本：只回文字清单（JM 编号 + 作品标题 + 序号），不发图、不发链接。
-        await reply(buildSearchListText(results));
+        // ⑤ 多本（或「单本但不是唯一命中」）→ 只回文字清单，记住选择状态。
+        state.lastResults = results.map((item, index) => ({
+          rank: Number(item.rank) || index + 1,
+          id: String(item.id),
+          title: String(item.title ?? ''),
+        }));
+        state.lastChoices = null;
+        await reply(buildSearchListText(results, { total: siteTotal }));
         state.lastSearchAt = startedAt;
         return { ok: true, reason: 'ok', sent: 0, action: 'search' };
       }
 
-      // —— 下本 ——
-      let id = String(parsed.target ?? '').trim();
-      if (!id) {
-        const ordinal = Number(parsed.ordinal);
-        const entry = Number.isSafeInteger(ordinal) ? state.lastResults[ordinal - 1] : null;
-        if (!entry) {
-          log.info(`JM：下本序号 ${ordinal} 没有对应的搜索结果`);
-          await reply(state.lastResults.length === 0 ? pickLine('noSearch') : pickLine('ordinalMissing'));
-          return { ok: false, reason: 'ordinal_missing', action: 'download' };
+      if (parsed.action === 'pack') {
+        const choice = state.lastChoices;
+        if (!choice || choice.kind !== 'units' || !choice.units.length) {
+          await reply(pickLine('noUnits'));
+          return { ok: false, reason: 'no_units', action: 'pack' };
         }
-        id = entry.id;
-        log.info(`JM：序号 ${ordinal} → 编号 ${id}（${entry.title || '无标题'}）`);
+        // 全量校验必须发生在进度回执和任何下载前；不容许只校验到第一个合法项就开下。
+        const ranks = parsed.ordinals;
+        const valid = typeof parsed.all === 'boolean' && Array.isArray(ranks)
+          && (parsed.all ? ranks.length === 0 : ranks.length > 0)
+          && Array.from(ranks).every((rank) => Number.isSafeInteger(rank) && rank >= 1 && rank <= choice.units.length);
+        if (!valid) {
+          await reply(pickLine('packInvalid'));
+          return { ok: false, reason: 'ordinal_missing', action: 'pack' };
+        }
+        const wanted = new Set(ranks);
+        // 按清单顺序选，不按用户输入顺序；按 ID 去重，不推断/补选生肉熟肉。
+        const unitIds = [...new Set(choice.units
+          .filter((_, index) => parsed.all || wanted.has(index + 1))
+          .map((unit) => String(unit.unitId ?? '')))];
+        const albumId = String(choice.albumId ?? '');
+        if (!/^[1-9]\d{0,11}$/u.test(albumId)
+          || unitIds.length === 0 || unitIds.some((id) => !/^[1-9]\d{0,11}$/u.test(id))) {
+          await reply(pickLine('packInvalid'));
+          return { ok: false, reason: 'invalid_units', action: 'pack' };
+        }
+        // 边车能力闸（2026-11-13 部署时加）：旧边车不认 ?units=，会静默回整本/404，
+        // 必须先在读任何单元、发任何进度前拒绝，绝不把"所选生肉"变成整本混排。
+        const health = await callFetch(['--op', 'health', '--api', apiBase, '--timeout', String(timeoutMs)]);
+        const caps = Array.isArray(health.payload?.capabilities) ? health.payload.capabilities : [];
+        if (!health.payload || health.payload.ok !== true || !caps.includes('units')) {
+          log.warn(`JM：边车不支持 units 合并（capabilities=${JSON.stringify(caps)}），拒绝打包`);
+          await reply(pickLine('packUnsupported'));
+          return { ok: false, reason: 'pack_unsupported', action: 'pack' };
+        }
+        await reply(buildDownloadAck(`${choice.albumTitle || '所选单元'}（${unitIds.length}个单元）`, albumId));
+        const sent = await sendAlbumPdf(albumId, { unitIds, titleHint: choice.albumTitle });
+        if (!sent.ok) return { ok: false, reason: sent.reason ?? 'download_failed', action: 'pack' };
+        return { ok: true, reason: 'ok', sent: 1, action: 'pack' };
       }
 
-      await reply(`正在下载打包 JM${id}…`);
-      const sent = await sendAlbumPdf(id);
+      // —— 下本 ——
+      let albumId = '';
+      let unitId = null;
+      let titleHint = '';
+      let ackId = '';
+      const directId = String(parsed.target ?? '').trim();
+      if (directId) {
+        const { fetched, payload } = await resolveNumber(directId);
+        if (!payload || payload.ok !== true) return await replyFetchFailure(payload, fetched, { download: true });
+        const album = payload.album && typeof payload.album === 'object' ? payload.album : {};
+        const units = Array.isArray(album.units) ? album.units : [];
+        const matched = payload.matchedUnit && typeof payload.matchedUnit === 'object' ? payload.matchedUnit : null;
+        if (payload.kind === 'photo' && matched?.unitId) {
+          // 给的本身就是单元编号：只下这一单元，不需要再问。
+          albumId = String(album.id || '');
+          unitId = String(matched.unitId);
+          titleHint = String(matched.title || album.title || '');
+          ackId = unitId;
+        } else if (units.length > 1) {
+          return await showUnitList({
+            albumId: album.id || directId,
+            albumTitle: album.title || '',
+            units,
+            matchedUnitId: null,
+            action: 'download',
+          });
+        } else {
+          albumId = String(album.id || directId);
+          unitId = null;
+          titleHint = String(album.title || '');
+          ackId = albumId;
+        }
+      } else {
+        const ordinal = Number(parsed.ordinal);
+        const choice = state.lastChoices;
+        if (choice && choice.kind === 'units') {
+          const unit = Number.isSafeInteger(ordinal) ? choice.units[ordinal - 1] : null;
+          if (!unit) {
+            log.info(`JM：下本序号 ${ordinal} 不在最近一次单元清单里`);
+            await reply(pickLine('ordinalMissing'));
+            return { ok: false, reason: 'ordinal_missing', action: 'download' };
+          }
+          albumId = String(choice.albumId || '');
+          unitId = String(unit.unitId);
+          titleHint = String(unit.title || choice.albumTitle || '');
+          ackId = unitId;
+        } else {
+          const entry = Number.isSafeInteger(ordinal) ? state.lastResults[ordinal - 1] : null;
+          if (!entry) {
+            log.info(`JM：下本序号 ${ordinal} 没有对应的搜索结果`);
+            await reply(state.lastResults.length === 0 ? pickLine('noSearch') : pickLine('ordinalMissing'));
+            return { ok: false, reason: 'ordinal_missing', action: 'download' };
+          }
+          // 清单里的编号可能是多单元作品：先解析，多单元就先列清单再让用户选。
+          const { fetched, payload } = await resolveNumber(entry.id);
+          if (!payload || payload.ok !== true) return await replyFetchFailure(payload, fetched, { download: true });
+          const album = payload.album && typeof payload.album === 'object' ? payload.album : {};
+          const units = Array.isArray(album.units) ? album.units : [];
+          if (units.length > 1) {
+            return await showUnitList({
+              albumId: album.id || entry.id,
+              albumTitle: album.title || entry.title || '',
+              units,
+              matchedUnitId: null,
+              action: 'download',
+            });
+          }
+          albumId = String(album.id || entry.id);
+          unitId = null;
+          titleHint = String(album.title || entry.title || '');
+          ackId = albumId;
+        }
+      }
+
+      if (!albumId) {
+        log.error('JM：下本没有解析出作品编号');
+        await reply(pickLine('internal'));
+        return { ok: false, reason: 'no_album', action: 'download' };
+      }
+
+      await reply(buildDownloadAck(titleHint, ackId));
+      const sent = await sendAlbumPdf(albumId, {
+        unitId,
+        titleHint,
+        idForName: unitId || albumId,
+      });
       if (sent.ok !== true) return { ok: false, reason: sent.reason ?? 'download_failed', action: 'download' };
       return { ok: true, reason: 'ok', sent: 1, action: 'download' };
     } catch (err) {

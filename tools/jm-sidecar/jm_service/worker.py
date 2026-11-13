@@ -10,9 +10,9 @@ import uuid
 from pathlib import Path
 
 from .jm_api import JmError
-from .pdf import ensure_album_pdf
+from .pdf import ensure_album_pdf, ensure_unit_pdf
 from .util import (album_folder_name, find_first_image_dir, now_iso,
-                   viewer_url_for_dir)
+                   unit_folder_name, viewer_url_for_dir)
 
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff"}
 
@@ -63,7 +63,7 @@ class DownloadWorker:
         self.log = logger
         self._queue: queue.Queue = queue.Queue()
         self._jobs: dict[str, dict] = {}
-        self._active_by_album: dict[str, str] = {}
+        self._active_by_key: dict[str, str] = {}
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -84,23 +84,41 @@ class DownloadWorker:
             self._thread.join(timeout=5)
 
     # ------------------------------------------------------------------ #
-    def submit(self, album_id: str, album: dict) -> tuple[dict, bool]:
-        """提交下载任务；同一 id 进行中返回已有 job。返回 (job 快照, 是否新建)。"""
+    @staticmethod
+    def _job_key(album_id: str, unit_id: str | None = None) -> str:
+        """去重 key：整本任务用 album_id，单元任务用 album_id|unit_id。"""
         album_id = str(album_id)
+        return album_id if not unit_id else f"{album_id}|{unit_id}"
+
+    def submit(self, album_id: str, album: dict, unit: dict | None = None) -> tuple[dict, bool]:
+        """提交下载任务；同一 key（整本或某单元）进行中返回已有 job。返回 (job 快照, 是否新建)。"""
+        album_id = str(album_id)
+        unit_id = str(unit.get("unit_id")) if unit and unit.get("unit_id") else None
+        unit = unit or {}
+        key = self._job_key(album_id, unit_id)
         with self._lock:
-            existing_id = self._active_by_album.get(album_id)
+            existing_id = self._active_by_key.get(key)
             if existing_id:
                 job = self._jobs.get(existing_id)
                 if job and job["status"] in ("queued", "running"):
                     return dict(job), False
+            if unit_id:
+                title = unit.get("title") or ""
+                total_pages = int(unit.get("page_count") or 0)
+            else:
+                title = album.get("title") if album else None
+                total_pages = int(album.get("page_count") or 0) if album else 0
             job_id = uuid.uuid4().hex
             job = {
                 "job_id": job_id,
                 "album_id": album_id,
+                "unit_id": unit_id,
+                "unit_title": unit.get("title") if unit_id else None,
+                "unit_index": unit.get("index") if unit_id else None,
                 "status": "queued",
                 "phase": "detail",
-                "title": album.get("title") if album else None,
-                "total_pages": int(album.get("page_count") or 0) if album else 0,
+                "title": title,
+                "total_pages": total_pages,
                 "elapsed_ms": 0,
                 "viewer_url": None,
                 "dir": None,
@@ -110,9 +128,9 @@ class DownloadWorker:
                 "created_at": time.time(),
             }
             self._jobs[job_id] = job
-            self._active_by_album[album_id] = job_id
+            self._active_by_key[key] = job_id
             self._queue.put(job_id)
-        self.log.info("下载任务入队 job=%s album=%s", job_id, album_id)
+        self.log.info("下载任务入队 job=%s album=%s unit=%s", job_id, album_id, unit_id or "-")
         return dict(job), True
 
     def get_job(self, job_id: str) -> dict | None:
@@ -120,9 +138,9 @@ class DownloadWorker:
             job = self._jobs.get(job_id)
             return self._snapshot(job) if job else None
 
-    def active_job_for_album(self, album_id: str) -> dict | None:
+    def active_job_for_album(self, album_id: str, unit_id: str | None = None) -> dict | None:
         with self._lock:
-            job_id = self._active_by_album.get(str(album_id))
+            job_id = self._active_by_key.get(self._job_key(album_id, unit_id))
             job = self._jobs.get(job_id) if job_id else None
             if job and job["status"] in ("queued", "running"):
                 return self._snapshot(job)
@@ -158,7 +176,8 @@ class DownloadWorker:
                 self._fail(job, f"内部错误：{exc}")
             finally:
                 with self._lock:
-                    self._active_by_album.pop(job["album_id"], None)
+                    self._active_by_key.pop(
+                        self._job_key(job["album_id"], job.get("unit_id")), None)
                     if job["status"] not in ("done", "failed"):
                         job["status"] = "failed"
                         job["error"] = job.get("error") or "任务中断"
@@ -166,17 +185,27 @@ class DownloadWorker:
     # ------------------------------------------------------------------ #
     def _process(self, job: dict) -> None:
         album_id = job["album_id"]
+        unit_id = job.get("unit_id")
         started = time.time()
         self._update(job, status="running", phase="detail")
-        self.log.info("开始处理下载任务 job=%s album=%s", job["job_id"], album_id)
+        self.log.info("开始处理下载任务 job=%s album=%s unit=%s",
+                      job["job_id"], album_id, unit_id or "-")
 
         album = None
         try:
             album = self.gateway.album_detail(album_id)
-            self._update(job, phase="download", title=album.get("title"),
-                         total_pages=int(album.get("page_count") or 0))
+            if unit_id:
+                # 单元任务的标题/页数以单元为准，不被整本详情覆盖
+                self._update(job, phase="download")
+            else:
+                self._update(job, phase="download", title=album.get("title"),
+                             total_pages=int(album.get("page_count") or 0))
         except JmError as exc:
             self._fail(job, exc.message)
+            return
+
+        if unit_id:
+            self._process_unit(job, album, started)
             return
 
         staging_root = Path(self.cfg.staging_dir)
@@ -225,7 +254,53 @@ class DownloadWorker:
             self._cleanup_staging(staging)
         finally:
             with self._lock:
-                self._active_by_album.pop(album_id, None)
+                self._active_by_key.pop(album_id, None)
+
+    def _process_unit(self, job: dict, album: dict, started: float) -> None:
+        """单单元下载：只下一章 → 目录/记录/PDF 都只针对该单元。"""
+        album_id = job["album_id"]
+        unit_id = str(job["unit_id"])
+        unit_title = job.get("unit_title") or ""
+        staging_root = Path(self.cfg.staging_dir)
+        staging = staging_root / f"JM{album_id}-u{unit_id}"
+        try:
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+            staging.mkdir(parents=True, exist_ok=True)
+            self.gateway.download_photo(unit_id, staging, rule="Bd")
+            self._update(job, phase="finalize")
+            flatten_single_chapter(staging, self.log)
+            image_count = _count_images(staging)
+            if image_count <= 0:
+                raise JmError("download_empty", "下载完成但没有得到任何图片")
+            final_dir = self._finalize_unit_dir(album_id, unit_id, unit_title, staging)
+            viewer_url = viewer_url_for_dir(self.cfg, final_dir)
+            self.store.upsert_unit({
+                "album_id": album_id,
+                "unit_id": unit_id,
+                "title": unit_title,
+                "dir": str(final_dir),
+                "page_count": image_count,
+            })
+            pdf_ready, pdf_size = self._generate_unit_pdf(
+                album_id, unit_id, final_dir, unit_title)
+            self._update(job, status="done", phase="finalize", viewer_url=viewer_url,
+                         dir=str(final_dir), total_pages=image_count, error=None,
+                         pdf_ready=pdf_ready, pdf_size=pdf_size)
+            self.log.info("单元下载任务完成 job=%s album=%s unit=%s，%d 张图，%.1fs → %s（PDF=%s）",
+                          job["job_id"], album_id, unit_id, image_count,
+                          time.time() - started, final_dir,
+                          f"{pdf_size} bytes" if pdf_ready else "未生成")
+        except JmError as exc:
+            self._fail(job, exc.message)
+            self._cleanup_staging(staging)
+        except Exception as exc:  # noqa: BLE001
+            self.log.exception("单元下载失败 job=%s", job["job_id"])
+            self._fail(job, f"下载失败：{exc}")
+            self._cleanup_staging(staging)
+        finally:
+            with self._lock:
+                self._active_by_key.pop(self._job_key(album_id, unit_id), None)
 
     def _generate_pdf(self, album_id: str, final_dir: Path, album: dict) -> tuple[bool, int | None]:
         """finalize 后同步生成 PDF；失败不影响下载结果（GET /pdf/<id> 仍可重试生成）。"""
@@ -239,11 +314,38 @@ class DownloadWorker:
                              album_id, album_id, exc)
             return False, None
 
+    def _generate_unit_pdf(self, album_id: str, unit_id: str, final_dir: Path,
+                           unit_title: str) -> tuple[bool, int | None]:
+        """单元任务 finalize 后生成该单元 PDF；失败不影响下载结果。"""
+        try:
+            stats = ensure_unit_pdf(self.cfg, album_id, unit_id, final_dir,
+                                    unit_title or "", logger=self.log)
+            self.store.set_unit_pdf(album_id, unit_id, stats["path"], stats["size"])
+            return True, int(stats["size"])
+        except Exception as exc:  # noqa: BLE001 - PDF 失败不阻塞下载
+            self.log.warning(
+                "下载后生成单元 PDF 失败 album=%s unit=%s（可稍后 GET /pdf/%s?unit=%s 重试）：%s",
+                album_id, unit_id, album_id, unit_id, exc)
+            return False, None
+
     def _finalize_dir(self, album_id: str, album: dict, staging: Path) -> Path:
         """把 staging 目录移动到 data/comics/JM<id>-<安全标题40字>/。"""
         comics_dir = Path(self.cfg.comics_dir)
         comics_dir.mkdir(parents=True, exist_ok=True)
         folder = album_folder_name(album_id, album.get("title") or "", max_len=40)
+        final_dir = comics_dir / folder
+        if final_dir.exists():
+            self.log.warning("目标目录已存在，先清理：%s", final_dir)
+            shutil.rmtree(final_dir, ignore_errors=True)
+        shutil.move(str(staging), str(final_dir))
+        return final_dir
+
+    def _finalize_unit_dir(self, album_id: str, unit_id: str, unit_title: str,
+                           staging: Path) -> Path:
+        """把 staging 目录移动到 data/comics/JM<album>-u<unit>-<安全标题30字>/。"""
+        comics_dir = Path(self.cfg.comics_dir)
+        comics_dir.mkdir(parents=True, exist_ok=True)
+        folder = unit_folder_name(album_id, unit_id, unit_title or "", max_len=30)
         final_dir = comics_dir / folder
         if final_dir.exists():
             self.log.warning("目标目录已存在，先清理：%s", final_dir)

@@ -66,6 +66,12 @@ def album_folder_name(album_id: str, title: str, max_len: int = 40) -> str:
     return f"JM{album_id}-{safe_title}"
 
 
+def unit_folder_name(album_id: str, unit_id: str, title: str, max_len: int = 30) -> str:
+    """单单元目录名：JM<album>-u<unit>-<安全标题≤30字>。"""
+    safe_title = sanitize_win_name(title, max_len=max_len, default="untitled")
+    return f"JM{album_id}-u{unit_id}-{safe_title}"
+
+
 def truncate_text(text: str, max_len: int) -> str:
     text = str(text or "").strip()
     return text if len(text) <= max_len else text[:max_len]

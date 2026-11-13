@@ -48,6 +48,19 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS units (
+    album_id TEXT NOT NULL,
+    unit_id  TEXT NOT NULL,
+    title    TEXT NOT NULL,
+    dir      TEXT NOT NULL,
+    page_count INTEGER,
+    pdf_path TEXT,
+    pdf_size INTEGER,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (album_id, unit_id)
+);
+CREATE INDEX IF NOT EXISTS idx_units_album ON units(album_id);
 """
 
 # 旧库增量迁移：表已存在时 CREATE TABLE IF NOT EXISTS 不会加列
@@ -234,3 +247,60 @@ class Store:
             "pdf_path": row["pdf_path"] if "pdf_path" in row.keys() else None,
             "pdf_size": row["pdf_size"] if "pdf_size" in row.keys() else None,
         }
+
+    # ------------------------------------------------------------------ #
+    # 单元（章节）下载记录；老库靠 CREATE TABLE IF NOT EXISTS 幂等迁移
+    # ------------------------------------------------------------------ #
+    def upsert_unit(self, record: dict) -> None:
+        """写入/更新单元下载记录；不覆盖已有的 PDF 字段（PDF 由 set_unit_pdf 单独写）。"""
+        self._write(
+            """INSERT INTO units(album_id, unit_id, title, dir, page_count, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(album_id, unit_id) DO UPDATE SET
+                   title = excluded.title,
+                   dir = excluded.dir,
+                   page_count = excluded.page_count,
+                   updated_at = excluded.updated_at""",
+            (
+                str(record.get("album_id") or record.get("id") or ""),
+                str(record.get("unit_id") or ""),
+                str(record.get("title") or ""),
+                str(record.get("dir") or ""),
+                int(record.get("page_count") or 0),
+                time.time(),
+            ),
+        )
+
+    def set_unit_pdf(self, album_id: str, unit_id: str, pdf_path: str, pdf_size: int) -> None:
+        self._write(
+            "UPDATE units SET pdf_path = ?, pdf_size = ?, updated_at = ? "
+            "WHERE album_id = ? AND unit_id = ?",
+            (str(pdf_path), int(pdf_size), time.time(), str(album_id), str(unit_id)),
+        )
+
+    def get_unit(self, album_id: str, unit_id: str) -> dict | None:
+        row = self._get_conn().execute(
+            "SELECT * FROM units WHERE album_id = ? AND unit_id = ?",
+            (str(album_id), str(unit_id)),
+        ).fetchone()
+        return self._unit_row_to_dict(row) if row else None
+
+    def list_units(self, album_id: str) -> list[dict]:
+        rows = self._get_conn().execute(
+            "SELECT * FROM units WHERE album_id = ? ORDER BY updated_at DESC", (str(album_id),)
+        ).fetchall()
+        return [self._unit_row_to_dict(row) for row in rows]
+
+    @staticmethod
+    def _unit_row_to_dict(row: sqlite3.Row) -> dict:
+        return {
+            "album_id": row["album_id"],
+            "unit_id": row["unit_id"],
+            "title": row["title"],
+            "dir": row["dir"],
+            "page_count": row["page_count"],
+            "pdf_path": row["pdf_path"],
+            "pdf_size": row["pdf_size"],
+            "updated_at": row["updated_at"],
+        }
+

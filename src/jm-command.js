@@ -15,6 +15,8 @@
  *     下本 1490076              ← 直接给作品编号（至少两位数字；边车按 id 下载）
  *     下本 3                    ← 给**序号**：取本群最近一次搜索结果里的第 3 本
  *     下载本子 1490076          ← 「下载本子」是「下本」的别名
+ *     整本打包                 ← 显式选择最近本群单元清单全部
+ *     打包1 3 5 7              ← 只选择这些单元序号（可超过 9，按清单顺序合并）
  *
  * 解析顺序（每一步只做一件小事，selftest 按表钉着）：
  *   ⓪ 归一化：trim → 去前导标点/空白 → 去句末标点 → 剥前导 `@残留` → 剥末尾 `@残留`；
@@ -23,8 +25,8 @@
  *      ⚠️ 数量必须与关键词之间有空白：「搜本 全彩3」里的 `3` 算关键词（宁窄勿宽，
  *      关键词里出现数字很常见，不能瞎猜）；
  *   ② 下载指令：`^(下本|下载本子|下载本)\s*(.*)$` —— 去掉 `#`/`第`/尾部「号」之后：
- *      · **一位数字 1..5** = 序号（对应最近一次搜索的 rank，由服务层换算成 id）；
- *      · **两位及以上数字** = 作品编号，原样交给边车；
+ *      · **一位数字 1..9** = 序号（对应最近一次搜索/单元清单的 rank，由服务层换算成 id）；
+ *      · **两位及以上数字** = 作品/单元编号，原样交给边车按编号精确解析；
  *      · 其它 = 格式错误（回一句格式提示，别当闲聊丢掉）。
  *
  * 失败分支都带 `reason`：
@@ -48,11 +50,32 @@ const DOWNLOAD_VERBS = '下本|下载本子|下载本';
 /** 中文数量 → 数值（只收 1..5 与常见写法；「十几」之类落不到数字 = 当关键词）。 */
 const CN_NUM = { 一: 1, 两: 2, 二: 2, 三: 3, 四: 4, 五: 5 };
 
-/** 一位数字里可以当**序号**的取值（本群最近一次搜索最多 5 本）。 */
-const MAX_RANK = 5;
+/**
+ * 一位数字里可以当**序号**的取值（搜索结果最多 5 本；单元本清单最多列 15 个，
+ * 序号只放行到 9 —— 10 个以上用清单里显示的单元编号选，见 `src\jm-service.js`）。
+ */
+const MAX_RANK = 9;
 
 /** 导航用的宽松形状：只要开头是搜索/下载动词，就算"在尝试这条指令"。 */
-const ATTEMPT_RE = new RegExp(`^(?:${SEARCH_VERBS}|${DOWNLOAD_VERBS})`, 'u');
+const ATTEMPT_RE = new RegExp(`^(?:${SEARCH_VERBS}|${DOWNLOAD_VERBS}|整本打包|打包)`, 'u');
+
+/** 打包只认显式全选或以空白分隔的正整数序号；不把编号/标题猜成选项。 */
+function parsePackCommand(text) {
+  if (text.startsWith('整本打包')) {
+    const body = text.replace(/\s*(?:（#全部单元）|\(#全部单元\))$/u, '').trim();
+    return body === '整本打包'
+      ? { ok: true, action: 'pack', all: true, ordinals: [] }
+      : { ok: false, reason: 'format' };
+  }
+  if (!text.startsWith('打包')) return null;
+  const body = text.slice(2).replace(/\s*(?:（#选择单元打包）|\(#选择单元打包\))$/u, '').trim();
+  if (!body) return { ok: false, reason: 'format' };
+  const tokens = body.split(/\s+/u);
+  if (tokens.some((token) => !/^[1-9]\d*$/u.test(token) || !Number.isSafeInteger(Number(token)))) {
+    return { ok: false, reason: 'format' };
+  }
+  return { ok: true, action: 'pack', all: false, ordinals: tokens.map(Number) };
+}
 
 /**
  * 把一个数量词解析成数字：阿拉伯数字或中文 1..5；认不出返回 NaN。
@@ -178,11 +201,15 @@ function parseDownloadRest(rest) {
  * @param {{max?: number}} [options] `max` = 一次最多搜几本（来自 `config.jm.max`）
  * @returns {{ok: true, action: 'search', keyword: string, count: number, countGiven: boolean}
  *   | {ok: true, action: 'download', target: string|null, ordinal: number|null, raw: string}
+ *   | {ok: true, action: 'pack', all: boolean, ordinals: number[]}
  *   | {ok: false, reason: 'format'|'count'|'keyword'}}
  */
 export function parseJmCommand(text, { max = DEFAULT_JM_MAX } = {}) {
   const normalized = normalize(text);
   if (!normalized) return { ok: false, reason: 'format' };
+
+  const pack = parsePackCommand(normalized);
+  if (pack) return pack;
 
   const search = new RegExp(`^(?:${SEARCH_VERBS})\\s*(.*)$`, 'u').exec(normalized);
   if (search) return parseSearchRest(search[1], max);
