@@ -11,7 +11,7 @@
 
 The full project architecture is shown below (box area is approximately proportional to runtime source lines):
 
-![Megu-bot overview architecture: bot core, front-end platforms, and external interfaces](<docs/architecture-overview.png>)
+![Megu-bot overview architecture: bot core, front-end platforms, and external interfaces](<docs/architecture-overview.en.png>)
 
 This project is written in Node.js and has no third-party npm dependencies. Everything downstream consumes only the unified `message` structure.
 This repository, [Binfufu/Megu-bot](https://github.com/Binfufu/Megu-bot), is its public v1 version: a public subset selected from the maintenance repository, not the complete private project.
