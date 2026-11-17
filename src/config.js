@@ -845,6 +845,29 @@ function buildRuntimeConfig({ rootDir, envFile, loadedEnvFile }) {
         maxBytes: asInt('QQBOT_JM_MAX_BYTES', 10_485_760), // 兼容保留；不再参与运行时判断
         timeoutMs: asInt('QQBOT_JM_TIMEOUT_MS', 120_000), // 【暂定】120s
       },
+      /**
+       * **通用本地目录收藏**（2026-11-17）：与 JM 搬本解耦的独立 SQLite 收藏库。
+       * 第一版作为 JM 的子功能接入（父开关 `QQBOT_JM` 控制入口、群名单沿用
+       * `QQBOT_JM_GROUPS`），但数据层/命令层不依赖 JM，也不按 bot 角色分支。
+       *
+       * 字段：
+       *   · `dbPath`   独立数据库文件；显式 `QQBOT_CATALOG_DB` 优先，否则跟
+       *                `QQBOT_STATE_DB` 同级（`data/<bot>/catalog.db` 口径），最后落
+       *                `data/catalog.db`。**不与聊天/记忆库混用**。
+       *   · `pageSize` 清单每页条数（【暂定】8）；改 env 不改代码。
+       *
+       * ⚠️ 路径是部署项、分页是 runtime 项；两者都登记在 `config-params.js`。
+       */
+      catalog: {
+        dbPath: (() => {
+          const explicit = raw('QQBOT_CATALOG_DB');
+          if (explicit) return path.resolve(rootDir, explicit);
+          const stateDb = raw('QQBOT_STATE_DB');
+          if (stateDb) return path.join(path.dirname(path.resolve(rootDir, stateDb)), 'catalog.db');
+          return path.join(rootDir, 'data', 'catalog.db');
+        })(),
+        pageSize: asInt('QQBOT_CATALOG_PAGE_SIZE', 8), // 【暂定】8
+      },
       policy: {
         // 主题在 policy 之外先算一次:身体口径要**跟情绪谱对齐**(见 parseBodyTheme),
         // 两个都由 QQBOT_MOOD_THEME 决定,只是身体那项可以显式写出来做二次确认。

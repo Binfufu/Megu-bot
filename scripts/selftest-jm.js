@@ -13,10 +13,12 @@
  *
  * 钉：
  *   ① 解析：搜本/找本/下载别名、末尾数量 1..5（中文也认）、序号 1..9、@残留、失败分支；
- *   ② 网络边界：health/search（images=0）/resolve/download（带 unit）/pdf（带 unit）的形状、
- *      服务不可用、坏 JSON、HTTP 错误、not_found、超时、下载任务轮询；
+ *      结构化条件 作者/原作(IP)/角色/标签/标题/页码、条件 AND、原作+角色/多值拒绝；
+ *   ② 网络边界：health/search（images=0，结构化时 mode/page/details=1）/resolve/download（带 unit）/
+ *      pdf（带 unit）的形状、服务不可用、坏 JSON、HTTP 错误、not_found、超时、下载任务轮询；
  *   ③ 服务层：群白名单 fail closed、编号不走搜索、解析不到不下载、多单元先清单后下载、
- *      单本自动下载三条同时成立才做、total=0 有结果按 0 本、冷却只拦搜本、失败固定话术；
+ *      单本自动下载三条同时成立才做、结构化检索只清单不自动下载/单页边界、total=0 有结果按 0 本、
+ *      冷却只拦搜本、失败固定话术；
  *   ④ 接线哨兵：`src/index.js` 真的接上、命令表与生成文档、`.env.example` 有键。
  */
 import assert from 'node:assert/strict';
@@ -26,7 +28,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { DEFAULT_JM_MAX, looksLikeJmAttempt, parseJmCommand } from '../src/jm-command.js';
+import { DEFAULT_JM_MAX, looksLikeJmAttempt, parseJmCommand, parseJmFuzzyCommand } from '../src/jm-command.js';
 import {
   DEFAULT_JM_LINES,
   buildDownloadAck,
@@ -115,6 +117,7 @@ test('jm-command:末尾数量 1..5 阿拉伯/中文都认,写多了夹到上限'
 test('jm-command:数量 0 明确拒绝,空关键词/超长关键词是格式错误', () => {
   assert.equal(parseJmCommand('搜本 全彩 0').reason, 'count');
   assert.equal(parseJmCommand('搜本').reason, 'format');
+  assert.equal(parseJmCommand('搜本子').reason, 'format', '不能把“子”当关键词搜出去');
   assert.equal(parseJmCommand('').reason, 'format');
   assert.equal(parseJmCommand(`搜本 ${'字'.repeat(61)}`).reason, 'keyword');
 });
@@ -139,6 +142,63 @@ test('jm-command:下本非法输入不认(不猜)', () => {
     assert.equal(parseJmCommand(text).ok, false, text);
     assert.equal(parseJmCommand(text).reason, 'format', text);
   }
+});
+
+test('jm-command:作者/原作(IP)/角色/标签/标题/页码结构化条件可解析,普通关键词语义不变', () => {
+  assert.deepEqual(parseJmCommand('搜本 作者:甲'), {
+    ok: true, action: 'search', mode: 'structured',
+    conditions: { creator: ['甲'] }, page: 1, keyword: null, countGiven: false,
+  });
+  assert.deepEqual(parseJmCommand('搜本 原作:乙').conditions, { original: ['乙'] });
+  assert.deepEqual(parseJmCommand('搜本 IP:丙').conditions, { original: ['丙'] });
+  assert.deepEqual(parseJmCommand('搜本 角色:丁').conditions, { character: ['丁'] });
+  assert.deepEqual(parseJmCommand('搜本 标签:戊').conditions, { tag: ['戊'] });
+  assert.deepEqual(parseJmCommand('搜本 标题:己').conditions, { title: ['己'] });
+  const combo = parseJmCommand('搜本 作者:甲 标签:乙 2');
+  assert.deepEqual(combo.conditions, { creator: ['甲'], tag: ['乙'] });
+  assert.equal(combo.page, 2);
+  assert.equal(parseJmCommand('搜本 作者:甲 全彩').conditions.title[0], '全彩');
+  assert.equal(parseJmCommand('搜本 作者:甲 页码:3').page, 3);
+  assert.equal(parseJmCommand('搜本 原作:甲 角色:乙').reason, 'unsupported');
+  assert.equal(parseJmCommand('搜本 原作:甲 原作:乙').reason, 'unsupported', '多值原作不能静默只查第一个');
+  assert.equal(parseJmCommand('搜本 年份:2024').reason, 'unsupported');
+  assert.equal(parseJmCommand('搜本 全彩 3').keyword, '全彩');
+  assert.equal(parseJmCommand('搜本 全彩 3').count, 3);
+});
+
+test('jm-command:模糊搜本只认“请求动词 + 句尾 本子/本”,复合词与闲聊不命中', () => {
+  const expected = (keyword) => ({
+    ok: true, action: 'search', keyword, count: DEFAULT_JM_MAX, countGiven: false, fuzzy: true,
+  });
+  for (const [text, keyword] of [
+    ['搜原神的本子', '原神'],
+    ['来个莉音的本', '莉音'],
+    ['来点原神的本子', '原神'],
+    ['我想看原神的本子', '原神'],
+    ['有没有原神的本子', '原神'],
+    ['搜原神本', '原神'],
+    ['来一本原神的本', '原神'],
+    ['来个莉音的本子', '莉音'],
+    ['我想看看原神的本子', '原神'],
+    ['搜索原神的本子', '原神'],
+    ['搜索一下原神的本子', '原神'],
+  ]) {
+    assert.deepEqual(parseJmFuzzyCommand(text), expected(keyword), text);
+  }
+  for (const text of [
+    '这个本子不错', '我本来想找原神的本子', '老板本来就很忙', '我看完了原神的本子',
+    '来个本子', '来个本', '来个日本', '来个成本', '来个笔记本', '搜原神的本子很好看',
+    '搜日本', '有没有人看过原神的本子', '有没有人知道原神的本子', '来人帮我看本子',
+    '有没有人买过这个本子', '有没有人喜欢这个本子', '来个画本子',
+  ]) {
+    assert.equal(parseJmFuzzyCommand(text), null, text);
+  }
+  // 病态输入必须线性返回：旧版嵌套量词正则在这里会指数回溯、卡死事件循环。
+  const started = Date.now();
+  assert.equal(parseJmFuzzyCommand(`${'我想'.repeat(300)}吃饭`), null);
+  assert.ok(Date.now() - started < 1000, '模糊解析对长输入必须毫秒级返回');
+  // “我”是允许的前缀；这一条应能进模糊搜索。
+  assert.equal(parseJmFuzzyCommand('我来点原神的本子').keyword, '原神');
 });
 
 test('jm-command:@残留要剥,普通闲聊不能误判成尝试', () => {
@@ -200,6 +260,14 @@ test('jm-fetch:参数默认值与越界夹取(含 unit/images)', () => {
   assert.equal(clamped.q, '全彩');
   assert.equal(clamped.images, false);
   assert.equal(parseJmArgs(['--unit', '1205081']).unit, '1205081');
+  const structured = parseJmArgs([
+    '--op', 'search', '--q', '龙', '--mode', 'author', '--page', '2',
+    '--details', '1', '--limit', '99',
+  ]);
+  assert.equal(structured.mode, 'author');
+  assert.equal(structured.page, 2);
+  assert.equal(structured.details, true);
+  assert.equal(structured.limit, 10, '结构化检索最多取 10 个候选做复核');
 });
 
 test('jm-fetch:health 成功带出边车信息,坏 JSON 收敛成 bad_json', async () => {
@@ -283,11 +351,60 @@ test('jm-fetch:search 带 images=0 并返回约定形状(不再下载拼图/封�
   assert.equal(payload.previewPath, undefined, '1.210.3 起 CLI 不再返回预览图字段');
 });
 
+test('jm-fetch:结构化 search 传 mode/page/details 并解析文字详情;坏 mode/page 不联网', async () => {
+  const urls = [];
+  const payload = await runJmFetch(
+    {
+      op: 'search', q: '龙', mode: 'author', page: 2, details: true,
+      limit: 10, images: false, api: 'http://127.0.0.1:8790', timeoutMs: 5000,
+    },
+    {
+      log: noopLog,
+      fetchImpl: async (url) => {
+        urls.push(url);
+        return jsonRes({
+          ok: true, total: 1, results: [{
+            rank: 1, id: '101', title: '合成作品', authors: ['作者甲'], tags: ['全彩'],
+            page_count: 20, detail_ok: true,
+          }],
+        });
+      },
+    },
+  );
+  assert.equal(payload.ok, true);
+  assert.equal(payload.mode, 'author');
+  assert.equal(payload.page, 2);
+  assert.equal(payload.details, true);
+  assert.match(urls[0], /q=.+&limit=10&page=2&mode=author/u);
+  assert.match(urls[0], /images=0/u);
+  assert.match(urls[0], /details=1/u);
+  assert.deepEqual(payload.results[0], {
+    rank: 1, id: '101', title: '合成作品', authors: ['作者甲'], tags: ['全彩'],
+    pageCount: 20, detailOk: true,
+  });
+
+  for (const bad of [
+    { op: 'search', q: '龙', mode: 'bogus', api: 'http://127.0.0.1:8790', timeoutMs: 5000 },
+    { op: 'search', q: '龙', page: 0, api: 'http://127.0.0.1:8790', timeoutMs: 5000 },
+    { op: 'search', q: '龙', page: 100001, api: 'http://127.0.0.1:8790', timeoutMs: 5000 },
+  ]) {
+    let called = false;
+    const result = await runJmFetch(bad, {
+      log: noopLog,
+      fetchImpl: async () => { called = true; return jsonRes({ ok: true, results: [] }); },
+    });
+    assert.equal(result.ok, false, JSON.stringify(bad));
+    assert.equal(result.reason, 'bad_args', JSON.stringify(bad));
+    assert.equal(called, false, '坏参数必须在任何 HTTP 前失败');
+  }
+});
+
 test('jm-fetch:resolve 作品/单元两种形状都归一;404 翻成 not_found', async () => {
   const album = {
     ok: true, kind: 'album', requested: '1195659',
     album: {
-      id: '1195659', title: '合成作品', page_count: 120, unit_count: 2,
+      id: '1195659', title: '合成作品', authors: ['合成作者'], tags: ['全彩'],
+      page_count: 120, unit_count: 2,
       units: [
         { index: 1, unit_id: '1205081', title: '第1话', page_count: 10 },
         { index: 2, unit_id: '1205082', title: '第2话', page_count: null },
@@ -303,6 +420,9 @@ test('jm-fetch:resolve 作品/单元两种形状都归一;404 翻成 not_found',
   assert.equal(byAlbum.kind, 'album');
   assert.equal(byAlbum.album.id, '1195659');
   assert.equal(byAlbum.album.unitCount, 2);
+  // 2026-11-17：resolve 回包把 authors/tags 透传给目录收藏；缺字段 = null（未知）。
+  assert.deepEqual(byAlbum.album.authors, ['合成作者']);
+  assert.deepEqual(byAlbum.album.tags, ['全彩']);
   assert.deepEqual(byAlbum.album.units[0], { index: 1, unitId: '1205081', title: '第1话', pageCount: 10 });
   assert.equal(byAlbum.album.units[1].pageCount, null);
   assert.equal(byAlbum.matchedUnit, null);
@@ -572,6 +692,34 @@ function makePdfFile(dir, key = '101') {
   return file;
 }
 
+/** 结构化检索夹具：只允许 health/search，记录参数；任何 download/pdf 直接判红。 */
+function makeStructuredFixture(dir, group, { results = [], healthCaps = ['units', 'details'] } = {}) {
+  const calls = { fetch: [] };
+  const runFetch = async ({ args }) => {
+    calls.fetch.push(args);
+    const op = args[args.indexOf('--op') + 1];
+    if (op === 'health') {
+      return {
+        code: 0, stderr: '', timedOut: false,
+        stdout: JSON.stringify({ ok: true, service: 'jm-service', capabilities: healthCaps }),
+      };
+    }
+    if (op === 'search') {
+      return { code: 0, stderr: '', timedOut: false, stdout: JSON.stringify(searchPayload({ results })) };
+    }
+    throw new Error(`结构化检索不允许操作 ${op}`);
+  };
+  const made = makeDeps({ dir, groups: [group], runFetch });
+  const run = (text) => handleJmCommand({
+    message: message(group),
+    parsed: parseJmCommand(text),
+    deps: made.deps,
+  });
+  const operations = () => calls.fetch.map((args) => args[args.indexOf('--op') + 1]);
+  const searchArgs = () => calls.fetch.filter((args) => args.includes('search')).at(-1) ?? [];
+  return { ...made, run, operations, searchArgs, calls: { ...made.calls, fetch: calls.fetch } };
+}
+
 /**
  * 假依赖工厂。`payloads` 是 runFetch 依次返回的 JSON 对象（用完取最后一个）；
  * 也可以在用例里直接传 `runFetch` 接管。
@@ -722,6 +870,101 @@ test('jm-service:搜多本 → 只回 JM编号+作品标题清单,不下载也�
     assert.equal(args[args.indexOf('--limit') + 1], '3');
     assert.equal(args[args.indexOf('--images') + 1], '0');
     assert.equal(args[args.indexOf('--api') + 1], 'http://127.0.0.1:8790');
+  });
+});
+
+test('jm-service:结构化检索按作者/标签/标题/原作/角色选 mode，AND 过滤且不自动下载', async () => {
+  await withTemp(async (dir) => {
+    const results = [
+      { id: '101', title: '全彩甲', authors: ['作者甲'], tags: ['全彩'], detailOk: true },
+      { id: '102', title: '黑白乙', authors: ['作者甲'], tags: ['黑白'], detailOk: true },
+      { id: '103', title: '全彩丙', authors: ['作者乙'], tags: ['全彩'], detailOk: false },
+      { id: '104', title: '全彩丁', authors: ['作者乙'], tags: ['黑白'], detailOk: true },
+    ];
+    const fixture = makeStructuredFixture(dir, 'g-jm-structured', { results });
+
+    const byAuthor = await fixture.run('搜本 作者:作者甲');
+    assert.equal(byAuthor.ok, true);
+    assert.equal(byAuthor.sent, 0, '结构化检索只给清单，不自动下载');
+    assert.equal(fixture.searchArgs()[fixture.searchArgs().indexOf('--mode') + 1], 'author');
+    assert.equal(fixture.searchArgs()[fixture.searchArgs().indexOf('--page') + 1], '1');
+    assert.ok(fixture.searchArgs().includes('--details'));
+    assert.equal(fixture.searchArgs()[fixture.searchArgs().indexOf('--details') + 1], '1');
+    assert.ok(fixture.searchArgs().includes('--images'));
+    assert.equal(fixture.searchArgs()[fixture.searchArgs().indexOf('--images') + 1], '0');
+    assert.match(fixture.calls.reply.at(-1), /本次检查范围内找到 2 本/u);
+    assert.match(fixture.calls.reply.at(-1), /JM101/u);
+    assert.match(fixture.calls.reply.at(-1), /JM102/u);
+    assert.equal(fixture.calls.upload.length, 0);
+    assert.equal(fixture.calls.send.length, 0);
+
+    const byTag = await fixture.run('搜本 标签:全彩');
+    assert.equal(byTag.ok, true);
+    assert.equal(fixture.searchArgs()[fixture.searchArgs().indexOf('--mode') + 1], 'tag');
+    assert.match(fixture.calls.reply.at(-1), /本次检查范围内找到 1 本/u);
+    assert.match(fixture.calls.reply.at(-1), /JM101/u);
+    assert.doesNotMatch(fixture.calls.reply.at(-1), /JM103/u, '缺文字详情不能当成匹配');
+    assert.match(fixture.calls.reply.at(-1), /其中 1 本缺文字详情/u);
+
+    const andFiltered = await fixture.run('搜本 作者:作者甲 标签:全彩');
+    assert.equal(andFiltered.ok, true);
+    assert.match(fixture.calls.reply.at(-1), /找到 1 本/u);
+    assert.match(fixture.calls.reply.at(-1), /JM101/u);
+    assert.doesNotMatch(fixture.calls.reply.at(-1), /JM102/u);
+
+    const byTitle = await fixture.run('搜本 标题:全彩');
+    assert.equal(byTitle.ok, true);
+    assert.equal(fixture.searchArgs()[fixture.searchArgs().indexOf('--mode') + 1], 'site');
+    assert.match(fixture.calls.reply.at(-1), /找到 3 本/u);
+    assert.match(fixture.calls.reply.at(-1), /JM101/u);
+    assert.match(fixture.calls.reply.at(-1), /JM103/u);
+    assert.match(fixture.calls.reply.at(-1), /JM104/u);
+
+    const byWork = await fixture.run('搜本 原作:原作甲');
+    assert.equal(byWork.ok, true);
+    assert.equal(fixture.searchArgs()[fixture.searchArgs().indexOf('--mode') + 1], 'work');
+
+    const byActor = await fixture.run('搜本 角色:角色甲');
+    assert.equal(byActor.ok, true);
+    assert.equal(fixture.searchArgs()[fixture.searchArgs().indexOf('--mode') + 1], 'actor');
+
+    const page2 = await fixture.run('搜本 作者:作者甲 页码:2');
+    assert.equal(page2.ok, true);
+    assert.equal(fixture.searchArgs()[fixture.searchArgs().indexOf('--page') + 1], '2');
+
+    // 单命中也不自动下载；只给清单。
+    const unique = await fixture.run('搜本 标题:黑白乙');
+    assert.equal(unique.ok, true);
+    assert.equal(unique.sent, 0);
+    assert.match(fixture.calls.reply.at(-1), /JM102/u);
+    assert.equal(fixture.calls.upload.length, 0);
+    assert.equal(fixture.calls.send.length, 0);
+    assert.deepEqual(fixture.operations().filter((op) => op !== 'health' && op !== 'search'), []);
+  });
+});
+
+test('jm-service:结构化检索旧边车无 details 能力→拒绝；0 命中说明检查范围', async () => {
+  await withTemp(async (dir) => {
+    const old = makeStructuredFixture(dir, 'g-jm-structured-old', {
+      results: [{ id: '101', title: '甲', authors: [], tags: [], detailOk: false }],
+      healthCaps: ['units'],
+    });
+    const rejected = await old.run('搜本 作者:作者甲');
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.reason, 'details_unsupported');
+    assert.deepEqual(old.operations(), ['health'], '旧边车不得进入搜索');
+    assert.match(old.calls.reply[0], /旧版/u);
+
+    const empty = makeStructuredFixture(dir, 'g-jm-structured-empty', {
+      results: [{ id: '101', title: '甲', authors: [], tags: [], detailOk: false }],
+    });
+    const noHit = await empty.run('搜本 标签:全彩');
+    assert.equal(noHit.ok, false);
+    assert.equal(noHit.reason, 'no_result');
+    assert.match(empty.calls.reply.at(-1), /本次检查范围内没找到/u);
+    assert.match(empty.calls.reply.at(-1), /缺文字详情/u);
+    assert.equal(empty.calls.upload.length, 0);
+    assert.equal(empty.calls.send.length, 0);
   });
 });
 
@@ -929,6 +1172,47 @@ test('jm-service:编号解析不到 → 「没有这个编号」,不下载、不
     assertReplyIn(calls, 'noSuchId');
     assert.equal(calls.fetch.length, 1, '只解析一次，不退回搜索、不下载');
     assert.equal(calls.upload.length, 0);
+  });
+});
+
+test('jm-service:模糊搜本唯一命中只给清单，不沿用自动下载', async () => {
+  await withTemp(async (dir) => {
+    const { deps, calls } = makeDeps({
+      dir,
+      payloads: [searchPayload({ results: [{ id: '101', title: '合成原神本' }], total: 1 })],
+    });
+    const result = await handleJmCommand({
+      message: message('g-jm'),
+      parsed: parseJmFuzzyCommand('搜原神的本子'),
+      deps,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.sent, 0, '模糊入口只给清单');
+    assert.equal(calls.fetch.length, 1);
+    assert.equal(calls.fetch[0].args[calls.fetch[0].args.indexOf('--q') + 1], '原神');
+    assert.match(calls.reply.at(-1), /搜到1本/u);
+    assert.equal(calls.upload.length, 0);
+    assert.equal(calls.send.length, 0);
+  });
+});
+
+test('jm-service:模糊入口的纯数字仍按关键词搜索，不按编号解析/下载', async () => {
+  await withTemp(async (dir) => {
+    const { deps, calls } = makeDeps({
+      dir,
+      payloads: [searchPayload({ results: [{ id: '101', title: '合成数字本' }], total: 2 })],
+    });
+    const result = await handleJmCommand({
+      message: message('g-jm'),
+      parsed: parseJmFuzzyCommand('搜123的本子'),
+      deps,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(calls.fetch.length, 1);
+    assert.equal(calls.fetch[0].args[calls.fetch[0].args.indexOf('--op') + 1], 'search', '模糊入口不能转成编号解析');
+    assert.equal(calls.fetch[0].args[calls.fetch[0].args.indexOf('--q') + 1], '123');
+    assert.equal(calls.upload.length, 0);
+    assert.equal(calls.send.length, 0);
   });
 });
 
@@ -1374,6 +1658,7 @@ test('jm-service 接线哨兵:index.js 按配置开启接入、命令表与生�
   const indexSource = fs.readFileSync(path.join(root, 'src', 'index.js'), 'utf8');
   assert.ok(indexSource.includes('config.jm?.enabled'), 'index.js 必须按 QQBOT_JM 总开关接入');
   assert.ok(indexSource.includes('parseJmCommand(message.content, { max: config.jm.max })'), 'index.js 必须调纯解析器');
+  assert.ok(indexSource.includes('parseJmFuzzyCommand(message.content'), 'index.js 必须接模糊搜本兜底');
   assert.ok(indexSource.includes('handleJmCommand({'), 'index.js 必须调服务层');
   assert.ok(indexSource.includes('looksLikeJmAttempt(message.content)'), 'index.js 必须有格式提示分支');
 

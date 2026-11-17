@@ -221,14 +221,27 @@ const BASE_COMMANDS = [
     source: 'src/meitu-command.js · parseMeituCommand / src/meitu-service.js · handleMeituCommand',
   },
   {
-    name: '搜本 <关键词> / 下本 <编号或序号>',
-    aliases: ['找本 <关键词>', '下载本子 <编号>', '整本打包', '打包1 3 5 7'],
+    name: '搜本 <关键词> / 搜本 作者:xxx / 下本 <编号或序号>',
+    aliases: ['找本 <关键词>', '搜本 原作:xxx', '搜本 IP:xxx', '搜本 角色:xxx', '搜本 标签:xxx', '搜本 标题:xxx', '搜原神的本子', '来个莉音的本', '下载本子 <编号>', '整本打包', '打包1 3 5 7'],
     scope: 'group',
     who: 'anyone',
-    effect: '按关键词或编号找 JM 作品：编号先精确解析作品/单元；搜到多本回「JM编号 + 作品标题」清单，' +
-      '多个单元先回清单；下本选单元，整本打包选全部，打包1 3 5 7按清单序号合并所选单元成一个 PDF。仅允许的群可用，' +
-      '默认关闭，需要部署者在同一台机器上自行运行 JM 边车服务。整条链路不经过模型。',
+    effect: '按关键词、编号、结构化条件或“搜X的本子/来个X的本”找 JM 作品：编号先精确解析作品/单元；' +
+      '作者/原作(IP)/角色/标签/标题条件会先选一个上游模式取候选，再用文字详情复核其余条件（AND）；' +
+      '模糊写法只认请求动词 + 句尾“本子/本”，并用复合词护栏避开“本来/日本/成本/笔记本”等闲聊。' +
+      '新检索入口只回本次检查范围内的文字清单，不自动下载；下本选单元，整本打包选全部，打包1 3 5 7按清单序号合并所选单元成一个 PDF。' +
+      '仅允许的群可用，默认关闭，需要部署者在同一台机器上自行运行 JM 边车服务。整条链路不经过模型。',
     source: 'src/jm-command.js · parseJmCommand / src/jm-service.js · handleJmCommand',
+  },
+  {
+    name: '收藏 <条目ID> / 取消收藏 <条目ID> / 收藏夹 [条件]',
+    aliases: ['收藏夹 作者:xxx', '收藏夹 标签:xxx', '收藏夹 原作:xxx', '收藏 #序号'],
+    scope: 'group',
+    who: 'anyone',
+    effect: '把条目级对象收进本实例共享的本地收藏库，或按元数据筛选查看；' +
+      '收藏不等于下载，取消收藏不删除文件。作为 JM 搬本的子功能接入：父组件关闭时入口不响应，' +
+      '群授权沿用 QQBOT_JM_GROUPS（空名单 = 全部拒绝）。整条链路不调模型；' +
+      '最近清单按「群 + 人」隔离。',
+    source: 'src/catalog-command.js · parseCatalogCommand / src/catalog-service.js · handleCatalogCommand',
   },
   {
     name: '/认人',

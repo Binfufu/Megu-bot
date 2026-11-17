@@ -35,12 +35,12 @@ const read = (id, input) => resolveParams(CONFIG_PARAM_DEFINITIONS, { env: { [id
 
 export function registerConfigParamsTests({ test, assert }) {
   test('config params: complete typed catalogue and defaults are registered without secrets', () => {
-    assert.equal(CONFIG_PARAM_DEFINITIONS.length, 235); // 227 + JM 搜本 8 项（2026-11-12）。
-    assert.equal(new Set(CONFIG_PARAM_DEFINITIONS.map((def) => def.id)).size, 235);
+    assert.equal(CONFIG_PARAM_DEFINITIONS.length, 237); // 235 + 目录收藏 2 项（2026-11-17）。
+    assert.equal(new Set(CONFIG_PARAM_DEFINITIONS.map((def) => def.id)).size, 237);
     assert.equal(CONFIG_PARAM_DEFINITIONS.some((def) => def.type === 'custom'), false);
     const typeCounts = {};
     for (const def of CONFIG_PARAM_DEFINITIONS) typeCounts[def.type] = (typeCounts[def.type] ?? 0) + 1;
-    assert.deepEqual(typeCounts, { int: 93, boolean: 49, number: 10, string: 30, url: 7, path: 15, enum: 12, object: 4, array: 15 });
+    assert.deepEqual(typeCounts, { int: 94, boolean: 49, number: 10, string: 30, url: 7, path: 16, enum: 12, object: 4, array: 15 });
     const defaults = resolveParams(CONFIG_PARAM_DEFINITIONS);
     assert.deepEqual(defaults.inputs, {});
     assert.equal(defaults.values.QQBOT_MOOD_TTL_MS, 600000);
@@ -191,10 +191,12 @@ export function registerConfigParamsTests({ test, assert }) {
 
   test('config params: original runtime default shape and paths remain intact', () => isolated((rootDir) => {
     const config = loadConfig({ rootDir });
-    assert.deepEqual(Object.keys(config), ['lockFile', 'legacyStateFile', 'qq', 'dsh', 'engine', 'meitu', 'jm', 'policy', 'logLevel', 'logFile', 'envFile', 'loadedEnvFile']);
+    assert.deepEqual(Object.keys(config), ['lockFile', 'legacyStateFile', 'qq', 'dsh', 'engine', 'meitu', 'jm', 'catalog', 'policy', 'logLevel', 'logFile', 'envFile', 'loadedEnvFile']);
     assert.equal(config.loadedEnvFile, false);
     assert.equal(config.policy.stats.dbFile, path.join(rootDir, '.qqbot.db'));
     assert.equal(config.meitu.db, path.join(rootDir, 'data', 'meitu.db'));
+    assert.equal(config.catalog.dbPath, path.join(rootDir, 'data', 'catalog.db'));
+    assert.equal(config.catalog.pageSize, 8);
     assert.equal(config.policy.memory.dbFile, path.join(rootDir, 'data', 'megumin', 'memory.db'));
     assert.deepEqual(config.engine.requestOptions, {});
     assert.equal(config.engine.inputTokenLimit, null);
@@ -255,6 +257,7 @@ export function registerConfigParamsTests({ test, assert }) {
     assert.equal(config.engine.llm.model, 'dream-model');
     assert.deepEqual(config.engine.requestOptions, { maxTokens: 256000 });
     assert.equal(config.meitu.db, path.join(rootDir, 'data', 'demo', 'meitu.db'));
+    assert.equal(config.catalog.dbPath, path.join(rootDir, 'data', 'demo', 'catalog.db'));
     assert.equal(config.policy.memory.dbFile, path.join(rootDir, 'data', 'demo', 'memory.db'));
     assert.equal(config.policy.selfcare.c2cTarget, 'fixture-person');
     assert.equal(config.legacyStateFile, null);

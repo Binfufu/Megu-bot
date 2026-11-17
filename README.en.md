@@ -202,7 +202,9 @@ After configuring, restart the process, then @-mention the bot in an authorized 
 
 This feature is off by default. The actual JM search/download is performed by the **local JM sidecar service** that you run yourself; the Node side only calls it over an HTTP contract. The repo includes an optional sidecar implementation under `tools/jm-sidecar/` (Python; you install its dependencies and clone two upstream MIT projects yourself — see the [JM search doc](<docs/45-JM搜本.md>)); you can also use another implementation that follows the same contract. Without a deployed sidecar, turning the switch on only produces the fixed reply "JM service is not started"; it does not go online or send anything out.
 
-Pure digits are resolved **exactly by number** (work or unit), not through the site's keyword search; when a work has several unit books, the bot first replies with the unit list so the user can choose, then downloads/sends only that unit's PDF. Search no longer sends a collage or cover.
+Pure digits are resolved **exactly by number** (work or unit), not through the site's keyword search; when a work has several unit books, the bot first replies with the unit list so the user can choose, then downloads/sends only that unit's PDF. Search no longer sends a collage or cover. Structured search is also available: `搜本 作者:xxx`, `搜本 原作:xxx`/`IP:xxx`, `搜本 角色:xxx`, `搜本 标签:xxx`, and `搜本 标题:xxx` (combinable; `页码:2` for paging). It picks one upstream mode for the current page, fetches text details only, verifies the remaining conditions with AND, and returns only a "within this checked range" list without auto-download. Fuzzy forms such as `搜原神的本子` and `来个莉音的本` also enter the book search path; they require a request verb plus a trailing `本子`/`本` and use compound-word guards so ordinary chat containing 本来/日本/成本/笔记本 is not captured.
+
+The same parent feature includes a **local catalog** sub-feature: `收藏 <条目ID>`, `取消收藏 <条目ID>`, and `收藏夹 [page]` / `收藏夹 作者:xxx`. Favoriting stores item-level metadata in a separate SQLite DB and **does not download or send images**; unfavoriting does not delete files. When `QQBOT_JM` is off the whole entry point is inactive, and group authorization still follows `QQBOT_JM_GROUPS` (empty = deny all).
 
 Edit only your local `.env` and keep `QQBOT_ACCESS_MODE=allowlist`:
 
@@ -215,11 +217,14 @@ QQBOT_JM_COOLDOWN_MS=30000
 QQBOT_JM_ROOT=data/demo/jm-images
 QQBOT_JM_MAX_BYTES=10485760
 QQBOT_JM_TIMEOUT_MS=120000
+QQBOT_CATALOG_DB=data/demo/catalog.db
+QQBOT_CATALOG_PAGE_SIZE=8
 ```
 
 - `QQBOT_JM_GROUPS`: group openids allowed to use this feature, filled in by you. **An empty value rejects all groups**, not "all allowed"; it is independent of `QQBOT_IDS`.
 - `QQBOT_JM_API`: sidecar address. The template defaults to `http://127.0.0.1:8790`; change it here if your sidecar listens on another port (this repo does not hard-code a port).
 - `QQBOT_JM_COOLDOWN_MS` only limits **book search**; downloads do not consume the cooldown (otherwise a search followed immediately by a download would be blocked by itself), and failures do not consume it either.
+- `QQBOT_CATALOG_DB` is the separate SQLite file for favorites (default `data/catalog.db`); do not share it with chat/memory DBs. `QQBOT_CATALOG_PAGE_SIZE` is the favorites page size (template 8, tentative).
 - The rest are count limits, timeouts, and a legacy image limit kept for compatibility; all are template defaults, not a promise of success rate.
 
 After configuring, restart the process, then @-mention the bot in an authorized group and send `搜本 示例关键词` or `下本 示例编号`. If there is no response, first check: is the group in `QQBOT_JM_GROUPS`; is the sidecar running (you can self-check with `node scripts/jm-fetch-one.mjs --op health --api http://127.0.0.1:8790`). **The terms of use of JM/image sources, and platform or regional content requirements, are the deployer's responsibility**; this repo ships no JM content, images, or credentials.

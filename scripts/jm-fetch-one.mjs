@@ -33,7 +33,12 @@
  *   --op search|resolve|download|pdf|health  必填（分别对应边车的
  *        /search、/resolve/<id>、/download+/jobs、/pdf、/health）
  *   --q <关键词>                 search 必填，1..60 字符
- *   --limit N                    search 用，1..5（默认 5；边车契约允许到 10，QQ 侧只给 5）
+ *   --limit N                    search 用；普通搜索 1..5（默认 5），
+ *                                结构化模式/细节模式最多 10（边车契约上限）
+ *   --mode site|work|author|tag|actor  search 可选：站点/原作/作者/标签/角色模式
+ *   --page N                     search 可选：页码，默认 1
+ *   --details 1|0                search 可选：1 = 只取文字详情（作者/标签/页数），
+ *                                不取封面/拼图；默认 0
  *   --id <编号>                  resolve/download/pdf 必填，纯数字（作品或单元编号）
  *   --unit <单元编号>            download/pdf 可选：只处理该作品下的一个单元本
  *   --units <111,222,333>        仅 pdf：合并所选单元，与 --unit 互斥；不改变 download API
@@ -47,11 +52,14 @@
  *
  *   health   → {"ok":true,"op":"health","service":"jm-service","version":"1.0.0",
  *               "viewerBase":"http://127.0.0.1:8088","downloadedAlbums":12}
- *   search   → {"ok":true,"op":"search","query":"全彩","total":10000,"cached":false,
- *               "text":"1.…","results":[{rank,id,title,authors,tags,pageCount}]}
+ *   search   → {"ok":true,"op":"search","query":"全彩","mode":"author","page":1,
+ *               "details":true,"total":10000,"cached":false,"text":"1.…",
+ *               "results":[{rank,id,title,authors,tags,pageCount,detailOk}]}
  *   resolve  → {"ok":true,"op":"resolve","requested":"1205081","kind":"album"|"photo",
- *               "album":{id,title,pageCount,unitCount,units:[{index,unitId,title,pageCount}]},
+ *               "album":{id,title,authors,tags,pageCount,unitCount,
+ *                        units:[{index,unitId,title,pageCount}]},
  *               "matchedUnit":{index,unitId,title,pageCount}|null}
+ *               （authors/tags 缺字段 = 元数据未知；空数组 = 确认没有）
  *   download → {"ok":true,"op":"download","id":"1195659","unit":"1205081|null","status":"done",
  *               "title":"…","viewerUrl":"…","dir":"…"}
  *   pdf      → {"ok":true,"op":"pdf","id":"1195659","unit":"1205081|null",
@@ -74,7 +82,10 @@ const DEFAULT_API = 'http://127.0.0.1:8790'; // 边车默认端口；部署可�
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_PDF_MAX_BYTES = 200 * 1024 * 1024; // QQ file_type=4 的硬限就是 200MB
 const DEFAULT_LIMIT = 5;
-const MAX_LIMIT = 5; // QQ 侧一次最多看 5 本（边车契约允许 10，这里按群聊阅读量收紧）
+const MAX_LIMIT = 5; // QQ 侧普通搜索一次最多看 5 本（边车契约允许 10）
+const MAX_LIMIT_DETAILS = 10; // 结构化检索需要多取候选做 AND 复核；边车上限就是 10
+const SEARCH_MODES = new Set(['site', 'work', 'author', 'tag', 'actor']);
+const MAX_SEARCH_PAGE = 100_000; // 与边车 /search 的 page 上界一致
 const REQUEST_TIMEOUT_MS = 15_000; // 单次请求上限（整体预算另算）
 const POLL_MS = 1_500; // 下载任务轮询间隔
 const MAX_KEYWORD_CHARS = 60;
@@ -114,6 +125,9 @@ export function parseJmArgs(argv) {
     // null = 未传；空串 = 显式空值，必须报错，不能退回整本。
     units: null,
     limit: DEFAULT_LIMIT,
+    mode: 'site',
+    page: 1,
+    details: false,
     api: DEFAULT_API,
     outDir: '',
     images: true,
@@ -133,6 +147,13 @@ export function parseJmArgs(argv) {
       case '--unit': options.unitGiven = true; options.unit = next().trim(); break;
       case '--units': options.units = next().trim(); break;
       case '--limit': options.limit = Number.parseInt(next(), 10); break;
+      case '--mode': options.mode = next().trim().toLowerCase(); break;
+      case '--page': options.page = Number.parseInt(next(), 10); break;
+      case '--details': {
+        const raw = next().trim().toLowerCase();
+        options.details = raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+        break;
+      }
       case '--api': options.api = next().trim(); break;
       case '--out-dir': case '--out': options.outDir = next().trim(); break;
       case '--images': {
@@ -148,7 +169,8 @@ export function parseJmArgs(argv) {
     }
   }
   if (!Number.isSafeInteger(options.limit) || options.limit <= 0) options.limit = DEFAULT_LIMIT;
-  options.limit = Math.min(options.limit, MAX_LIMIT);
+  const hardLimit = options.details || options.mode !== 'site' ? MAX_LIMIT_DETAILS : MAX_LIMIT;
+  options.limit = Math.min(options.limit, hardLimit);
   if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs <= 0) options.timeoutMs = DEFAULT_TIMEOUT_MS;
   if (!Number.isSafeInteger(options.pdfMaxBytes) || options.pdfMaxBytes <= 0) options.pdfMaxBytes = DEFAULT_PDF_MAX_BYTES;
   return options;
@@ -265,13 +287,27 @@ function normalizeUnit(raw, fallbackIndex = 0) {
   };
 }
 
-/** 把边车 `album` 对象归一成 Node 形状（含 units）。 */
+/**
+ * 把边车 `album` 对象归一成 Node 形状（含 units）。
+ *
+ * 2026-11-17：把 `authors` / `tags` 一并透传，供本地收藏保存来源元数据。
+ * ⚠️ 缺字段 = **未知**（null），不是空数组：边车详情没拿到时不能把作者写成"无"。
+ * 边车契约 v3 的 `/resolve` 回包带这两项；旧边车缺字段时下游按"元数据未知"处理。
+ */
 function normalizeAlbum(raw) {
   const units = Array.isArray(raw?.units) ? raw.units.map((unit, index) => normalizeUnit(unit, index + 1)) : [];
   const unitCountRaw = Number(raw?.unit_count ?? raw?.unitCount ?? 0);
+  const authors = Array.isArray(raw?.authors)
+    ? raw.authors.map((name) => String(name ?? '').trim()).filter(Boolean)
+    : null;
+  const tags = Array.isArray(raw?.tags)
+    ? raw.tags.map((name) => String(name ?? '').trim()).filter(Boolean)
+    : null;
   return {
     id: String(raw?.id ?? ''),
     title: String(raw?.title ?? ''),
+    authors,
+    tags,
     pageCount: Number(raw?.page_count ?? raw?.pageCount ?? 0) || 0,
     unitCount: Number.isFinite(unitCountRaw) && unitCountRaw > 0 ? unitCountRaw : units.length,
     units,
@@ -339,11 +375,24 @@ export async function runJmFetch(options, deps = {}) {
     const query = String(options?.q ?? '').trim();
     if (!query) return { ...fail('bad_args', 'search 缺少 --q'), op };
     if (Array.from(query).length > MAX_KEYWORD_CHARS) return { ...fail('bad_args', `关键词超过 ${MAX_KEYWORD_CHARS} 字`), op };
+    const mode = String(options?.mode ?? 'site').trim().toLowerCase();
+    if (!SEARCH_MODES.has(mode)) {
+      return { ...fail('bad_args', `search 的 --mode 只能是 site/work/author/tag/actor，收到 ${JSON.stringify(mode)}`), op };
+    }
+    const page = Number(options?.page ?? 1);
+    if (!Number.isSafeInteger(page) || page < 1 || page > MAX_SEARCH_PAGE) {
+      return { ...fail('bad_args', `search 的 --page 需在 1..${MAX_SEARCH_PAGE}`), op };
+    }
     const limit = Number.isSafeInteger(options?.limit) && options.limit > 0
-      ? Math.min(options.limit, MAX_LIMIT)
+      ? Math.min(options.limit, options?.details || mode !== 'site' ? MAX_LIMIT_DETAILS : MAX_LIMIT)
       : DEFAULT_LIMIT;
     const images = options?.images !== false;
-    const url = apiUrl(apiBase, `/search?q=${encodeURIComponent(query)}&limit=${limit}&page=1${images ? '' : '&images=0'}`);
+    const details = options?.details === true;
+    const params = new URLSearchParams({ q: query, limit: String(limit), page: String(page) });
+    if (mode !== 'site') params.set('mode', mode);
+    if (!images) params.set('images', '0');
+    if (details) params.set('details', '1');
+    const url = apiUrl(apiBase, `/search?${params.toString()}`);
     const result = await fetchJson({ url, timeoutMs: remaining(), fetchImpl });
     if (!result.ok) return { ...result, op };
     const data = result.data;
@@ -360,11 +409,14 @@ export async function runJmFetch(options, deps = {}) {
       detailOk: item?.detail_ok !== false,
     })).filter((item) => item.id !== '');
 
-    emit(`搜索结果:${results.length} 本（images=${images ? 'on' : 'off'}）`);
+    emit(`搜索结果:${results.length} 本（mode=${mode} page=${page} images=${images ? 'on' : 'off'} details=${details ? 'on' : 'off'}）`);
     return {
       ok: true,
       op,
       query,
+      mode,
+      page,
+      details,
       total: Number(data.total ?? 0),
       cached: data.cached === true,
       elapsedMs: Number(data.elapsed_ms ?? 0),

@@ -12,6 +12,9 @@
  *       - 解析成作品、有多个单元本 → 回**单元清单**问下载哪一条（不整本下载）；
  *       - 解析成单元（章节）→ 回所属作品的单元清单，并标出「你要的是第 N 个」；
  *       - 查不到 → 固定话术（不拿搜索兜底）。
+ *   · 搜本 作者:/原作:/IP:/角色:/标签:/标题: → **结构化在线检索**：选一个上游模式取
+ *     一页候选，再取文字详情（`details=1`，不取封面/拼图）复核其余条件（AND）；只回
+ *     “本次检查范围内”的文字清单，**不自动下载**。原作/角色目前只能作为主要条件信任上游。
  *   · 下本 <编号> → 同上精确解析；解析成单元就直接只下该单元；解析成多单元作品就先列清单。
  *   · 下本 <序号> → 取本群**最近一次清单**：有单元清单先按单元清单，否则按上次搜索结果。
  *   · 多单元作品默认**先清单、后下载**，不无提示自动整本。
@@ -38,9 +41,42 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+// 通用目录收藏（2026-11-17）：数据层/命令层/服务层全部与 JM 解耦，
+// 这里只做"父组件 JM 的子功能"接线：群白名单、按群队列、回复序号继续复用本文件。
+import { CatalogStore, normalizeCatalogText } from './catalog-store.js';
+import { DEFAULT_CATALOG_LINES, handleCatalogCommand } from './catalog-service.js';
+import { createJmCatalogProvider } from './jm-catalog.js';
 
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const FETCH_SCRIPT = path.join(ROOT_DIR, 'scripts', 'jm-fetch-one.mjs');
+
+/** 目录库按 (文件, 实例) 缓存句柄；同一进程里多个群共享同一个库（不同实例用 library 行隔离）。 */
+const CATALOG_STORES = new Map();
+
+/**
+ * 当前实例的库作用域：用 appId 的哈希（不把凭据/完整 appId 写进数据库），
+ * 同实例所有获准群共享；换实例 → 另一个 library 行，不会自动串收藏。
+ */
+function catalogOwnerId(config) {
+  const instance = String(config?.qq?.appId ?? 'local');
+  return createHash('sha256').update(instance).digest('hex').slice(0, 16);
+}
+
+function catalogStoreFor(config, log) {
+  const dbPath = String(config?.catalog?.dbPath ?? '').trim();
+  if (!dbPath) throw new Error('没有配置 QQBOT_CATALOG_DB（目录收藏库路径）');
+  const ownerId = catalogOwnerId(config);
+  const key = `${dbPath}\u0000${ownerId}`;
+  let store = CATALOG_STORES.get(key);
+  if (!store) {
+    store = new CatalogStore(dbPath, {
+      library: { kind: 'instance', ownerId },
+      log,
+    });
+    CATALOG_STORES.set(key, store);
+  }
+  return store;
+}
 
 /** 一条入站消息的**被动回复上限**（msg_seq 1..5）。与搬图同一口径，见 `src\meitu-service.js`。 */
 const PASSIVE_SEQ_MAX = 5;
@@ -71,12 +107,18 @@ export const DEFAULT_JM_LINES = Object.freeze({
   /** 群不在白名单（含空名单）。 */
   groupDisabled: ['这个群没开 JM 搜本。'],
   /** 格式提示：解析失败但确实像在写这条指令。 */
-  format: ['格式：搜本 <关键词或编号>；下本 <编号或序号>；整本打包；打包1 3 5 7。'],
+  format: ['格式：搜本 <关键词或编号>；搜本 作者:xxx / 原作:xxx / 角色:xxx / 标签:xxx / 标题:xxx [页码:2]；也可以「搜原神的本子」「来个莉音的本」；下本 <编号或序号>；整本打包；打包1 3 5 7。'],
+  /** 明确不支持的条件（例如 年份:2024），不要只说“格式不对”。 */
+  unsupportedCondition: ['这个条件不支持。'],
+  /** 页码写错。 */
+  pageFormat: ['页码要是 1..9999 的整数。'],
   /** 打包只能针对本群最近展示的单元清单，不能借用别群或搜索结果。 */
   noUnits: ['先搜本或下本查看单元清单，再发「整本打包」或「打包1 3 5 7」。'],
   packInvalid: ['打包序号不对：请只填当前单元清单内的正整数序号，用空格分隔。'],
   /** 边车未声明 units 能力：旧边车会把 ?units= 静默当整本，不能冒险下载。 */
   packUnsupported: ['JM 边车还是旧版，暂时不能合并打包；先让管理员升级边车。'],
+  /** 边车未声明 details 能力：旧边车 images=0 会把作者/标签置空，不能假装筛选成功。 */
+  detailsUnsupported: ['JM 边车还是旧版，暂时不能按作者/原作/角色/标签/标题检索；先让管理员升级边车。'],
   /** 搜本冷却中（只拦搜本；下本不吃冷却）。 */
   cooldown: ['刚搜过，等一会再搜。'],
   /** 边车连不上 / 回 4xx/5xx。 */
@@ -234,6 +276,55 @@ export function buildSearchListText(results, { total = 0 } = {}) {
   return `${head}\n${lines.join('\n')}`;
 }
 
+/** 结构化检索条件的中文摘要（只用于回执，不参与匹配）。 */
+export function buildStructuredConditionText(conditions = {}) {
+  const labels = { creator: '作者', original: '原作/IP', character: '角色', tag: '标签', title: '标题' };
+  const parts = [];
+  for (const [field, values] of Object.entries(conditions)) {
+    for (const value of Array.isArray(values) ? values : []) {
+      parts.push(`${labels[field] ?? field}:${value}`);
+    }
+  }
+  return parts.join('、');
+}
+
+/**
+ * 结构化检索清单：只给文字清单，**绝不自动下载**。
+ * 明确写“本次检查范围内”，不把一页候选的过滤结果冒充全站总数。
+ */
+export function buildStructuredSearchListText({
+  results = [], page = 1, scanned = 0, matched = 0, conditions = {}, unknownDetails = 0,
+} = {}) {
+  const list = Array.isArray(results) ? results : [];
+  const conditionText = buildStructuredConditionText(conditions);
+  const scope = `扫描 ${scanned} 本、第 ${page} 页${unknownDetails > 0 ? `，其中 ${unknownDetails} 本缺文字详情` : ''}`;
+  const head = conditionText
+    ? `本次检查范围内找到 ${matched} 本（条件：${conditionText}；${scope}）。回复 下本 <编号或序号> 或 收藏 <编号>：`
+    : `本次检查范围内找到 ${matched} 本（${scope}）。回复 下本 <编号或序号> 或 收藏 <编号>：`;
+  const rows = list.map((item, index) => {
+    const id = String(item?.id ?? '');
+    const title = shortTitle(item?.title, SEARCH_LIST_TITLE_CHARS);
+    const authors = Array.isArray(item?.authors) && item.authors.length > 0
+      ? item.authors.map((name) => shortTitle(name, 20)).join('、')
+      : '作者未知';
+    const tags = Array.isArray(item?.tags) && item.tags.length > 0
+      ? item.tags.slice(0, 6).map((tag) => shortTitle(tag, 20)).join('、')
+      : '标签未知';
+    return `${index + 1}. JM${id}${title ? ` ${title}` : ''}（作者：${authors}；标签：${tags}）`;
+  });
+  const tail = matched > list.length
+    ? [`本次只列前 ${list.length} 本；可加 页码:${page + 1} 继续。`]
+    : [];
+  return [head, ...rows, ...tail].join('\n');
+}
+
+/** 结构化检索 0 命中：本次检查范围结论，不说“全站没有”。 */
+export function buildStructuredSearchEmptyText({ scanned = 0, conditions = {}, unknownDetails = 0 } = {}) {
+  const conditionText = buildStructuredConditionText(conditions);
+  const scope = `扫描 ${scanned} 本${unknownDetails > 0 ? `，其中 ${unknownDetails} 本缺文字详情` : ''}`;
+  return `本次检查范围内没找到符合条件的作品（${conditionText ? `条件：${conditionText}；` : ''}${scope}）。`;
+}
+
 /**
  * 多单元本清单：序号 + 单元编号(JM<unit_id>) + 单元标题；标明「你要的是第几个」。
  *
@@ -346,7 +437,75 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
     ? Math.floor(Number(jm.max)) : DEFAULT_MAX;
 
   const state = queueStateFor(groupId);
+
+  /** spawn 一次抓取器并解析最后一行 JSON。 */
+  const callFetch = async (args) => {
+    const env = { ...process.env };
+    const fetched = await runFetch({
+      args: [FETCH_SCRIPT, ...args],
+      env,
+      // 子进程硬超时比 CLI 自己的预算多给 15s：让 CLI 有机会把超时写成 JSON 再退出。
+      timeoutMs: timeoutMs + 15_000,
+      cwd: ROOT_DIR,
+    });
+    if (fetched?.timedOut) log.warn('JM：抓取器超时被杀');
+    if (fetched?.stderr) {
+      const tail = String(fetched.stderr).trim().split(/\r?\n/u).slice(-3).join(' / ');
+      if (tail) log.debug(`JM抓取日志：${tail}`);
+    }
+    return { fetched, payload: lastJsonLine(fetched?.stdout) };
+  };
+
   const job = state.tail.then(async () => {
+    // 目录收藏是 JM 搬本的子功能（2026-11-17）：走同一道群白名单与按群队列，
+    // 但**不建临时目录、不下载、不读文件**；收藏/取消收藏只碰独立收藏库。
+    if (parsed.action === 'favorite' || parsed.action === 'unfavorite' || parsed.action === 'list') {
+      try {
+        const provided = deps.catalog && typeof deps.catalog === 'object' ? deps.catalog : null;
+        const store = provided?.store ?? deps.catalogStore ?? catalogStoreFor(config, log);
+        const provider = provided?.provider ?? createJmCatalogProvider({
+          resolve: async (id) => {
+            const { payload } = await callFetch([
+              '--op', 'resolve',
+              '--id', String(id),
+              '--api', apiBase,
+              '--timeout', String(timeoutMs),
+            ]);
+            return payload;
+          },
+          search: async ({ text, pageSize: wanted }) => {
+            const { payload } = await callFetch([
+              '--op', 'search',
+              '--q', String(text ?? ''),
+              '--limit', String(Math.max(1, Math.min(5, Number(wanted) || 5))),
+              '--api', apiBase,
+              '--images', '0',
+              '--timeout', String(timeoutMs),
+            ]);
+            return payload;
+          },
+          log,
+          now,
+        });
+        return await handleCatalogCommand({
+          message,
+          parsed,
+          deps: {
+            store,
+            provider,
+            reply,
+            log,
+            now,
+            pageSize: config.catalog?.pageSize,
+          },
+        });
+      } catch (err) {
+        log.error('收藏：初始化/处理失败', err);
+        await reply(DEFAULT_CATALOG_LINES.internal);
+        return { ok: false, reason: 'internal', action: parsed.action };
+      }
+    }
+
     /** 本次命令一个临时目录（整本/单元 PDF 都只活这一次）；无论成败都清掉。 */
     let tempDir = '';
     try {
@@ -360,24 +519,6 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
         await reply(pickLine('internal'));
         return { ok: false, reason: 'no_root', action: parsed.action };
       }
-
-      /** spawn 一次抓取器并解析最后一行 JSON。 */
-      const callFetch = async (args) => {
-        const env = { ...process.env };
-        const fetched = await runFetch({
-          args: [FETCH_SCRIPT, ...args],
-          env,
-          // 子进程硬超时比 CLI 自己的预算多给 15s：让 CLI 有机会把超时写成 JSON 再退出。
-          timeoutMs: timeoutMs + 15_000,
-          cwd: ROOT_DIR,
-        });
-        if (fetched?.timedOut) log.warn('JM：抓取器超时被杀');
-        if (fetched?.stderr) {
-          const tail = String(fetched.stderr).trim().split(/\r?\n/u).slice(-3).join(' / ');
-          if (tail) log.debug(`JM抓取日志：${tail}`);
-        }
-        return { fetched, payload: lastJsonLine(fetched?.stdout) };
-      };
 
       /** 抓取失败 → 按 reason 挑固定话术（边车不可用/超时/子进程输出坏了/其它）。 */
       const replyFetchFailure = async (payload, fetched, { download = false } = {}) => {
@@ -517,6 +658,152 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
         return { ok: true, title, bytes: buffer.length };
       };
 
+      /**
+       * 结构化在线检索：作者/原作(IP)/角色/标签/标题 + 页码。
+       *
+       * 上游一次只能选一个主要模式，所以：
+       *   ① 选一个条件作为 `mode` 查一页候选；
+       *   ② 用 `details=1`（只取文字详情，不取图）核对其余可核对条件；
+       *   ③ 只回有限候选清单，**绝不自动下载**，并明确“本次检查范围内”。
+       *
+       * 原作/角色详情当前边车不提供，只能作为主要条件信任上游模式；若两者同时出现，
+       * 解析器已明确拒绝，不静默丢一个。
+       */
+      const runStructuredSearch = async (parsedSearch, startedAt) => {
+        const conditions = parsedSearch.conditions && typeof parsedSearch.conditions === 'object'
+          ? parsedSearch.conditions
+          : {};
+        const primaryField = ['original', 'character', 'creator', 'tag', 'title']
+          .find((field) => Array.isArray(conditions[field]) && conditions[field].length > 0);
+        if (!primaryField) {
+          await reply(pickLine('format'));
+          return { ok: false, reason: 'format', action: 'search' };
+        }
+        if ((conditions.original?.length ?? 0) > 0 && (conditions.character?.length ?? 0) > 0) {
+          await reply(pickLine('format'));
+          return { ok: false, reason: 'unsupported', action: 'search' };
+        }
+        if ((conditions.original?.length ?? 0) > 1 || (conditions.character?.length ?? 0) > 1) {
+          await reply(pickLine('format'));
+          return { ok: false, reason: 'unsupported', action: 'search' };
+        }
+
+        // 旧边车 images=0 会把 authors/tags 置空；没有 details 能力时不能假装筛选成功。
+        const health = await callFetch([
+          '--op', 'health',
+          '--api', apiBase,
+          '--timeout', String(timeoutMs),
+        ]);
+        if (!health.payload || health.payload.ok !== true) {
+          return await replyFetchFailure(health.payload, health.fetched);
+        }
+        const capabilities = Array.isArray(health.payload.capabilities) ? health.payload.capabilities : [];
+        if (!capabilities.includes('details')) {
+          log.warn(`JM：边车不支持文字详情（capabilities=${JSON.stringify(capabilities)}），拒绝结构化检索`);
+          await reply(pickLine('detailsUnsupported'));
+          return { ok: false, reason: 'details_unsupported', action: 'search' };
+        }
+
+        const mode = {
+          original: 'work',
+          character: 'actor',
+          creator: 'author',
+          tag: 'tag',
+          title: 'site',
+        }[primaryField];
+        const primaryValue = String(conditions[primaryField][0] ?? '').trim();
+        if (!primaryValue) {
+          await reply(pickLine('format'));
+          return { ok: false, reason: 'format', action: 'search' };
+        }
+        const page = Number.isSafeInteger(Number(parsedSearch.page)) && Number(parsedSearch.page) > 0
+          ? Number(parsedSearch.page) : 1;
+        // 结构化最多取 10 个候选（边车上限）；展示仍受 QQBOT_JM_MAX 限制。
+        const fetchLimit = 10;
+        const { fetched, payload } = await callFetch([
+          '--op', 'search',
+          '--q', primaryValue,
+          '--limit', String(fetchLimit),
+          '--mode', mode,
+          '--page', String(page),
+          '--details', '1',
+          '--images', '0',
+          '--api', apiBase,
+          '--timeout', String(timeoutMs),
+        ]);
+        if (!payload || payload.ok !== true) return await replyFetchFailure(payload, fetched);
+
+        let results = Array.isArray(payload.results)
+          ? payload.results.filter((item) => item && String(item.id ?? '').trim() !== '')
+          : [];
+        // 与普通搜索同口径：total=0 却混进结果，多半是 0 结果页推荐位，按 0 本收口。
+        const siteTotal = Number(payload.total);
+        if (Number.isFinite(siteTotal) && siteTotal === 0 && results.length > 0) {
+          log.warn(`JM：结构化检索 total=0 但有 ${results.length} 条结果，按 0 本处理（疑似推荐位冒充）`);
+          results = [];
+        }
+        const scanned = results.length;
+        const matched = [];
+        let unknownDetails = 0;
+
+        for (const item of results) {
+          let ok = true;
+          let detailMissing = false;
+          for (const field of ['creator', 'tag', 'title']) {
+            const values = Array.isArray(conditions[field]) ? conditions[field] : [];
+            if (values.length === 0) continue;
+            if (field === 'title') {
+              const titleNorm = normalizeCatalogText(item.title);
+              if (!values.every((value) => titleNorm.includes(normalizeCatalogText(value)))) {
+                ok = false;
+                break;
+              }
+              continue;
+            }
+            if (item.detailOk !== true) {
+              detailMissing = true;
+              ok = false;
+              break;
+            }
+            const names = field === 'creator' ? item.authors : item.tags;
+            const normalized = new Set((Array.isArray(names) ? names : [])
+              .map((name) => normalizeCatalogText(name))
+              .filter(Boolean));
+            if (!values.every((value) => normalized.has(normalizeCatalogText(value)))) {
+              ok = false;
+              break;
+            }
+          }
+          if (detailMissing) unknownDetails += 1;
+          if (ok) matched.push(item);
+        }
+
+        const shown = matched.slice(0, Math.max(1, Math.min(maxCount, 10)));
+        state.lastResults = shown.map((item, index) => ({
+          rank: index + 1,
+          id: String(item.id),
+          title: String(item.title ?? ''),
+        }));
+        state.lastChoices = null;
+
+        if (matched.length === 0) {
+          log.info(`JM：结构化检索 0 命中（mode=${mode} page=${page} 扫描=${scanned} 缺详情=${unknownDetails}）`);
+          await reply(buildStructuredSearchEmptyText({ scanned, conditions, unknownDetails }));
+          return { ok: false, reason: 'no_result', action: 'search' };
+        }
+
+        await reply(buildStructuredSearchListText({
+          results: shown,
+          page,
+          scanned,
+          matched: matched.length,
+          conditions,
+          unknownDetails,
+        }));
+        state.lastSearchAt = startedAt;
+        return { ok: true, reason: 'ok', sent: 0, action: 'search' };
+      };
+
       if (parsed.action === 'search') {
         // ② 冷却只在**搜本**上拦、只在**成功**时记（见文件头 ②）。
         const cooldownMs = Number.isFinite(Number(jm.cooldownMs)) ? Math.max(0, Number(jm.cooldownMs)) : DEFAULT_COOLDOWN_MS;
@@ -528,9 +815,14 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
           return { ok: false, reason: 'cooldown' };
         }
 
+        if (parsed.mode === 'structured') {
+          return await runStructuredSearch(parsed, startedAt);
+        }
+
         const keyword = String(parsed.keyword ?? '').trim();
         // ③ 纯数字 = 编号：精确解析，不走站内关键词搜索（1.210.2 的错本就出在这）。
-        if (NUMERIC_ID_RE.test(keyword)) {
+        // 模糊入口（「搜123的本子」）不适用：它承诺只给清单，不能按编号直接下载。
+        if (parsed.fuzzy !== true && NUMERIC_ID_RE.test(keyword)) {
           const { fetched, payload } = await resolveNumber(keyword);
           if (!payload || payload.ok !== true) return await replyFetchFailure(payload, fetched);
           const album = payload.album && typeof payload.album === 'object' ? payload.album : {};
@@ -588,7 +880,10 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
           return { ok: false, reason: 'no_result', action: 'search' };
         }
 
-        const autoSingle = results.length === 1 && siteTotal === 1 && !parsed.countGiven;
+        // 模糊搜本（「搜原神的本子」「来个莉音的本」）是新入口：只给清单，
+        // 不沿用普通搜索“唯一命中自动下载”的旧行为，避免用户还没选就发文件。
+        const autoSingle = results.length === 1 && siteTotal === 1
+          && !parsed.countGiven && parsed.fuzzy !== true;
         if (autoSingle) {
           const hit = results[0];
           // 单本也要先解析单元：多单元作品不能整本下。

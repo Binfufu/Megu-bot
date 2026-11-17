@@ -162,8 +162,11 @@ import { handleMeituCommand, describeMeituTask } from './meitu-service.js';
 import { createMeituInterpreter } from './meitu-interpret.js';
 // 代码层 JM 搜本/下本(2026-11-12):「搜本/找本 <关键词>」「下本 <编号|序号>」。
 // 与搬图同构:纯解析 + 服务层 + 独立网络子进程 CLI;默认关闭,开启前先部署 JM 边车服务。
-import { looksLikeJmAttempt, parseJmCommand } from './jm-command.js';
+import { looksLikeJmAttempt, parseJmCommand, parseJmFuzzyCommand } from './jm-command.js';
 import { DEFAULT_JM_LINES, handleJmCommand } from './jm-service.js';
+// 通用目录收藏（2026-11-17）：作为 JM 搬本的子功能接入；父组件关闭时整段不进入。
+import { looksLikeCatalogAttempt, parseCatalogCommand } from './catalog-command.js';
+import { DEFAULT_CATALOG_LINES } from './catalog-service.js';
 // 美图展览处(2026-10-23 / 展览处刀 1 数据层 + 刀 2 只读 API):
 // 元数据库 `data\<bot>\meitu.db` 与两档缩略图都由这里打开一次、注入服务层与面板。
 import { mimeForImagePath, openMeituGallery } from './meitu-gallery.js';
@@ -7838,11 +7841,20 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
     // 网络只在 `scripts/jm-fetch-one.mjs` 子进程里发生，它调的是部署者自己运行的 JM 边车服务；
     // 群白名单空 = 谁都不给（服务层 fail closed），失败只回固定话术、不调模型。
     if (message.scene === 'group' && message.isMention && config.jm?.enabled) {
-      const parsedJm = parseJmCommand(message.content, { max: config.jm.max });
-      if (parsedJm.ok) {
+      // 目录收藏是 JM 搬本的子功能（2026-11-17）：父组件关闭时整段不进入；
+      // 父组件开启时不要求再开子开关，群授权沿用 config.jm.groups。
+      const parsedCatalog = parseCatalogCommand(message.content, { defaultSource: 'jm' });
+      const parsedJm = parsedCatalog.ok ? null : parseJmCommand(message.content, { max: config.jm.max });
+      // 模糊搜本只在“严格指令/收藏都不是”时兜底；它要求“请求动词 + 句尾 本子/本”，
+      // 普通聊天里单独出现“本”字不会进这里。
+      const parsedFuzzy = !parsedCatalog.ok && parsedJm?.ok !== true
+        ? parseJmFuzzyCommand(message.content, { max: config.jm.max })
+        : null;
+      const parsed = parsedCatalog.ok ? parsedCatalog : (parsedJm?.ok ? parsedJm : parsedFuzzy);
+      if (parsed?.ok) {
         void handleJmCommand({
           message,
-          parsed: parsedJm,
+          parsed,
           deps: {
             config,
             log,
@@ -7854,7 +7866,7 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
           },
         }).then((result) => {
           if (result?.ok !== true && result?.reason !== 'cooldown') {
-            log.info(`JM：${parsedJm.action} 没成（${result?.reason ?? 'unknown'}）`);
+            log.info(`JM：${parsed.action} 没成（${result?.reason ?? 'unknown'}）`);
           }
         }).catch((err) => {
           // 正常失败路径在 handleJmCommand 内部已经 try/catch 收口，这里只防装配层意外
@@ -7863,8 +7875,24 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         });
         return;
       }
+      if (looksLikeCatalogAttempt(message.content)) {
+        const line = parsedCatalog?.reason === 'unsupported'
+          ? DEFAULT_CATALOG_LINES.unsupported
+          : parsedCatalog?.reason === 'page'
+            ? DEFAULT_CATALOG_LINES.pageFormat
+            : parsedCatalog?.reason === 'tag'
+              ? DEFAULT_CATALOG_LINES.tagFormat
+              : DEFAULT_CATALOG_LINES.format;
+        await sendChunked(message, line);
+        return;
+      }
       if (looksLikeJmAttempt(message.content)) {
-        await sendChunked(message, DEFAULT_JM_LINES.format[0]);
+        const line = parsedJm?.reason === 'unsupported'
+          ? DEFAULT_JM_LINES.unsupportedCondition[0]
+          : parsedJm?.reason === 'page'
+            ? DEFAULT_JM_LINES.pageFormat[0]
+            : DEFAULT_JM_LINES.format[0];
+        await sendChunked(message, line);
         return;
       }
       log.debug(`JM：@ 消息未匹配指令（正文=${JSON.stringify(String(message.content ?? '')).slice(0, 80)}）`);
