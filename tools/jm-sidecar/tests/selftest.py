@@ -1171,8 +1171,9 @@ class TestAppContract(TempDirTest):
                     "capabilities"):
             self.assertIn(key, payload)
         self.assertEqual(payload["service"], "jm-service")
-        # Node 合并打包靠这条能力声明 fail closed：旧边车不认 ?units=，绝不能猜成支持。
-        self.assertEqual(payload["capabilities"], ["units"])
+        # Node 合并打包/结构化检索都靠能力声明 fail closed：旧边车不认 ?units=，
+        # images=0 也不会返回文字详情；不能让 Node 猜成支持。
+        self.assertEqual(payload["capabilities"], ["units", "details"])
         self.assertEqual(payload["downloaded_albums"], 0)
         self.assertEqual(payload["search_cache_entries"], 0)
 
@@ -1342,6 +1343,49 @@ class TestAppContract(TempDirTest):
         self.assertEqual(status, 200)
         self.assertTrue(hot["cached"])
         self.assertIsNone(hot["preview_file"])
+
+    def test_search_details_without_images(self):
+        fake = {"total": 1, "items": [
+            {"id": "1001", "title": "标题一", "tags": ["页标签"], "author": "页作者",
+             "image": "http://img/1.jpg"}]}
+        details = {"1001": {"id": "1001", "title": "标题一", "authors": ["详情作者"],
+                            "tags": ["详情标签"], "page_count": 20}}
+        gw = self.service.gateway
+        with patch.object(gw, "search", return_value=fake), \
+             patch.object(gw, "fetch_details", return_value=details) as details_mock, \
+             patch.object(gw, "fetch_covers",
+                          side_effect=AssertionError("details=1 不应抓封面")) as covers_mock, \
+             patch.object(self.service, "_ensure_preview",
+                          side_effect=AssertionError("details=1 不应做拼图")) as preview_mock:
+            status, payload = self._get("/search?q=详情缓存隔离&images=0&details=1")
+        self.assertEqual(status, 200)
+        self.assertIsNone(payload["preview_file"])
+        self.assertIsNone(payload["preview_url"])
+        self.assertEqual(payload["results"][0]["authors"], ["详情作者"])
+        self.assertEqual(payload["results"][0]["tags"], ["详情标签"])
+        self.assertEqual(payload["results"][0]["page_count"], 20)
+        self.assertTrue(payload["results"][0]["detail_ok"])
+        self.assertEqual(payload["results"][0]["cover_url"], "")
+        self.assertEqual(details_mock.call_count, 1)
+        self.assertEqual(covers_mock.call_count, 0)
+        self.assertEqual(preview_mock.call_count, 0)
+
+        # details=1 与 images=0 是不同缓存键：同 q 再查无详情路径必须重新搜索、
+        # 且不能复用详情路径的作者/标签。
+        with patch.object(gw, "search", return_value=fake) as search_mock, \
+             patch.object(gw, "fetch_details",
+                          side_effect=AssertionError("无详情路径不应抓详情")) as details2_mock, \
+             patch.object(gw, "fetch_covers",
+                          side_effect=AssertionError("无详情路径不应抓封面")), \
+             patch.object(self.service, "_ensure_preview",
+                          side_effect=AssertionError("无详情路径不应做拼图")):
+            status2, payload2 = self._get("/search?q=详情缓存隔离&images=0")
+        self.assertEqual(status2, 200)
+        self.assertFalse(payload2["cached"])
+        self.assertEqual(search_mock.call_count, 1)
+        self.assertEqual(details2_mock.call_count, 0)
+        self.assertEqual(payload2["results"][0]["authors"], [])
+        self.assertEqual(payload2["results"][0]["tags"], [])
 
     def test_search_images0_cache_key_separate_from_default(self):
         fake = {"total": 1, "items": [

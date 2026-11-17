@@ -148,7 +148,9 @@ class Service:
                 "search_cache_entries": self.store.count_search(),
                 "jm_domain": self.gateway.jm_domain,
                 # 能力声明：Node 侧合并打包前先核它，旧边车不会被静默当成支持 ?units=。
-                "capabilities": ["units"],
+                # details：/search?images=0&details=1 只取文字详情、不取封面/拼图；
+                # 结构化检索（作者/原作/角色/标签）靠它核对候选，旧边车没有就明确报旧版。
+                "capabilities": ["units", "details"],
             })
 
         @app.get("/search")
@@ -207,11 +209,14 @@ class Service:
         if mode not in SEARCH_MODES:
             return _json_error("invalid_mode", f"mode 仅支持 {'/'.join(SEARCH_MODES)}", 400)
         refresh = request.args.get("refresh", "0") in ("1", "true", "yes")
-        # images=0：跳过详情/封面/拼图（Node 侧已不再发图，省掉全部图片请求）
+        # images=0：跳过封面/拼图；details=1：只取文字详情（作者/标签/页数），
+        # 两者解耦 —— 结构化检索需要文字元数据，但不需要任何图片。
         with_images = (request.args.get("images", "1").strip().lower()
                        not in ("0", "false", "no", "off"))
+        with_details = (request.args.get("details", "0").strip().lower()
+                        in ("1", "true", "yes", "on"))
 
-        cache_key = self._search_cache_key(query, page, limit, mode, with_images)
+        cache_key = self._search_cache_key(query, page, limit, mode, with_images, with_details)
         if not refresh:
             cached_payload = self.store.get_search(cache_key, self.cfg.search_ttl_sec)
             if cached_payload and self._cache_payload_ok(cached_payload, with_images):
@@ -250,6 +255,28 @@ class Service:
                 })
 
             preview_file = self._ensure_preview(query, page, limit, results)
+        elif with_details:
+            # 只取文字详情：作者/标签/页数用于筛选与回执；不取封面、不做拼图。
+            items = search_result["items"][:limit]
+            album_ids = [item["id"] for item in items]
+            details = self.gateway.fetch_details(album_ids, timeout_each=4.0) if album_ids else {}
+            results = []
+            for rank, item in enumerate(items, start=1):
+                detail = details.get(item["id"]) or {}
+                detail_ok = bool(detail)
+                results.append({
+                    "rank": rank,
+                    "id": item["id"],
+                    "title": detail.get("title") or item.get("title") or "",
+                    "authors": detail.get("authors") or ([item["author"]] if item.get("author") else []),
+                    "tags": detail.get("tags") or item.get("tags") or [],
+                    "page_count": detail.get("page_count") if detail_ok else None,
+                    "cover_url": "",
+                    "cover_file": None,
+                    "cover_http": f"/cover/{item['id']}.jpg",
+                    "detail_ok": detail_ok,
+                })
+            preview_file = None
         else:
             results = self._build_results_without_images(search_result, limit)
             preview_file = None
@@ -272,15 +299,16 @@ class Service:
                 self.log.warning("写搜索缓存失败：%s", exc)
         response = {"ok": True, "cached": False, **payload,
                     "elapsed_ms": int((time.time() - started) * 1000)}
-        self.log.info("搜索完成 q=%r mode=%s page=%s limit=%s images=%s 命中%s本 %dms cached=false",
-                      query, mode, page, limit, int(with_images), len(results),
+        self.log.info("搜索完成 q=%r mode=%s page=%s limit=%s images=%s details=%s 命中%s本 %dms cached=false",
+                      query, mode, page, limit, int(with_images), int(with_details), len(results),
                       response["elapsed_ms"])
         return jsonify(response)
 
     @staticmethod
     def _search_cache_key(query: str, page: int, limit: int, mode: str = "site",
-                          with_images: bool = True) -> str:
-        raw = f"{mode}\x1f{query}\x1f{page}\x1f{limit}\x1f{int(bool(with_images))}".encode("utf-8")
+                          with_images: bool = True, with_details: bool = False) -> str:
+        raw = (f"{mode}\x1f{query}\x1f{page}\x1f{limit}\x1f{int(bool(with_images))}"
+               f"\x1f{int(bool(with_details))}").encode("utf-8")
         return hashlib.sha1(raw).hexdigest()
 
     def _cache_payload_ok(self, payload: dict, with_images: bool) -> bool:

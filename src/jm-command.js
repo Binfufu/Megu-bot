@@ -12,6 +12,15 @@
  *     找本 全彩                 ← 「找本」与「搜本」同义
  *     搜本 全彩 3               ← 末尾单独一个数量词（1..5，超出夹到上限）
  *     搜本 全彩 三               ← 中文数量也认
+ *     搜本 作者:甲                ← 结构化检索：作者（上游 author 模式）
+ *     搜本 原作:乙 / 搜本 IP:乙    ← 结构化检索：原作/IP（上游 work 模式）
+ *     搜本 角色:丙                ← 结构化检索：角色（上游 actor 模式）
+ *     搜本 标签:丁                ← 结构化检索：站点标签（上游 tag 模式）
+ *     搜本 标题:戊                ← 标题文字检索（站点候选后按标题复核）
+ *     搜本 作者:甲 标签:丁 2       ← 多条件 AND + 页码；只回本次检查范围内的清单
+ *     搜原神的本子               ← 模糊搜本：请求动词 + 句尾“本子/本”，关键词=原神
+ *     来个莉音的本               ← 同上；只给清单，不自动下载
+ *     （结构化/模糊检索永远只给清单；普通「搜本 关键词」旧行为不变）
  *     下本 1490076              ← 直接给作品编号（至少两位数字；边车按 id 下载）
  *     下本 3                    ← 给**序号**：取本群最近一次搜索结果里的第 3 本
  *     下载本子 1490076          ← 「下载本子」是「下本」的别名
@@ -49,6 +58,247 @@ const DOWNLOAD_VERBS = '下本|下载本子|下载本';
 
 /** 中文数量 → 数值（只收 1..5 与常见写法；「十几」之类落不到数字 = 当关键词）。 */
 const CN_NUM = { 一: 1, 两: 2, 二: 2, 三: 3, 四: 4, 五: 5 };
+
+/** 结构化检索的条件键；只收明确写出来的键，未知键回 unsupported。 */
+const STRUCTURED_FIELDS = new Map([
+  ['作者', 'creator'],
+  ['原作', 'original'],
+  ['IP', 'original'],
+  ['ip', 'original'],
+  ['角色', 'character'],
+  ['标签', 'tag'],
+  ['标题', 'title'],
+]);
+
+/** 结构化检索的值/页码上限；页码与列表页码同一口径。 */
+const MAX_STRUCTURED_VALUE_CHARS = 60;
+const MAX_STRUCTURED_PAGE = 9999;
+
+/** 把 `键:值` 拆开（全角/半角冒号都认）；没有冒号返回 null。 */
+function splitKeyValue(token) {
+  const match = /^([^:：]+)[:：](.*)$/u.exec(String(token ?? ''));
+  if (!match) return null;
+  return { key: match[1].trim(), value: match[2].trim() };
+}
+
+/**
+ * 解析结构化搜索的条件段：`作者/原作/IP/角色/标签/标题` + 页码。
+ *
+ * 返回 null = 没有条件键，交回原有的普通关键词搜索（保住 `搜本 全彩 3` 的旧语义）。
+ * 只要写了条件键，就进入**只清单、不自动下载**的结构化路径。
+ */
+function parseStructuredSearchRest(body) {
+  const tokens = String(body ?? '').trim().split(/\s+/u).filter(Boolean);
+  if (tokens.length === 0) return null;
+  const conditions = {};
+  const free = [];
+  const numericPages = [];
+  let page = 1;
+  let pageGiven = false;
+  let hasCondition = false;
+
+  const setPage = (raw) => {
+    if (pageGiven) return false;
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value) || value < 1 || value > MAX_STRUCTURED_PAGE) return false;
+    page = value;
+    pageGiven = true;
+    return true;
+  };
+
+  for (const token of tokens) {
+    const pair = splitKeyValue(token);
+    if (pair) {
+      if (pair.key === '页码' || pair.key === '页') {
+        if (!/^\d+$/u.test(pair.value) || !setPage(pair.value)) return { ok: false, reason: 'page' };
+        continue;
+      }
+      const field = STRUCTURED_FIELDS.get(pair.key);
+      if (!field) return { ok: false, reason: 'unsupported', field: pair.key };
+      const value = pair.value.normalize('NFKC').trim();
+      if (!value || Array.from(value).length > MAX_STRUCTURED_VALUE_CHARS) {
+        return { ok: false, reason: 'format', field: pair.key };
+      }
+      const list = conditions[field] ?? [];
+      if (list.length >= 5) return { ok: false, reason: 'format', field: pair.key };
+      list.push(value);
+      conditions[field] = list;
+      hasCondition = true;
+      continue;
+    }
+
+    if (/^\d+$/u.test(token)) {
+      numericPages.push(token);
+      continue;
+    }
+    if (/^第\d+页$/u.test(token)) {
+      if (!setPage(token.replace(/\D+/gu, ''))) return { ok: false, reason: 'page' };
+      continue;
+    }
+    free.push(token);
+  }
+
+  if (!hasCondition) {
+    // 没有条件键：交回普通关键词路径；页码词/数字由原解析器处理（或当关键词）。
+    return null;
+  }
+
+  if (numericPages.length > 0) {
+    if (numericPages.length > 1 || pageGiven) return { ok: false, reason: 'page' };
+    if (!setPage(numericPages[0])) return { ok: false, reason: 'page' };
+  }
+
+  if (free.length > 0) {
+    const text = free.join(' ').trim();
+    if (!text || Array.from(text).length > MAX_STRUCTURED_VALUE_CHARS) return { ok: false, reason: 'format' };
+    conditions.title = [...(conditions.title ?? []), text];
+  }
+
+  if ((conditions.original?.length ?? 0) > 0 && (conditions.character?.length ?? 0) > 0) {
+    // 当前边车详情只给作者/标签，不能同时用两种上游模式再复核；明确拒绝，不静默丢一个。
+    return { ok: false, reason: 'unsupported', field: '原作+角色' };
+  }
+  if ((conditions.original?.length ?? 0) > 1 || (conditions.character?.length ?? 0) > 1) {
+    // 原作/角色只能作为一个主要条件信任上游；多值无法逐条复核，拒绝而不是静默只查第一个。
+    return { ok: false, reason: 'unsupported', field: '原作/角色多值' };
+  }
+
+  return {
+    ok: true,
+    action: 'search',
+    mode: 'structured',
+    conditions,
+    page,
+    keyword: null,
+    countGiven: false,
+  };
+}
+
+/**
+ * **模糊搜本**（2026-11-17，对标搬图的噪点/复合词护栏）：
+ * 只认“明确请求 + 句尾 本子/本”的形状，不认句中随便出现的“本”字。
+ *
+ * 认的写法：
+ *     搜原神的本子
+ *     来个莉音的本
+ *     来点原神的本子
+ *     我想看原神的本子
+ *     有没有原神的本子
+ *     搜原神本
+ *
+ * 不认（防闲聊误命中）：
+ *     这个本子不错          ← 没有请求动词
+ *     我本来想找…           ← “本来”的“本”不是书
+ *     来个日本              ← 日本/成本/基本… 是复合词，不是“日本的书”
+ *     老板本来…             ← 同上
+ *
+ * 与搬图同一思路：动词/前缀是白名单，不是自由扫描；句尾书标记 + 关键词非空
+ * 才形成命令。纯代码即可，不调模型。
+ */
+const FUZZY_PREFIXES = [
+  '麻烦你', '麻烦', '请问', '请', '帮我', '给我', '我想', '想', '能不能', '可以', '能',
+  '再', '就', '嗯', '那', '你', '我',
+].sort((a, b) => b.length - a.length);
+
+const FUZZY_CUES = [
+  '有没有', '推荐', '来个', '来点', '来几', '看看', '找找', '搜搜', '搜索',
+  '搜', '找', '来', '看', '求', '发', '整', '搬', '搞', '要', '有无',
+].sort((a, b) => b.length - a.length);
+
+/** 引词后的可选量词/衬词；用一次性匹配，避免嵌套量词回溯。 */
+const FUZZY_FILLER_RE = /^(?:[一两几]?个|[一两几]本|点|些|下|一下|看看|看下|这个|那个|这部|那部|一些|一点|几个)?/u;
+
+/** 句尾裸“本”的常见复合词：这些不是“某本书”，出现就放弃模糊命中。 */
+const FUZZY_BEN_COMPOUNDS = new Set([
+  '日本', '本人', '本来', '本事', '基本', '成本', '版本', '脚本', '资本', '文本',
+  '课本', '账本', '样本', '副本', '译本', '抄本', '刻本', '善本', '绘本', '蓝本',
+  '范本', '原本', '根本', '忘本', '固本', '治本', '校本', '底本', '母本', '教本',
+  '读本', '选本', '节本', '足本', '全本', '单本', '开本', '印本', '孤本', '珍本',
+  '秘本', '戏本', '话本', '唱本', '剧本', '笔记本', '笔记本子', '画本', '画本子',
+]);
+
+/** 模糊关键词不能是这些空词；否则回“本子”本身不构成检索目标。 */
+const FUZZY_STOP_WORDS = new Set([
+  '本', '本子', '这个', '那个', '这部', '那部', '一些', '一点', '几个', '什么', '啥',
+  '随便', '好看', '不错', '那个本', '这个本',
+]);
+
+/** 关键词开头若是这些，说明更像“看了/说过/想知道”的闲聊，而不是下指令。 */
+const FUZZY_CHAT_PREFIXES = /^(?:了|过|着|完|到|说|讲|聊|起|觉|知道|看过|看看|瞧瞧)/u;
+
+/** 关键词里含这些“聊书/问人”的词，更像讨论而不是下命令。 */
+const FUZZY_CHAT_CONTAINS = /(?:看过|看了|看完|读过|读了|知道|觉得|认为|说过|讲过|聊过|发过|推荐过|有人|谁|人看|人读|来人|帮忙|帮我看|解释|讨论|看看|好不好|怎么样|买过|喜欢|人买|人喜欢|人推荐)/u;
+
+/** 输入长度硬上限：模糊解析只该服务一句短指令，超长直接当闲聊。 */
+const FUZZY_MAX_INPUT_CHARS = 200;
+
+/** 去掉句尾语气词后取“本子/本”标记；没有标记返回 null。 */
+function splitFuzzyMarker(text) {
+  const body = String(text ?? '').replace(/[吧啊呀呢吗嘛哦啦~～。！!？?\s]+$/u, '');
+  if (body.endsWith('本子')) return { marker: '本子', body: body.slice(0, -2) };
+  if (body.endsWith('本')) return { marker: '本', body: body.slice(0, -1) };
+  return null;
+}
+
+/** 循环剥开头白名单前缀；每次都是 startsWith，线性、无回溯。 */
+function stripFuzzyPrefixes(text) {
+  let out = text;
+  for (;;) {
+    const hit = FUZZY_PREFIXES.find((prefix) => out.startsWith(prefix));
+    if (!hit) return out;
+    out = out.slice(hit.length).replace(/^[，,、;；\s]+/u, '');
+  }
+}
+
+/** 清洗模糊关键词：去掉引导词/尾巴；复合词直接放弃。 */
+function cleanFuzzyKeyword(raw, marker) {
+  let text = String(raw ?? '').normalize('NFKC').trim();
+  text = text.replace(/^(?:[，,、;；\s]+)/u, '')
+    .replace(/^(?:个|点|些|下|一下|看看|看下|看|推荐|安利|这个|那个|这部|那部|一些|一点|几个|本|的)+/u, '')
+    .replace(/[的吧啊呀呢吗嘛哦啦~～\s]+$/u, '')
+    .trim();
+  if (!text || FUZZY_STOP_WORDS.has(text)) return null;
+  if (FUZZY_CHAT_PREFIXES.test(text) || FUZZY_CHAT_CONTAINS.test(text)) return null;
+  // 裸“本”前面只有一个字时太容易是“本来/基本/成本”这类句子；要求至少两字。
+  if (marker === '本' && Array.from(text).length < 2) return null;
+  if (Array.from(text).length > MAX_JM_KEYWORD_CHARS) return null;
+  // 句尾裸“本”可能是复合词的词尾：来个日本 / 来个成本 / 来个笔记本。
+  const compound = `${text}${marker}`;
+  if (FUZZY_BEN_COMPOUNDS.has(compound) || FUZZY_BEN_COMPOUNDS.has(text)) return null;
+  return text;
+}
+
+/**
+ * 解析模糊搜本。**只在严格解析失败之后调用**；不联网、不读文件。
+ *
+ * @param {string} text 消息正文
+ * @param {{max?: number}} [options] 展示数量上限（来自 config.jm.max）
+ * @returns {{ok:true, action:'search', keyword:string, count:number, countGiven:false,
+ *            fuzzy:true} | {ok:false, reason:'format'} | null}
+ */
+export function parseJmFuzzyCommand(text, { max = DEFAULT_JM_MAX } = {}) {
+  const normalized = normalize(text);
+  if (!normalized || Array.from(normalized).length > FUZZY_MAX_INPUT_CHARS) return null;
+  const split = splitFuzzyMarker(normalized);
+  if (!split) return null;
+  let rest = split.body.replace(/[的\s]+$/u, '');
+  rest = stripFuzzyPrefixes(rest);
+  const cue = FUZZY_CUES.find((one) => rest.startsWith(one));
+  if (!cue) return null;
+  rest = rest.slice(cue.length).replace(/^[，,、;；\s]+/u, '');
+  rest = rest.replace(FUZZY_FILLER_RE, '').replace(/^[，,、;；\s]+/u, '');
+  const keyword = cleanFuzzyKeyword(rest, split.marker);
+  if (!keyword) return null;
+  const limit = Number.isSafeInteger(max) && max > 0 ? max : DEFAULT_JM_MAX;
+  return {
+    ok: true,
+    action: 'search',
+    keyword,
+    count: limit,
+    countGiven: false,
+    fuzzy: true,
+  };
+}
 
 /**
  * 一位数字里可以当**序号**的取值（搜索结果最多 5 本；单元本清单最多列 15 个，
@@ -141,6 +391,10 @@ function parseSearchRest(rest, max) {
   const body = String(rest ?? '').trim();
   if (!body) return { ok: false, reason: 'format' };
 
+  // 结构化条件（作者/原作/IP/角色/标签/标题/页码）优先；没有条件键时回到普通关键词。
+  const structured = parseStructuredSearchRest(body);
+  if (structured) return structured;
+
   // 末尾单独一个数量词（必须**以空白分隔**，见文件头 ① 的宁窄勿宽口径）。
   let keyword = body;
   let count = null;
@@ -200,13 +454,18 @@ function parseDownloadRest(rest) {
  * @param {string} text 消息正文（群里已经剥掉段落 @ 也行，多剥一层无副作用）
  * @param {{max?: number}} [options] `max` = 一次最多搜几本（来自 `config.jm.max`）
  * @returns {{ok: true, action: 'search', keyword: string, count: number, countGiven: boolean}
+ *   | {ok: true, action: 'search', mode: 'structured', conditions: object, page: number,
+ *      keyword: null, countGiven: false}
  *   | {ok: true, action: 'download', target: string|null, ordinal: number|null, raw: string}
  *   | {ok: true, action: 'pack', all: boolean, ordinals: number[]}
- *   | {ok: false, reason: 'format'|'count'|'keyword'}}
+ *   | {ok: false, reason: 'format'|'count'|'keyword'|'page'|'unsupported', field?: string}}
  */
 export function parseJmCommand(text, { max = DEFAULT_JM_MAX } = {}) {
   const normalized = normalize(text);
   if (!normalized) return { ok: false, reason: 'format' };
+
+  // 「搜本子」「找本子」没有关键词：不能把动词后面的「子」当关键词搜出去。
+  if (/^(?:搜本|找本)子\s*$/u.test(normalized)) return { ok: false, reason: 'format' };
 
   const pack = parsePackCommand(normalized);
   if (pack) return pack;

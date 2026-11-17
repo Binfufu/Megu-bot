@@ -74,6 +74,7 @@ export const CONFIG_DERIVED_DEFAULTS = Object.freeze({
   QQBOT_LOCK_FILE: 'rootDir/.qqbot.lock',
   QQBOT_LEGACY_STATE_FILE: 'rootDir/.qqbot-state.json; explicit empty disables import',
   QQBOT_MEITU_DB: 'sibling meitu.db of explicit QQBOT_STATE_DB, otherwise rootDir/data/meitu.db',
+  QQBOT_CATALOG_DB: 'sibling catalog.db of explicit QQBOT_STATE_DB, otherwise rootDir/data/catalog.db',
   QQBOT_MEMORY_DB: 'rootDir/data/<QQBOT_MOOD_THEME>/memory.db (not STATE_DB sibling)',
   QQBOT_STATE_DB: 'rootDir/.qqbot.db',
   QQBOT_SELFCARE_C2C: 'QQBOT_MORNING_C2C, then empty',
@@ -142,6 +143,8 @@ export function createConfigParamDefinitions(parsers) {
   nonnegative('QQBOT_JM_COOLDOWN_MS', 30_000);
   positive('QQBOT_JM_MAX_BYTES', 10_485_760);
   positive('QQBOT_JM_TIMEOUT_MS', 120_000);
+  // 通用目录收藏（2026-11-17）：独立库、每页条数；父开关沿用 QQBOT_JM。
+  positive('QQBOT_CATALOG_PAGE_SIZE', 8, { max: 50 }); // 【暂定】8；清单一页最多 50
   boolean('QQBOT_PROMPT_CONTEXT', true);
   positive('QQBOT_MAX_IMAGES', 3);
   positive('QQBOT_GROUP_CONTEXT', 15);
@@ -292,7 +295,7 @@ export function createConfigParamDefinitions(parsers) {
   for (const [id, fallback] of Object.entries({
     QQBOT_LOCK_FILE: undefined, QQBOT_LEGACY_STATE_FILE: undefined,
     QQBOT_STATE_DB: undefined, QQBOT_MEMORY_DB: undefined, QQBOT_REPORT_STATS_DB: undefined,
-    QQBOT_MEITU_DB: undefined, QQBOT_LOG_FILE: undefined,
+    QQBOT_MEITU_DB: undefined, QQBOT_CATALOG_DB: undefined, QQBOT_LOG_FILE: undefined,
     QQBOT_MEITU_ROOT: 'data/meitu-images', QQBOT_MEITU_ALIAS: 'data/meitu-alias.json',
     QQBOT_MEITU_LINES: 'data/meitu-lines.json', QQBOT_MEITU_THUMBS: 'data/meitu',
     QQBOT_JM_ROOT: 'data/demo/jm-images',
