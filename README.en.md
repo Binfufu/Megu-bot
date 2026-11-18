@@ -6,10 +6,10 @@
 
 - Megu-bot is a bot project for long-term companionship and easy interaction. It began with a simple frustration: tabletop-style roleplay cannot be played in a lightweight way over the long run, and the ecosystem feels lonely. So it builds its own bot framework: put a character into a custom world, give each character a long-term memory layer and a set of multi-function components, then apply the fan character card you like (this project started with Megumin 😋), so you can interact with the character anytime, anywhere, on the chat platforms you already use 😋
 - Characters get a long-term memory system with a good cost/benefit ratio: memory does not weaken as the interaction gets longer, while token usage stays under control (about 5k tokens per bot reply, with ~90% of input served from cache).
-- You can connect the official Tencent QQ Open Platform. By design, QQ is only one of the platforms that can be connected: the QQ-specific implementation is about 2.0% of the runtime source (~1.4% of the whole project). The core is fully decoupled from the platform, so other platforms can be added as needed (~the author only uses QQ and WeChat, so it is not a priority~).
+- You can connect the official Tencent QQ Open Platform. By design, QQ is only one of the platforms that can be connected: the QQ-specific implementation is about 2.3% of the runtime source (~1.5% of the whole project). The core is fully decoupled from the platform, so other platforms can be added as needed (~the author only uses QQ and WeChat, so it is not a priority~). Share basis: line count of `src/qq.js` divided by line count of `src/`; the whole project additionally includes scripts and tools.
 - By design, no matter which platform you connect, you always interact with the same character body (memory unchanged, cognition unchanged — the character just needs to know who you are).
 
-The full project architecture is shown below (box area is approximately proportional to runtime source lines):
+The full project architecture is shown below (box area is approximately proportional to runtime source lines; the web front-end is an illustration of a private component — public capabilities follow the switches in the body text):
 
 ![Megu-bot overview architecture: bot core, front-end platforms, and external interfaces](<docs/architecture-overview.en.png>)
 
@@ -21,7 +21,7 @@ This repository, [Binfufu/Megu-bot](https://github.com/Binfufu/Megu-bot), is its
 It can:
 
 - Interact in QQ DMs or group chats (it calls the OpenAI-compatible model endpoint you configure) and send replies to QQ.
-- Optionally deliver images (搬图) as a code-level multi-function component: on command, code searches for, downloads, and sends images; the model is never asked to do it. Off by default; see [section 4](#4-optional-code-level-image-delivery).
+- Run three code-level multi-function components whose target sources are not fixed and can be replaced with your own implementation: image delivery (搬图, image search and delivery), book delivery (搬本, item search and document delivery), and feed watch (盯梢, update-source monitoring and push). Retrieval, download, and sending are all done by code, never handed to the model. None runs by default; see [section 4](#4-multi-function-components-code-level-source-agnostic).
 
 It cannot do, or does not have by default:
 
@@ -35,7 +35,7 @@ Licensed under [MIT](<LICENSE>). The code license does not grant rights to image
 
 ## What do I need to deploy locally?
 
-- Local environment: Git, and Node.js **22 or newer**. (Node must provide built-in `fetch`, `WebSocket`, and `node:sqlite`; use a currently supported recent version.)
+- Local environment: Git, and Node.js **22 or newer**. (Node must provide built-in `fetch`, `WebSocket`, and `node:sqlite`; use a currently supported recent version and check it with the probe in section 1.)
 - Connecting QQ: You need to create a bot yourself on the [QQ Open Platform](https://q.qq.com/), obtain the AppID and ClientSecret, and configure test members, message permissions, and group-chat permissions there. Sandbox permissions follow the platform's actual settings; environment variables will not enable the sandbox for you.
 - Connecting an LLM: Normal conversation needs a working OpenAI-compatible model endpoint, model name, and key. The base URL and model in the template are replaceable examples; the key is empty.
 
@@ -53,7 +53,7 @@ PowerShell:
 git clone https://github.com/Binfufu/Megu-bot.git
 Set-Location Megu-bot
 node --version
-node --input-type=module -e "import('node:sqlite').then(() => console.log('sqlite available'))"
+node --input-type=module -e "await import('node:sqlite'); if (typeof fetch !== 'function' || typeof WebSocket !== 'function') process.exit(1); console.log('Node features available')"
 node scripts/selftest-public.js
 ```
 
@@ -63,11 +63,11 @@ POSIX shell (Linux / macOS):
 git clone https://github.com/Binfufu/Megu-bot.git
 cd Megu-bot
 node --version
-node --input-type=module -e "import('node:sqlite').then(() => console.log('sqlite available'))"
+node --input-type=module -e "await import('node:sqlite'); if (typeof fetch !== 'function' || typeof WebSocket !== 'function') process.exit(1); console.log('Node features available')"
 node scripts/selftest-public.js
 ```
 
-[selftest-public.js](<scripts/selftest-public.js>) uses inline fixtures, fake network responses, and temporary directories; it does not read your QQ or model credentials and does not start the bot. If the last output line looks like `N passed, 0 failed` and the exit code is 0, the public subset passed in your environment. For what each suite covers and does not cover, see the "Public CI coverage" list in [CONTRIBUTING.md](<CONTRIBUTING.md>).
+[selftest-public.js](<scripts/selftest-public.js>) uses inline fixtures, fake network responses, and temporary directories; it does not read your QQ or model credentials and does not start the bot. If the last output line reads `N passed, 0 failed` (with a skip count if any) and the exit code is 0, the public subset passed in your environment. For what each suite covers and does not cover, see the "Public CI coverage" list in [CONTRIBUTING.md](<CONTRIBUTING.md>).
 
 Passing only proves that the public code can load locally and pass synthetic cases. It does **not** prove that QQ, the model, or image sources are reachable, nor is it the same as a full regression of the private repository.
 
@@ -131,7 +131,7 @@ The template also presets the following, matching the demo directory layout; nor
 
 **An openid is not a QQ number.** DMs usually use `user_openid`, and group members use `member_openid`; IDs from different bots or scenarios must not be mixed. Confirm the authorized target from your own platform events or local logs. `QQBOT_ADMIN_IDS` is a separate authorization for control commands; it is empty in the template, and you can leave it empty.
 
-See [.env.example](<.env.example>) for all configuration keys. By default the template turns off mood, stats/economy/growth, scheduled group warm-up, spontaneous life, greetings, announcements, extra memory and background summaries, model tools, and web capabilities; group-chat mode is `mention`, so the bot only handles a group message when it is @-mentioned. Do not switch the access mode to `open` just to get things running.
+See [.env.example](<.env.example>) for all configuration keys. By default the template turns off mood, stats/economy/growth, scheduled group warm-up, spontaneous life, greetings, announcements, extra memory and background summaries, model tools, web capabilities, and the bot's feed watch outputs; group-chat mode is `mention`, so the bot only handles a group message when it is @-mentioned. Do not switch the access mode to `open` just to get things running.
 
 ## 3. Connect QQ and confirm it runs
 
@@ -165,15 +165,19 @@ Always set `QQBOT_ENV_FILE` explicitly. When it is unset, the program falls back
 Check two things:
 
 1. **QQ gateway connected.** When "机器人已就绪" (bot ready) appears in the log, the QQ gateway has authenticated and returned the bot identity. This step does not involve the model.
-2. **Model conversation works.** With an account that is in `QQBOT_IDS`, DM the bot or @-mention it in a group and send a sentence. If you receive a model-generated reply, the path from receiving the QQ message to requesting the model to sending the reply back to QQ works. If you get no reply, use section 6 to check events, authorization, and the model separately.
+2. **Model conversation works.** With an account that is in `QQBOT_IDS`, DM the bot or @-mention it in a group and send a sentence. If you receive a model-generated reply, the path from receiving the QQ message to requesting the model to sending the reply back to QQ works. If you get no reply, use section 5 to check events, authorization, and the model separately.
 
 Press Ctrl+C to stop the process. This document does not cover auto-start, daemons, or scheduled tasks. After changing local settings, restart the process to reload them.
 
 Logs are in `data/demo/bridge.log`; the state database and lock file are also in `data/demo/`. Logs may contain identity data and user content, so redact them before sharing. When troubleshooting, do not delete the running lock, database, or WAL/SHM files.
 
-## 4. Optional: code-level image delivery
+## 4. Multi-function components: code-level, source-agnostic
 
-Image delivery (搬图) is off by default: once started, it does not fetch or send images automatically. Before enabling it, confirm the image-source sites, copyright, and the requirements of QQ and your jurisdiction yourself. The built-in filters cannot replace human review and do not guarantee that every result suits the target group.
+Code handles retrieval, filtering, downloading, and sending. Target sources are not hard-coded into the core; each component connects to external services through a source adapter or sidecar contract. The examples below show one working setup per component, not the limits of what it can do. None runs by default. The group allowlists for image and book delivery are separate from `QQBOT_IDS` user authorization, and **an empty list rejects all groups**. Feed watch sends QQ DMs and does not use a group allowlist. Before enabling any of them, check the source's terms, copyright, and the content requirements of QQ and your jurisdiction. Built-in filters do not replace human review.
+
+### 4.1 Image delivery (搬图): image search and delivery (example sources: Danbooru / Safebooru)
+
+On command, code searches for, downloads, and sends images. The example implementation targets Danbooru / Safebooru; `QQBOT_MEITU_SOURCE` switches between `auto`, `danbooru`, and `safebooru`. Whether it works depends on your local network. If a proxy is required, fill in `QQBOT_MEITU_PROXY`; the template does not provide a proxy address.
 
 Edit only your local `.env` and keep `QQBOT_ACCESS_MODE=allowlist`:
 
@@ -191,18 +195,17 @@ What each key means:
 - `QQBOT_MEITU_GROUPS`: group openids allowed to use image delivery, filled in by you locally. **An empty value rejects all groups**; it does not mean "everyone". It is independent of the `QQBOT_IDS` user authorization and cannot replace it.
 - `QQBOT_MEITU_ALIAS`: your own JSON mapping from "name → image-source tag". The public version does not provide a real character alias table. For example, write `{"example topic":"your_source_tag"}` and replace the placeholder tag with the actual query tag you have confirmed. If the file is missing or is not valid JSON, the program falls back to the default alias table (empty in the public version) and does not necessarily report an error, so "no error" does not mean "the alias is configured correctly".
 - `QQBOT_MEITU_LINES`: optional; overrides the fixed reply sentences. If the file is missing or invalid, the default sentence bank is used.
-- `QQBOT_MEITU_SOURCE`: valid values are `auto`, `danbooru`, `safebooru`. Whether it works depends on your local network. If a proxy is required, fill in `QQBOT_MEITU_PROXY`; the template does not provide a proxy address.
 - Default limits: at most 5 images per request, 30000 ms cooldown, 10485760 bytes per image, 90000 ms timeout. These are the existing defaults in the template, not a promise of success rate. Downloaded images go to `data/demo/images/`; together with their metadata, they are local runtime data.
 
 **About model cost:** A normal request that hits an alias does not call the model; if alias or name resolution misses, the program may call the bot model once to help interpret it. So you cannot assume every image-delivery request is free of model cost. In either case, retrieval, download, and sending are done by code, not by the model's file or network tools.
 
 After configuring, restart the process, then @-mention the bot in an authorized group and send a request like `发1张示例主题美图` (the name must correspond to a valid tag of your own). No image may mean missing permission, no results, blocked by content filters, proxy failure, timeout, or platform sending failure; check the local log to tell them apart. Passing the public self-test does not replace a real test of this external path.
 
-## 5. Optional: JM book search/download (requires a self-hosted JM sidecar)
+### 4.2 Book delivery (搬本): item search and document delivery (example source: self-hosted JM sidecar)
 
-This feature is off by default. The actual JM search/download is performed by the **local JM sidecar service** that you run yourself; the Node side only calls it over an HTTP contract. The repo includes an optional sidecar implementation under `tools/jm-sidecar/` (Python; you install its dependencies and clone two upstream MIT projects yourself — see the [JM search doc](<docs/45-JM搜本.md>)); you can also use another implementation that follows the same contract. Without a deployed sidecar, turning the switch on only produces the fixed reply "JM service is not started"; it does not go online or send anything out.
+Search for items, choose a unit, and get its PDF. The local catalog only stores metadata; it does not download or send images. The component is not tied to any site. The example hands search and download to a **local sidecar** you run yourself; Node only calls it over HTTP. The optional implementation in `tools/jm-sidecar/` uses Python and requires dependencies and two upstream MIT projects (see the [JM search doc](<docs/45-JM搜本.md>)). Another implementation can use the same contract. If the sidecar is not listening at the default address, the HTTP request fails and the bot reports that the JM service is not started instead of sending a file.
 
-Pure digits are resolved **exactly by number** (work or unit), not through the site's keyword search; when a work has several unit books, the bot first replies with the unit list so the user can choose, then downloads/sends only that unit's PDF. Search no longer sends a collage or cover. Structured search is also available: `搜本 作者:xxx`, `搜本 原作:xxx`/`IP:xxx`, `搜本 角色:xxx`, `搜本 标签:xxx`, and `搜本 标题:xxx` (combinable; `页码:2` for paging). It picks one upstream mode for the current page, fetches text details only, verifies the remaining conditions with AND, and returns only a "within this checked range" list without auto-download. Fuzzy forms such as `搜原神的本子` and `来个莉音的本` also enter the book search path; they require a request verb plus a trailing `本子`/`本` and use compound-word guards so ordinary chat containing 本来/日本/成本/笔记本 is not captured.
+Pure digits are resolved **exactly by number** (work or unit), not through the site's keyword search; when a work has several unit books, the bot first replies with the unit list so the user can choose, then downloads/sends only that unit's PDF. Search no longer sends a collage or cover. Structured search is also available: `搜本 作者:xxx`, `搜本 原作:xxx`/`IP:xxx`, `搜本 角色:xxx`, `搜本 标签:xxx`, and `搜本 标题:xxx` (combinable; `页码:2` for paging). It picks one upstream mode for the current page, fetches text details only, verifies the remaining conditions with AND, and returns only a "within this checked range" list without auto-download. Choose at most one of work or character, and only as the upstream search condition: the sidecar does not expose those fields for verification. Fuzzy forms such as `搜原神的本子` and `来个莉音的本` also enter the book search path; they require a request verb plus a trailing `本子`/`本` and use compound-word guards so ordinary chat containing 本来/日本/成本/笔记本 is not captured.
 
 The same parent feature includes a **local catalog** sub-feature: `收藏 <条目ID>`, `取消收藏 <条目ID>`, and `收藏夹 [page]` / `收藏夹 作者:xxx`. Favoriting stores item-level metadata in a separate SQLite DB and **does not download or send images**; unfavoriting does not delete files. When `QQBOT_JM` is off the whole entry point is inactive, and group authorization still follows `QQBOT_JM_GROUPS` (empty = deny all).
 
@@ -221,25 +224,49 @@ QQBOT_CATALOG_DB=data/demo/catalog.db
 QQBOT_CATALOG_PAGE_SIZE=8
 ```
 
-- `QQBOT_JM_GROUPS`: group openids allowed to use this feature, filled in by you. **An empty value rejects all groups**, not "all allowed"; it is independent of `QQBOT_IDS`.
+- `QQBOT_JM_GROUPS`: group openids allowed to use this feature, filled in by you. **An empty value rejects all groups**, not "all allowed"; set `*` to explicitly allow every group (review responsibility is yours). It is independent of `QQBOT_IDS`.
 - `QQBOT_JM_API`: sidecar address. The template defaults to `http://127.0.0.1:8790`; change it here if your sidecar listens on another port (this repo does not hard-code a port).
 - `QQBOT_JM_COOLDOWN_MS` only limits **book search**; downloads do not consume the cooldown (otherwise a search followed immediately by a download would be blocked by itself), and failures do not consume it either.
-- `QQBOT_CATALOG_DB` is the separate SQLite file for favorites (default `data/catalog.db`); do not share it with chat/memory DBs. `QQBOT_CATALOG_PAGE_SIZE` is the favorites page size (template 8, tentative).
+- `QQBOT_CATALOG_DB` is the separate SQLite file for favorites; do not share it with chat or memory DBs. When unset, it follows the directory of `QQBOT_STATE_DB` (`data/demo/catalog.db` in the demo layout). It falls back to `data/catalog.db` only when no state DB path is set either. `QQBOT_CATALOG_PAGE_SIZE` sets the favorites page size (default 8, tentative).
 - The rest are count limits, timeouts, and a legacy image limit kept for compatibility; all are template defaults, not a promise of success rate.
 
 After configuring, restart the process, then @-mention the bot in an authorized group and send `搜本 示例关键词` or `下本 示例编号`. If there is no response, first check: is the group in `QQBOT_JM_GROUPS`; is the sidecar running (you can self-check with `node scripts/jm-fetch-one.mjs --op health --api http://127.0.0.1:8790`). **The terms of use of JM/image sources, and platform or regional content requirements, are the deployer's responsibility**; this repo ships no JM content, images, or credentials.
 
-## 6. Where to look when something goes wrong
+### 4.3 Feed watch (盯梢): update-source monitoring and push (example sources: model catalog and vendor update pages)
+
+A standalone monitor checks registered sources and writes new entries to a local inbox. Repeated changes to the same item from the same source within the coalescing window update one entry instead of creating more. `FIXED_FEED_SOURCES` in `src/feed-sources.js` supplies one model catalog API and two vendor update pages as examples. To use another source, change the adapter; unknown response formats are treated as errors, not as "no updates". The examples use a provisional 60-minute window and at most 10 inbox entries per source and item per calendar day (Asia/Shanghai).
+
+From the repository root, run `node scripts/feed-watch.mjs once` for one check, or use `watch` to keep checking. Use `status` to inspect the monitor and `inbox` to see the entries. The monitor does not read `.env`, start the bot, or call QQ or the model. It writes `data/feed-watch/feed.db` by default. If you set `--root <directory>`, pass that same directory to each subcommand; the filename is always `feed.db`.
+
+If you only want to read the local inbox, leave the bot configuration alone. To also send QQ DMs, add the following settings to your local `.env` and fill in the authorized recipient's DM openid. Then set `QQBOT_FEED_QQ` to `true` and restart the bot:
+
+```dotenv
+QQBOT_FEED_DB=data/feed-watch/feed.db
+QQBOT_FEED_QQ=false
+QQBOT_FEED_QQ_C2C=
+QQBOT_FEED_QQ_INTERVAL_MS=60000
+QQBOT_FEED_QQ_MAX_PER_TICK=3
+```
+
+- `QQBOT_FEED_DB` must point to the same file the monitor writes. **Leaving it empty disables the bot's feed readers**, not the standalone monitor. The bot accesses this database read-only.
+- `QQBOT_FEED_QQ` defaults to `false`. Set `QQBOT_FEED_QQ_C2C` explicitly before enabling it; otherwise the bot may pick the most recently active DM from memory. The first run does not send historical entries.
+- `QQBOT_FEED_QQ_INTERVAL_MS` sets the check interval (5000–3600000, default 60000); `QQBOT_FEED_QQ_MAX_PER_TICK` caps messages per tick (1–20, default 3). `QQBOT_FEED_QQ_PRICE_PCT` sets the percentage threshold for OpenRouter price-change notifications (default 50).
+- `QQBOT_FEED_NEWS` and `QQBOT_FEED_NEWS_LIMIT` apply to the private web front-end's read-only news slot (1–50 entries, default 20). The public version does not include the news slot.
+
+The public self-test does not verify external sources or QQ delivery. If nothing arrives, check that the monitor and bot point to the same database, then check the switches, DM recipient, and local log.
+
+## 5. Where to look when something goes wrong
 
 - **Missing files or config errors at startup:** Check the current directory, the location `QQBOT_ENV_FILE` points to, the Node version and capabilities, the persona file you created, and whether credentials are empty. If it reports an unsupported theme or module, stop and check the commit you are using; do not switch to another instance's private default configuration.
 - **Connected but not replying:** First confirm that the QQ platform is actually delivering events to the bot, then check `allowlist`, the openid scope, and whether the bot was @-mentioned in the group. Not replying when the list is empty is expected behavior. `QQBOT_SANDBOX` only changes the log tag; it does not decide platform permissions.
 - **Model call failures:** Check your endpoint, model, key, provider permissions and balance, and the network. Whether image understanding is available also depends on the chosen model endpoint. Do not send your key to anyone.
 - **Turned on web or tool switches:** The public version does not support the web. `QQBOT_PANEL`, `QQBOT_ACCOUNTS`, and `QQBOT_GALLERY` must stay `false`. For example, if `QQBOT_PANEL` is on while the web module is missing, startup reports an explicit error; turn the switch off instead of copying files from a private deployment. Keep `QQBOT_TOOLS` and `QQBOT_TOOLS_MODEL_FN` `false` and leave the authorization list empty; the minimal example needs no search key.
+- **Image or book delivery does nothing:** Check the feature switch and group allowlist, then use section 4 to check the alias table or sidecar. No error does not mean the setup worked.
 - **Want to run multiple instances at once:** You cannot just copy and start. Each instance needs its own QQ credentials, `QQBOT_ENV_FILE`, workspace, home, state database, memory database, lock, logs, images, and alias paths. This document only covers a single demo.
 
 Do not paste credentials, real openids, DM content, or unredacted logs into issues or PRs.
 
-## 7. Deep customization and contributing
+## 6. Deep customization and contributing
 
 > The linked documents are currently written in Chinese.
 
@@ -248,6 +275,7 @@ Do not paste credentials, real openids, DM content, or unredacted logs into issu
 - World-level shared content (places, world copy, chronicle, common command copy, group warm-up and image-delivery lines) is provided via world packs: [world pack format](<docs/42-世界包格式.md>). The public version ships only one neutral example world, `content/worlds/example/`.
 - Where configuration values come from, optional parameter files, the boundaries of content-pack parameters, and behavior on validation failure: [parameter system](<docs/41-参数系统.md>).
 - To enable the optional JM book search/download (you need to deploy a local JM sidecar yourself; off by default): [JM search](<docs/45-JM搜本.md>).
+- To change feed sources, see `src/feed-sources.js` and `src/feed-fetch.js` for registration and fetching, and `src/feed.js` for the inbox schema.
 - What the project has delivered, what it explicitly does not do, and unscheduled future directions: [public roadmap](<docs/43-公开路线图.md>).
 - Before opening an issue or PR, read the [contributing guide](<CONTRIBUTING.md>). Issues and PRs should contain only synthetic reproductions; do not provide real galleries, alias data, or credentials.
 
