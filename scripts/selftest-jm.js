@@ -124,21 +124,42 @@ test('jm-command:数量 0 明确拒绝,空关键词/超长关键词是格式错�
 
 test('jm-command:下本认编号与序号(1..9),下载本子是别名', () => {
   assert.deepEqual(parseJmCommand('下本 1490076'), {
-    ok: true, action: 'download', target: '1490076', ordinal: null, raw: '1490076',
+    ok: true, action: 'download', targets: [{ kind: 'id', target: '1490076' }], raw: '1490076',
   });
   assert.deepEqual(parseJmCommand('下本 3'), {
-    ok: true, action: 'download', target: null, ordinal: 3, raw: '3',
+    ok: true, action: 'download', targets: [{ kind: 'ordinal', ordinal: 3 }], raw: '3',
   });
   // 1.210.3：一位数序号放宽到 1..9（单元本清单可能超过 5 条）。
-  assert.equal(parseJmCommand('下本 9').ordinal, 9);
-  assert.equal(parseJmCommand('下本 10').target, '10', '两位及以上一律当编号');
-  assert.equal(parseJmCommand('下载本子 1490076').target, '1490076');
-  assert.equal(parseJmCommand('下本 #1490076').target, '1490076');
-  assert.equal(parseJmCommand('下本 1490076号').target, '1490076');
+  assert.equal(parseJmCommand('下本 9').targets[0].ordinal, 9);
+  assert.equal(parseJmCommand('下本 10').targets[0].target, '10', '两位及以上一律当编号');
+  assert.equal(parseJmCommand('下载本子 1490076').targets[0].target, '1490076');
+  assert.equal(parseJmCommand('下本 #1490076').targets[0].target, '1490076');
+  assert.equal(parseJmCommand('下本 1490076号').targets[0].target, '1490076');
+});
+
+test('jm-command:下本可一次选多个(2026-11-17 现场原文),分隔符与JM前缀都认', () => {
+  // 现场：清单之后回「下本1489725 1488143」「下本1 2」都被旧解析器判成 format。
+  assert.deepEqual(parseJmCommand('下本1489725 1488143').targets, [
+    { kind: 'id', target: '1489725' }, { kind: 'id', target: '1488143' },
+  ]);
+  assert.deepEqual(parseJmCommand('下本1 2').targets, [
+    { kind: 'ordinal', ordinal: 1 }, { kind: 'ordinal', ordinal: 2 },
+  ]);
+  for (const text of ['下本 1、2', '下本 1，2', '下本 1,2', '下本 1;2', '下本 1/2', '下本 1和2',
+    '下本 第1 第2', '下本 1号 2号', '下本 １ ２']) {
+    assert.deepEqual(parseJmCommand(text).targets, [
+      { kind: 'ordinal', ordinal: 1 }, { kind: 'ordinal', ordinal: 2 },
+    ], text);
+  }
+  assert.deepEqual(parseJmCommand('下本 JM1489725 1488143').targets, [
+    { kind: 'id', target: '1489725' }, { kind: 'id', target: '1488143' },
+  ], '清单里显示的 JM 前缀可直接带上');
+  assert.deepEqual(parseJmCommand('下本 1 1').targets, [{ kind: 'ordinal', ordinal: 1 }], '同一目标重复写只算一次');
+  assert.equal(parseJmCommand('下本 1 2 3 4 5 6').reason, 'tooMany', '超过 5 个明确拒绝，不静默截断');
 });
 
 test('jm-command:下本非法输入不认(不猜)', () => {
-  for (const text of ['下本', '下本 abc', '下本 0', '下本 12a']) {
+  for (const text of ['下本', '下本 abc', '下本 0', '下本 12a', '下本 1 abc', '下本 10a 2']) {
     assert.equal(parseJmCommand(text).ok, false, text);
     assert.equal(parseJmCommand(text).reason, 'format', text);
   }
@@ -228,7 +249,7 @@ test('jm-command:打包紧贴/空格均可,序号超过9仍是单元序号', () 
     assert.equal(looksLikeJmAttempt(text), true, text);
   }
   assert.deepEqual(parseJmCommand('打包12 10 12').ordinals, [12, 10, 12]);
-  assert.equal(parseJmCommand('下本 12').target, '12', '旧下本编号语义不变');
+  assert.equal(parseJmCommand('下本 12').targets[0].target, '12', '旧下本编号语义不变');
 });
 
 test('jm-command:打包严格拒空/0/非数字/非法分隔和尾巴,仍识别为命令尝试', () => {
@@ -1158,6 +1179,97 @@ test('jm-service:下本 <多单元作品编号> → 清单;下本 <单元编号>
   });
 });
 
+test('jm-service:下本1 2 一次下两本(现场原文) → 两本各下一次、各发一个 PDF', async () => {
+  await withTemp(async (dir) => {
+    const group = 'g-jm-dl-many';
+    const pdfA = makePdfFile(dir, '1489725');
+    const pdfB = makePdfFile(dir, '1488143');
+    const { deps, calls } = makeDeps({
+      dir,
+      groups: [group],
+      payloads: [
+        searchPayload({
+          results: [
+            { id: '1489725', title: '合成甲' },
+            { id: '1488143', title: '合成乙' },
+          ],
+        }),
+        resolvePayload({ album: albumPayload({ id: '1489725', title: '合成甲' }) }),
+        downloadPayload({ id: '1489725', title: '合成甲' }),
+        pdfPayload({ id: '1489725', file: pdfA }),
+        resolvePayload({ album: albumPayload({ id: '1488143', title: '合成乙' }) }),
+        downloadPayload({ id: '1488143', title: '合成乙' }),
+        pdfPayload({ id: '1488143', file: pdfB }),
+      ],
+    });
+    const listed = await handleJmCommand({ message: message(group), parsed: parseJmCommand('搜本 全彩'), deps });
+    assert.equal(listed.sent, 0, '多本只给清单');
+
+    const result = await handleJmCommand({ message: message(group), parsed: parseJmCommand('下本1 2'), deps });
+    assert.equal(result.ok, true);
+    assert.equal(result.sent, 2, '两本都真的下了');
+    assert.deepEqual(calls.upload.map((one) => one.fileName), ['JM1489725.pdf', 'JM1488143.pdf']);
+    assert.equal(calls.send.length, 2);
+    assert.equal(calls.reply.length, 3, '清单一条 + 每本一条下载回执');
+    assert.deepEqual(calls.send.map((one) => one.msgSeq), [2, 4], '回执/文件交替占用被动槽位');
+  });
+});
+
+test('jm-service:下本<编号A 编号B>(现场原文,没有清单也能下) → 按编号逐个解析下载', async () => {
+  await withTemp(async (dir) => {
+    const group = 'g-jm-dl-two-ids';
+    const pdfA = makePdfFile(dir, '1489725');
+    const pdfB = makePdfFile(dir, '1488143');
+    const { deps, calls } = makeDeps({
+      dir,
+      groups: [group],
+      payloads: [
+        resolvePayload({ album: albumPayload({ id: '1489725', title: '合成甲' }) }),
+        downloadPayload({ id: '1489725', title: '合成甲' }),
+        pdfPayload({ id: '1489725', file: pdfA }),
+        resolvePayload({ album: albumPayload({ id: '1488143', title: '合成乙' }) }),
+        downloadPayload({ id: '1488143', title: '合成乙' }),
+        pdfPayload({ id: '1488143', file: pdfB }),
+      ],
+    });
+    const result = await handleJmCommand({ message: message(group), parsed: parseJmCommand('下本1489725 1488143'), deps });
+    assert.equal(result.ok, true);
+    assert.equal(result.sent, 2);
+    assert.deepEqual(calls.fetch.map((one) => one.args[one.args.indexOf('--op') + 1]),
+      ['resolve', 'download', 'pdf', 'resolve', 'download', 'pdf']);
+    assert.deepEqual(calls.upload.map((one) => one.fileName), ['JM1489725.pdf', 'JM1488143.pdf']);
+  });
+});
+
+test('jm-service:多选里有一个卡住就当场收口,不假装后面的也下了', async () => {
+  await withTemp(async (dir) => {
+    const group = 'g-jm-dl-stop';
+    const pdfA = makePdfFile(dir, '1489725');
+    const { deps, calls } = makeDeps({
+      dir,
+      groups: [group],
+      payloads: [
+        searchPayload({
+          results: [
+            { id: '1489725', title: '合成甲' },
+            { id: '1488143', title: '合成乙' },
+          ],
+        }),
+        resolvePayload({ album: albumPayload({ id: '1489725', title: '合成甲' }) }),
+        downloadPayload({ id: '1489725', title: '合成甲' }),
+        pdfPayload({ id: '1489725', file: pdfA }),
+      ],
+    });
+    await handleJmCommand({ message: message(group), parsed: parseJmCommand('搜本 全彩'), deps });
+    // 清单只有 2 本：第 3 个序号越界 → 第 1 本已下，第 2 个不再猜。
+    const result = await handleJmCommand({ message: message(group), parsed: parseJmCommand('下本 1 3'), deps });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'ordinal_missing');
+    assert.equal(calls.upload.length, 1, '前一个已下发的照发，不补第二个');
+    assertReplyIn(calls, 'ordinalMissing');
+  });
+});
+
 test('jm-service:编号解析不到 → 「没有这个编号」,不下载、不拿搜索兜底', async () => {
   await withTemp(async (dir) => {
     const group = 'g-jm-bad-id';
@@ -1422,7 +1534,7 @@ test('jm-service:清单文案 = 序号 + JM编号 + 标题(截断);单元清单�
     { id: '101', title: '标题甲' },
     { id: '102', title: '长'.repeat(80) },
   ], { total: 9 });
-  assert.match(text, /^搜到2本（共9本），回复 下本 <编号或序号> 打包整本 PDF：/u);
+  assert.match(text, /^搜到2本（共9本），回复 下本 <编号或序号> 打包整本 PDF（可一次多个，空格隔开）：/u);
   assert.ok(text.includes('1. JM101 标题甲'), text);
   assert.ok(text.includes('2. JM102 长'), text);
   assert.ok(text.includes('…'), '超长标题要截断');
@@ -1661,6 +1773,7 @@ test('jm-service 接线哨兵:index.js 按配置开启接入、命令表与生�
   assert.ok(indexSource.includes('parseJmFuzzyCommand(message.content'), 'index.js 必须接模糊搜本兜底');
   assert.ok(indexSource.includes('handleJmCommand({'), 'index.js 必须调服务层');
   assert.ok(indexSource.includes('looksLikeJmAttempt(message.content)'), 'index.js 必须有格式提示分支');
+  assert.ok(indexSource.includes("parsedJm?.reason === 'tooMany'"), 'index.js 必须给“一次选太多”明确提示');
 
   const commandsSource = fs.readFileSync(path.join(root, 'src', 'commands.js'), 'utf8');
   assert.ok(commandsSource.includes('parseJmCommand'), '命令表必须登记 JM 指令');

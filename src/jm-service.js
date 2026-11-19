@@ -17,6 +17,7 @@
  *     “本次检查范围内”的文字清单，**不自动下载**。原作/角色目前只能作为主要条件信任上游。
  *   · 下本 <编号> → 同上精确解析；解析成单元就直接只下该单元；解析成多单元作品就先列清单。
  *   · 下本 <序号> → 取本群**最近一次清单**：有单元清单先按单元清单，否则按上次搜索结果。
+ *   · 下本 <编号 编号> / <序号 序号> → 逐一处理（最多 5 个）；任一目标要先选单元或失败就当场收口。
  *   · 多单元作品默认**先清单、后下载**，不无提示自动整本。
  *   · 整本打包 / 打包1 3 5 7 → 显式选择本群最近单元清单全部/部分，逐单元下载后只发一个合并 PDF。
  *
@@ -107,7 +108,9 @@ export const DEFAULT_JM_LINES = Object.freeze({
   /** 群不在白名单（含空名单）。 */
   groupDisabled: ['这个群没开 JM 搜本。'],
   /** 格式提示：解析失败但确实像在写这条指令。 */
-  format: ['格式：搜本 <关键词或编号>；搜本 作者:xxx / 原作:xxx / 角色:xxx / 标签:xxx / 标题:xxx [页码:2]；也可以「搜原神的本子」「来个莉音的本」；下本 <编号或序号>；整本打包；打包1 3 5 7。'],
+  format: ['格式：搜本 <关键词/编号>；搜本 作者:xxx / 原作:xxx / 角色:xxx / 标签:xxx / 标题:xxx [页码:2]；也可以「搜原神的本子」「来个莉音的本」；下本 <编号或序号>（可一次多个，空格/逗号隔开，最多 5 个）；整本打包；打包1 3 5 7。'],
+  /** 一次选太多：明确说上限，不静默截断。 */
+  tooMany: ['一次最多下 5 本：用空格或逗号隔开，分批发也行。'],
   /** 明确不支持的条件（例如 年份:2024），不要只说“格式不对”。 */
   unsupportedCondition: ['这个条件不支持。'],
   /** 页码写错。 */
@@ -270,9 +273,10 @@ export function buildSearchListText(results, { total = 0 } = {}) {
     return `${index + 1}. JM${id}${title ? ` ${title}` : ''}`;
   });
   const siteTotal = Number(total);
+  // 清单头写明可以一次多个（2026-11-17 现场：用户自然就会回「下本1 2」，提示要跟上）。
   const head = Number.isFinite(siteTotal) && siteTotal > list.length
-    ? `搜到${list.length}本（共${siteTotal}本），回复 下本 <编号或序号> 打包整本 PDF：`
-    : `搜到${list.length}本，回复 下本 <编号或序号> 打包整本 PDF：`;
+    ? `搜到${list.length}本（共${siteTotal}本），回复 下本 <编号或序号> 打包整本 PDF（可一次多个，空格隔开）：`
+    : `搜到${list.length}本，回复 下本 <编号或序号> 打包整本 PDF（可一次多个，空格隔开）：`;
   return `${head}\n${lines.join('\n')}`;
 }
 
@@ -965,94 +969,112 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
         return { ok: true, reason: 'ok', sent: 1, action: 'pack' };
       }
 
-      // —— 下本 ——
-      let albumId = '';
-      let unitId = null;
-      let titleHint = '';
-      let ackId = '';
-      const directId = String(parsed.target ?? '').trim();
-      if (directId) {
-        const { fetched, payload } = await resolveNumber(directId);
-        if (!payload || payload.ok !== true) return await replyFetchFailure(payload, fetched, { download: true });
-        const album = payload.album && typeof payload.album === 'object' ? payload.album : {};
-        const units = Array.isArray(album.units) ? album.units : [];
-        const matched = payload.matchedUnit && typeof payload.matchedUnit === 'object' ? payload.matchedUnit : null;
-        if (payload.kind === 'photo' && matched?.unitId) {
-          // 给的本身就是单元编号：只下这一单元，不需要再问。
-          albumId = String(album.id || '');
-          unitId = String(matched.unitId);
-          titleHint = String(matched.title || album.title || '');
-          ackId = unitId;
-        } else if (units.length > 1) {
-          return await showUnitList({
-            albumId: album.id || directId,
-            albumTitle: album.title || '',
-            units,
-            matchedUnitId: null,
-            action: 'download',
-          });
-        } else {
-          albumId = String(album.id || directId);
-          unitId = null;
-          titleHint = String(album.title || '');
-          ackId = albumId;
-        }
-      } else {
-        const ordinal = Number(parsed.ordinal);
-        const choice = state.lastChoices;
-        if (choice && choice.kind === 'units') {
-          const unit = Number.isSafeInteger(ordinal) ? choice.units[ordinal - 1] : null;
-          if (!unit) {
-            log.info(`JM：下本序号 ${ordinal} 不在最近一次单元清单里`);
-            await reply(pickLine('ordinalMissing'));
-            return { ok: false, reason: 'ordinal_missing', action: 'download' };
-          }
-          albumId = String(choice.albumId || '');
-          unitId = String(unit.unitId);
-          titleHint = String(unit.title || choice.albumTitle || '');
-          ackId = unitId;
-        } else {
-          const entry = Number.isSafeInteger(ordinal) ? state.lastResults[ordinal - 1] : null;
-          if (!entry) {
-            log.info(`JM：下本序号 ${ordinal} 没有对应的搜索结果`);
-            await reply(state.lastResults.length === 0 ? pickLine('noSearch') : pickLine('ordinalMissing'));
-            return { ok: false, reason: 'ordinal_missing', action: 'download' };
-          }
-          // 清单里的编号可能是多单元作品：先解析，多单元就先列清单再让用户选。
-          const { fetched, payload } = await resolveNumber(entry.id);
+      // —— 下本（2026-11-17：可一次选多个，空白/逗号/顿号分隔）——
+      // 逐个「解析 → 回执 → 下载打包 → 发文件」；任何一个卡住（编号不存在、要多单元先选）
+      // 就当场收口并停下，不假装后面的也下了。
+      const targets = Array.isArray(parsed.targets) ? parsed.targets : [];
+      if (targets.length === 0) {
+        log.error('JM：下本没有解析出目标');
+        await reply(pickLine('internal'));
+        return { ok: false, reason: 'no_target', action: 'download' };
+      }
+      let sentCount = 0;
+      for (const [index, target] of targets.entries()) {
+        let albumId = '';
+        let unitId = null;
+        let titleHint = '';
+        let ackId = '';
+        if (target?.kind === 'id') {
+          const directId = String(target.target ?? '').trim();
+          const { fetched, payload } = await resolveNumber(directId);
           if (!payload || payload.ok !== true) return await replyFetchFailure(payload, fetched, { download: true });
           const album = payload.album && typeof payload.album === 'object' ? payload.album : {};
           const units = Array.isArray(album.units) ? album.units : [];
-          if (units.length > 1) {
+          const matched = payload.matchedUnit && typeof payload.matchedUnit === 'object' ? payload.matchedUnit : null;
+          if (payload.kind === 'photo' && matched?.unitId) {
+            // 给的本身就是单元编号：只下这一单元，不需要再问。
+            albumId = String(album.id || '');
+            unitId = String(matched.unitId);
+            titleHint = String(matched.title || album.title || '');
+            ackId = unitId;
+          } else if (units.length > 1) {
+            if (targets.length > 1) log.info(`JM：下本多选第 ${index + 1} 个要多单元先选，后续目标不再处理`);
             return await showUnitList({
-              albumId: album.id || entry.id,
-              albumTitle: album.title || entry.title || '',
+              albumId: album.id || directId,
+              albumTitle: album.title || '',
               units,
               matchedUnitId: null,
               action: 'download',
             });
+          } else {
+            albumId = String(album.id || directId);
+            unitId = null;
+            titleHint = String(album.title || '');
+            ackId = albumId;
           }
-          albumId = String(album.id || entry.id);
-          unitId = null;
-          titleHint = String(album.title || entry.title || '');
-          ackId = albumId;
+        } else if (target?.kind === 'ordinal') {
+          const ordinal = Number(target.ordinal);
+          const choice = state.lastChoices;
+          if (choice && choice.kind === 'units') {
+            const unit = Number.isSafeInteger(ordinal) ? choice.units[ordinal - 1] : null;
+            if (!unit) {
+              log.info(`JM：下本序号 ${ordinal} 不在最近一次单元清单里`);
+              await reply(pickLine('ordinalMissing'));
+              return { ok: false, reason: 'ordinal_missing', action: 'download' };
+            }
+            albumId = String(choice.albumId || '');
+            unitId = String(unit.unitId);
+            titleHint = String(unit.title || choice.albumTitle || '');
+            ackId = unitId;
+          } else {
+            const entry = Number.isSafeInteger(ordinal) ? state.lastResults[ordinal - 1] : null;
+            if (!entry) {
+              log.info(`JM：下本序号 ${ordinal} 没有对应的搜索结果`);
+              await reply(state.lastResults.length === 0 ? pickLine('noSearch') : pickLine('ordinalMissing'));
+              return { ok: false, reason: 'ordinal_missing', action: 'download' };
+            }
+            // 清单里的编号可能是多单元作品：先解析，多单元就先列清单再让用户选。
+            const { fetched, payload } = await resolveNumber(entry.id);
+            if (!payload || payload.ok !== true) return await replyFetchFailure(payload, fetched, { download: true });
+            const album = payload.album && typeof payload.album === 'object' ? payload.album : {};
+            const units = Array.isArray(album.units) ? album.units : [];
+            if (units.length > 1) {
+              if (targets.length > 1) log.info(`JM：下本多选第 ${index + 1} 个要多单元先选，后续目标不再处理`);
+              return await showUnitList({
+                albumId: album.id || entry.id,
+                albumTitle: album.title || entry.title || '',
+                units,
+                matchedUnitId: null,
+                action: 'download',
+              });
+            }
+            albumId = String(album.id || entry.id);
+            unitId = null;
+            titleHint = String(album.title || entry.title || '');
+            ackId = albumId;
+          }
+        } else {
+          log.error('JM：下本目标形状不对');
+          await reply(pickLine('internal'));
+          return { ok: false, reason: 'bad_target', action: 'download' };
         }
-      }
 
-      if (!albumId) {
-        log.error('JM：下本没有解析出作品编号');
-        await reply(pickLine('internal'));
-        return { ok: false, reason: 'no_album', action: 'download' };
-      }
+        if (!albumId) {
+          log.error('JM：下本没有解析出作品编号');
+          await reply(pickLine('internal'));
+          return { ok: false, reason: 'no_album', action: 'download' };
+        }
 
-      await reply(buildDownloadAck(titleHint, ackId));
-      const sent = await sendAlbumPdf(albumId, {
-        unitId,
-        titleHint,
-        idForName: unitId || albumId,
-      });
-      if (sent.ok !== true) return { ok: false, reason: sent.reason ?? 'download_failed', action: 'download' };
-      return { ok: true, reason: 'ok', sent: 1, action: 'download' };
+        await reply(buildDownloadAck(titleHint, ackId));
+        const sent = await sendAlbumPdf(albumId, {
+          unitId,
+          titleHint,
+          idForName: unitId || albumId,
+        });
+        if (sent.ok !== true) return { ok: false, reason: sent.reason ?? 'download_failed', action: 'download' };
+        sentCount += 1;
+      }
+      return { ok: true, reason: 'ok', sent: sentCount, action: 'download' };
     } catch (err) {
       log.error('JM：处理失败', err);
       await reply(pickLine('internal'));

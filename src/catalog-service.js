@@ -14,6 +14,7 @@
  *   · 重复收藏幂等，回执仍以「已收藏」开头；
  *   · 缺元数据（未知）与确认没有（空）在展示与筛选里分开。
  */
+import { MAX_TAG_CHARS, MAX_TAG_TOTAL_CHARS } from './catalog-command.js';
 import { CatalogQueryError } from './catalog-store.js';
 
 /** 默认每页条数；真实值来自配置 `QQBOT_CATALOG_PAGE_SIZE`（【暂定】8）。 */
@@ -27,9 +28,9 @@ const DISPLAY_TAGS_CHARS = 36;
 const SILENT_LOG = { info() {}, warn() {}, debug() {}, error() {} };
 
 export const DEFAULT_CATALOG_LINES = Object.freeze({
-  format: '格式：收藏 <条目ID>；取消收藏 <条目ID>；收藏夹 [页码]；收藏夹 作者:xxx / 标签:xxx / 原作:xxx。',
-  targetFormat: '格式：收藏 <条目ID>（可加 标签:xxx）；取消收藏 <条目ID>。',
-  tagFormat: '标签最多 5 个、每个 30 字以内。',
+  format: '格式：收藏 <条目ID> [标签:标签1、标签2]；取消收藏 <条目ID>；收藏夹 [页码]；收藏夹 作者:xxx / 标签:xxx / 原作:xxx。',
+  targetFormat: '格式：收藏 <条目ID>（可加 标签:标签1、标签2）；取消收藏 <条目ID>。',
+  tagFormat: `「标签:」后填写标签，用空格或逗号分隔；单个最多 ${MAX_TAG_CHARS} 字，合计最多 ${MAX_TAG_TOTAL_CHARS} 字。`,
   pageFormat: '页码要是 1..9999 的整数。',
   unsupported: '这个条件不支持。',
   noStore: '收藏功能暂时不可用。',

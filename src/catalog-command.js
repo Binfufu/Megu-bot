@@ -7,7 +7,7 @@
  *
  * 认的写法（`<>` 是占位，不是字面量）：
  *
- *     收藏 <条目ID> [标签:xxx] [标签:yyy]
+ *     收藏 <条目ID> [标签:xxx yyy、zzz] [标签:aaa]
  *     收藏 #3                         ← 最近一次「收藏夹」清单里的第 3 条（本群本用户）
  *     取消收藏 <条目ID>
  *     取消收藏 #3
@@ -31,11 +31,10 @@
  * 由服务层回固定格式提示；**不把解析失败的消息丢给模型闲聊**。
  */
 
-/** 一条指令最多带几个用户标签；数值只是输入边界，不是业务策略。 */
-export const MAX_FAVORITE_TAGS = 5;
-
 /** 标签、条件值、文本的长度上限（按码点算）。 */
 export const MAX_TAG_CHARS = 30;
+// 旧边界 5 个 × 30 字：保留同样的总字数预算，让短标签不必受固定个数限制。
+export const MAX_TAG_TOTAL_CHARS = 5 * MAX_TAG_CHARS;
 export const MAX_FILTER_CHARS = 40;
 export const MAX_LIST_TEXT_CHARS = 60;
 
@@ -95,7 +94,7 @@ function parseOrdinalToken(token) {
 
 /**
  * 解析条目 ID。返回 `{source, id}`、`{ordinal}` 或 null。
- * 裸数字用调用方给的默认来源；`JM123` / `jm:123` 是显式来源。
+ * 裸数字用调用方给的默认来源；`JM123` 是清单展示的 JM 编号。
  */
 function parseTargetToken(token, defaultSource) {
   const raw = String(token ?? '').trim();
@@ -106,13 +105,6 @@ function parseTargetToken(token, defaultSource) {
   }
   if (/^JM\d+$/iu.test(raw)) {
     return { source: 'jm', id: raw.replace(/^JM/iu, '') };
-  }
-  const colon = raw.indexOf(':');
-  if (colon > 0) {
-    const source = raw.slice(0, colon).trim().toLowerCase();
-    const id = raw.slice(colon + 1).trim();
-    if (!SOURCE_NAME_RE.test(source) || !SOURCE_ID_RE.test(id)) return null;
-    return { source, id };
   }
   if (!SOURCE_ID_RE.test(raw)) return null;
   return { source: defaultSource ?? null, id: raw };
@@ -125,51 +117,52 @@ function splitKeyValue(token) {
   return { key: match[1].trim(), value: match[2].trim() };
 }
 
-/** 解析「收藏 / 取消收藏」的剩余段。 */
+/** 解析「收藏 / 取消收藏」：先取唯一目标，再读显式标记的标签段。 */
 function parseFavoriteRest(rest, { action, defaultSource, allowTags }) {
-  const body = String(rest ?? '').trim();
-  if (!body) return { ok: false, reason: 'format' };
-  const tokens = body.split(/\s+/u).filter(Boolean);
-  const tags = [];
-  let target = null;
-  let ordinal = null;
+  // 沿用「下本多选」的先归一、再按分隔符拆分、逐项验证；标签不是编号，
+  // 不按「和/与/及」拆词，以免把标签名本身切坏。
+  const body = rest.normalize('NFKC').replace(/^[\s:,、;]+/u, '');
+  const [rawTarget, ...tagGroups] = body.split(/(?:^|[\s,、;])标签\s*:/u);
+  if (tagGroups.length && !allowTags) return { ok: false, reason: 'format' };
+  const targetText = rawTarget.replace(/[\s,、;]+$/u, '');
+  if (!targetText) return { ok: false, reason: 'format' };
 
-  for (const token of tokens) {
-    const pair = splitKeyValue(token);
-    if (pair) {
-      if (pair.key === '标签') {
-        if (!allowTags) return { ok: false, reason: 'format' };
-        if (!pair.value) return { ok: false, reason: 'tag' };
-        if (Array.from(pair.value).length > MAX_TAG_CHARS) return { ok: false, reason: 'tag' };
-        const normalized = pair.value.normalize('NFKC').trim();
-        if (tags.some((tag) => tag.toLowerCase() === normalized.toLowerCase())) continue;
-        if (tags.length >= MAX_FAVORITE_TAGS) return { ok: false, reason: 'tag' };
-        tags.push(normalized);
-        continue;
-      }
-      // 显式来源写法 `jm:1490076`：source 必须是合法短名，id 必须是合法条目 id。
-      // 来源名大小写不敏感（`JM:` 与 `jm:` 等价）；其它 `键:值`（如 `年份:2024`）明确报"不支持"。
-      if (SOURCE_NAME_RE.test(pair.key.toLowerCase()) && SOURCE_ID_RE.test(pair.value)) {
-        if (target || ordinal) return { ok: false, reason: 'format' };
-        target = { source: pair.key.toLowerCase(), id: pair.value };
-        continue;
-      }
+  let parsed;
+  const pair = splitKeyValue(targetText);
+  if (pair) {
+    const source = pair.key.toLowerCase();
+    if (!SOURCE_NAME_RE.test(source) || !SOURCE_ID_RE.test(pair.value)) {
       return { ok: false, reason: 'unsupported', field: pair.key };
     }
-    if (target || ordinal) return { ok: false, reason: 'format' };
-    const parsed = parseTargetToken(token, defaultSource);
+    parsed = { source, id: pair.value };
+  } else {
+    parsed = parseTargetToken(targetText, defaultSource);
     if (!parsed) return { ok: false, reason: 'target' };
-    if (parsed.ordinal) ordinal = parsed.ordinal;
-    else target = { source: parsed.source, id: parsed.id };
   }
 
-  if (!target && !ordinal) return { ok: false, reason: 'format' };
+  const tags = new Map();
+  let totalChars = 0;
+  for (const group of tagGroups) {
+    const tokens = group.split(/[\s,、;]+/u).filter(Boolean);
+    if (!tokens.length) return { ok: false, reason: 'tag' };
+    for (const tag of tokens) {
+      if (tag.includes(':')) return { ok: false, reason: 'unsupported', field: tag.split(':', 1)[0] };
+      const length = Array.from(tag).length;
+      if (length > MAX_TAG_CHARS) return { ok: false, reason: 'tag' };
+      const key = tag.toLowerCase();
+      if (tags.has(key)) continue;
+      totalChars += length;
+      if (totalChars > MAX_TAG_TOTAL_CHARS) return { ok: false, reason: 'tag' };
+      tags.set(key, tag);
+    }
+  }
+
   return {
     ok: true,
     action,
-    target,
-    ordinal,
-    tags: allowTags ? tags : [],
+    target: parsed.ordinal ? null : parsed,
+    ordinal: parsed.ordinal ?? null,
+    tags: [...tags.values()],
   };
 }
 
@@ -258,9 +251,8 @@ export function parseCatalogCommand(input, { defaultSource = null } = {}) {
   if (!text) return { ok: false, reason: 'format' };
 
   // 顺序：取消收藏 → 收藏夹 → 收藏（「收藏夹」不能被「收藏」先吃掉）。
-  const unfavorite = /^取消收藏\s*(.*)$/u.exec(text);
-  if (unfavorite) {
-    return parseFavoriteRest(unfavorite[1], {
+  if (text.startsWith('取消收藏')) {
+    return parseFavoriteRest(text.slice('取消收藏'.length), {
       action: 'unfavorite',
       defaultSource,
       allowTags: false,
@@ -270,9 +262,8 @@ export function parseCatalogCommand(input, { defaultSource = null } = {}) {
   const list = /^收藏夹\s*(.*)$/u.exec(text);
   if (list) return parseListRest(list[1]);
 
-  const favorite = /^收藏\s*(.*)$/u.exec(text);
-  if (favorite) {
-    return parseFavoriteRest(favorite[1], {
+  if (text.startsWith('收藏') && !text.startsWith('收藏夹')) {
+    return parseFavoriteRest(text.slice('收藏'.length), {
       action: 'favorite',
       defaultSource,
       allowTags: true,

@@ -7891,7 +7891,9 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
           ? DEFAULT_JM_LINES.unsupportedCondition[0]
           : parsedJm?.reason === 'page'
             ? DEFAULT_JM_LINES.pageFormat[0]
-            : DEFAULT_JM_LINES.format[0];
+            : parsedJm?.reason === 'tooMany'
+              ? DEFAULT_JM_LINES.tooMany[0]
+              : DEFAULT_JM_LINES.format[0];
         await sendChunked(message, line);
         return;
       }

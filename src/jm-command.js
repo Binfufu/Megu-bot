@@ -23,6 +23,9 @@
  *     （结构化/模糊检索永远只给清单；普通「搜本 关键词」旧行为不变）
  *     下本 1490076              ← 直接给作品编号（至少两位数字；边车按 id 下载）
  *     下本 3                    ← 给**序号**：取本群最近一次搜索结果里的第 3 本
+ *     下本 1489725 1488143      ← 一次选多个（空格/逗号/顿号分隔，最多 5 个，逐个下载）
+ *     下本 1 2                  ← 多个序号也认；写「下本1 2」「下本 1、2」都行
+ *     下本 JM1490076            ← 编号可带清单里显示的 JM 前缀（去掉后再按编号解析）
  *     下载本子 1490076          ← 「下载本子」是「下本」的别名
  *     整本打包                 ← 显式选择最近本群单元清单全部
  *     打包1 3 5 7              ← 只选择这些单元序号（可超过 9，按清单顺序合并）
@@ -33,9 +36,11 @@
  *      剩余段**末尾以空白分隔**的数量词（阿拉伯或中文 1..5）当数量，其余全是关键词。
  *      ⚠️ 数量必须与关键词之间有空白：「搜本 全彩3」里的 `3` 算关键词（宁窄勿宽，
  *      关键词里出现数字很常见，不能瞎猜）；
- *   ② 下载指令：`^(下本|下载本子|下载本)\s*(.*)$` —— 去掉 `#`/`第`/尾部「号」之后：
+ *   ② 下载指令：`^(下本|下载本子|下载本)\s*(.*)$` —— 按空白/逗号/顿号/斜杠/和与及切成多个目标；
+ *      每个目标再去掉 `#`/`第`/`JM` 前缀与尾部「本/号/个」：
  *      · **一位数字 1..9** = 序号（对应最近一次搜索/单元清单的 rank，由服务层换算成 id）；
  *      · **两位及以上数字** = 作品/单元编号，原样交给边车按编号精确解析；
+ *      · 同一个目标写两遍按一次算；超过 5 个回 `tooMany`（不静默截断）；
  *      · 其它 = 格式错误（回一句格式提示，别当闲聊丢掉）。
  *
  * 失败分支都带 `reason`：
@@ -306,6 +311,12 @@ export function parseJmFuzzyCommand(text, { max = DEFAULT_JM_MAX } = {}) {
  */
 const MAX_RANK = 9;
 
+/**
+ * 一条消息里最多同时下几本（编号/序号都算）。再多就回明确提示，不静默截断：
+ * 每个都要真下载 + 打包 + 发文件，还会把本群串行队列占住几分钟。
+ */
+export const MAX_DOWNLOAD_TARGETS = 5;
+
 /** 导航用的宽松形状：只要开头是搜索/下载动词，就算"在尝试这条指令"。 */
 const ATTEMPT_RE = new RegExp(`^(?:${SEARCH_VERBS}|${DOWNLOAD_VERBS}|整本打包|打包)`, 'u');
 
@@ -423,29 +434,60 @@ function parseSearchRest(rest, max) {
 }
 
 /**
- * 解析下载指令的剩余段：「编号 / 序号」。
+ * 解析下载指令的剩余段：「编号 / 序号」，可一次给多个。
+ *
+ * 宽松口径（2026-11-17 现场：清单之后回「下本1489725 1488143」「下本1 2」都被拒）：
+ *   · 目标之间用空白、逗号、顿号、分号、斜杠或「和/与/及」分隔；
+ *   · 每个目标可带 `#`/`第`/`JM` 前缀与尾部「本/号/个」；
+ *   · 全角数字先 NFKC 归一；同一目标重复写只算一次。
  *
  * @param {string} rest 动词之后的正文
- * @returns {{ok: true, action: 'download', target: string|null, ordinal: number|null,
- *            raw: string} | {ok: false, reason: 'format'}}
+ * @returns {{ok: true, action: 'download',
+ *            targets: Array<{kind:'id', target:string}|{kind:'ordinal', ordinal:number}>,
+ *            raw: string}
+ *   | {ok: false, reason: 'format'|'tooMany', count?: number, max?: number}}
  */
 function parseDownloadRest(rest) {
   const body = String(rest ?? '')
-    .trim()
-    .replace(/^[#＃]+\s*/u, '')
-    .replace(/^第\s*/u, '')
-    .replace(/\s*(?:本|号)$/u, '')
+    .normalize('NFKC')
+    .replace(/^[\s:：,，、;；/]+/u, '')
     .trim();
   if (!body) return { ok: false, reason: 'format' };
-  if (!/^\d+$/u.test(body)) return { ok: false, reason: 'format' };
 
-  // 序号只有一位 1..5；两位及以上一律当作品编号（JM 的 id 是六位数级别）。
-  if (body.length === 1) {
-    const rank = Number.parseInt(body, 10);
-    if (rank < 1 || rank > MAX_RANK) return { ok: false, reason: 'format' };
-    return { ok: true, action: 'download', target: null, ordinal: rank, raw: body };
+  const chunks = body.split(/[\s,，、;；/和与及]+/u).filter(Boolean);
+  if (chunks.length === 0) return { ok: false, reason: 'format' };
+
+  const targets = [];
+  const seen = new Set();
+  for (const chunk of chunks) {
+    const token = String(chunk)
+      .replace(/^[#＃]+/u, '')
+      .replace(/^jm/iu, '')
+      .replace(/^[#＃]+/u, '')
+      .replace(/^第/u, '')
+      .replace(/[本号个.。]+$/u, '')
+      .trim();
+    if (!token || !/^\d+$/u.test(token)) return { ok: false, reason: 'format' };
+
+    // 序号只有一位 1..9；两位及以上一律当作品编号（JM 的 id 是六位数级别）。
+    if (token.length === 1) {
+      const rank = Number.parseInt(token, 10);
+      if (rank < 1 || rank > MAX_RANK) return { ok: false, reason: 'format' };
+      if (seen.has(`rank:${rank}`)) continue;
+      seen.add(`rank:${rank}`);
+      targets.push({ kind: 'ordinal', ordinal: rank });
+      continue;
+    }
+    if (!Number.isSafeInteger(Number(token))) return { ok: false, reason: 'format' };
+    if (seen.has(`id:${token}`)) continue;
+    seen.add(`id:${token}`);
+    targets.push({ kind: 'id', target: token });
   }
-  return { ok: true, action: 'download', target: body, ordinal: null, raw: body };
+
+  if (targets.length > MAX_DOWNLOAD_TARGETS) {
+    return { ok: false, reason: 'tooMany', count: targets.length, max: MAX_DOWNLOAD_TARGETS };
+  }
+  return { ok: true, action: 'download', targets, raw: body };
 }
 
 /**
@@ -456,9 +498,10 @@ function parseDownloadRest(rest) {
  * @returns {{ok: true, action: 'search', keyword: string, count: number, countGiven: boolean}
  *   | {ok: true, action: 'search', mode: 'structured', conditions: object, page: number,
  *      keyword: null, countGiven: false}
- *   | {ok: true, action: 'download', target: string|null, ordinal: number|null, raw: string}
+ *   | {ok: true, action: 'download',
+ *      targets: Array<{kind:'id', target:string}|{kind:'ordinal', ordinal:number}>, raw: string}
  *   | {ok: true, action: 'pack', all: boolean, ordinals: number[]}
- *   | {ok: false, reason: 'format'|'count'|'keyword'|'page'|'unsupported', field?: string}}
+ *   | {ok: false, reason: 'format'|'count'|'keyword'|'page'|'unsupported'|'tooMany', field?: string}}
  */
 export function parseJmCommand(text, { max = DEFAULT_JM_MAX } = {}) {
   const normalized = normalize(text);
