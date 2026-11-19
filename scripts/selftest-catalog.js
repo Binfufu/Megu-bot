@@ -159,6 +159,37 @@ test('catalog-command:收藏/取消收藏/收藏夹与标签、序号形状', ()
   });
 });
 
+const GROUPED_TAGS = ['重读', '雪景', 'AI生成', '修真风', '短篇', '彩页'];
+const GROUPED_TAG_COMMANDS = [
+  `收藏101 标签：${GROUPED_TAGS.join('  ')}`,
+  `收藏101 标签：${GROUPED_TAGS.join('，')}`,
+  `@副实例 收藏：ＪＭ１０１，标签 : 重读, 雪景、ＡＩ生成；修真风\n短篇 标签:彩页 标签:ai生成`,
+];
+
+for (const [index, text] of GROUPED_TAG_COMMANDS.entries()) {
+  test(`catalog-command:成组标签写法 ${index + 1} 保留六个独立标签`, () => {
+    assert.equal(looksLikeCatalogAttempt(text), true);
+    assert.deepEqual(parseCatalogCommand(text, { defaultSource: 'jm' }), {
+      ok: true, action: 'favorite', target: { source: 'jm', id: '101' }, ordinal: null, tags: GROUPED_TAGS,
+    });
+  });
+}
+
+test('catalog-command:标签和目标仍有边界；取消收藏不接受标签', () => {
+  const parse = (text) => parseCatalogCommand(text, { defaultSource: 'jm' });
+  assert.equal(parse('收藏 标签:重读').ok, false);
+  assert.equal(parse('收藏 JM101 JM102 标签:重读').ok, false);
+  assert.equal(parse('取消收藏 JM101 标签:重读、雪景').ok, false);
+  assert.equal(parse('收藏 JM101 标签：，；').reason, 'tag');
+  assert.equal(parse('收藏 JM101 标签:重读 标签:').reason, 'tag');
+  assert.equal(parse(`收藏 JM101 标签:${'甲'.repeat(31)}`).reason, 'tag');
+  const fiveMax = Array.from({ length: 5 }, (_, index) => `${'甲'.repeat(29)}${index}`).join(' ');
+  assert.equal(parse(`收藏 JM101 标签:${fiveMax}`).tags.length, 5, '保留旧总字数预算');
+  assert.equal(parse(`收藏 JM101 标签:${fiveMax} 乙`).reason, 'tag', '超过预算不截断');
+  assert.equal(parse('收藏 ＃３ 标签:重读').ordinal, 3, '显式序号不变成作品编号');
+  assert.deepEqual(parse('收藏 jm： 101 标签:重读').target, { source: 'jm', id: '101' });
+});
+
 test('catalog-command:收藏夹条件/页码/文本 AND 组合，未知条件明确拒绝', () => {
   assert.deepEqual(parseCatalogCommand('收藏夹', { defaultSource: 'jm' }), {
     ok: true, action: 'list', text: null, filters: {}, page: 1, sort: 'recent',
@@ -710,6 +741,41 @@ test('jm接线:收藏只调 --op resolve，绝不 download/pdf（负对照）', 
     assert.equal(store.listFavorites({ filters: { original: ['未知'] } }).total, 1);
     store.close();
   });
+});
+
+test('jm接线:成组标签随收藏写入 SQLite，可按各个标签独立筛出', async () => {
+  const store = storeFor();
+  try {
+    const calls = [];
+    const replies = [];
+    const runFetch = async ({ args }) => {
+      const op = args[args.indexOf('--op') + 1];
+      calls.push(op);
+      assert.equal(op, 'resolve');
+      return { stdout: JSON.stringify({ ok: true, kind: 'album', album: { id: '101', title: '合成作品' } }) };
+    };
+    for (const content of GROUPED_TAG_COMMANDS) {
+      const result = await handleJmCommand({
+        message: { ...message(), content },
+        parsed: parseCatalogCommand(content, { defaultSource: 'jm' }),
+        deps: {
+          config: jmConfig('fixture-not-used'), catalogStore: store, runFetch,
+          reply: async (text) => { replies.push(text); },
+        },
+      });
+      assert.equal(result.ok, true, content);
+      assert.match(replies.at(-1), /^已收藏.*JM101/u);
+      const [saved] = store.listFavorites({}).items;
+      assert.deepEqual(new Set(saved.userTags), new Set(GROUPED_TAGS));
+      for (const tag of GROUPED_TAGS) {
+        assert.equal(store.listFavorites({ filters: { tag: [tag] } }).total, 1, tag);
+      }
+    }
+    assert.deepEqual(calls, ['resolve'], '同一条目只解析一次，不下载');
+    assert.equal(store.countFavorites(), 1);
+  } finally {
+    store.close();
+  }
 });
 
 test('jm接线:收藏夹/取消收藏不 spawn 抓取器（列表路径无网络）', async () => {
