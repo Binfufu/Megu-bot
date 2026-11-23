@@ -47,6 +47,7 @@ import { fileURLToPath } from 'node:url';
 import { CatalogStore, normalizeCatalogText } from './catalog-store.js';
 import { DEFAULT_CATALOG_LINES, handleCatalogCommand } from './catalog-service.js';
 import { createJmCatalogProvider } from './jm-catalog.js';
+import { JM_FIELD_LABELS, suggestJmSyntax } from './jm-command.js';
 
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const FETCH_SCRIPT = path.join(ROOT_DIR, 'scripts', 'jm-fetch-one.mjs');
@@ -86,6 +87,15 @@ const PASSIVE_SEQ_MAX = 5;
 const DEFAULT_MAX = 5;
 const DEFAULT_COOLDOWN_MS = 30_000;
 const DEFAULT_TIMEOUT_MS = 120_000;
+/**
+ * 单次 HTTP 请求的默认上限（2026-11-20，【暂定】45s）。
+ * 旧实现把抓取器里每个请求硬编码成 15s，比边车自己的 JM 超时（默认 30s）还短；
+ * 于是"边车慢一点但本来能成"的搜索一律被 Node 侧先判成 timeout。现在可由
+ * `QQBOT_JM_REQUEST_TIMEOUT_MS` 配置，并经 `--request-timeout` 传给抓取器。
+ */
+const DEFAULT_REQUEST_TIMEOUT_MS = 45_000;
+/** 搜索超过这么久还没回来就先回一句"在搜了"（【暂定】6s；Nielsen 10s 反馈线之内）。 */
+const JM_WORKING_ACK_MS = 6_000;
 
 /** QQ 群文件（file_type=4）硬限 200MB；边车自己的 PDF 目标体积更小，这里只做最后一道闸。 */
 const JM_PDF_HARD_MAX = 200 * 1024 * 1024;
@@ -100,6 +110,10 @@ const UNIT_LIST_TITLE_CHARS = 20;
 /** 纯数字关键词 = 编号（作品 id 或单元 id），走精确解析而不是站内搜索。 */
 const NUMERIC_ID_RE = /^\d{1,12}$/u;
 
+const QQ_LIST_MODERATION_CODE = 40034006;
+// QQ 拒绝清单时只发这一句，绝不重发原内容或用删改后的结果尝试过审。
+const LIST_BLOCKED_NOTICE = '抱歉，这份清单没法发。如果你知道编号，可以直接用「下本 <编号>」。';
+
 /**
  * 固定回话的默认句库。**失败路径只从这里挑句子**（不调模型、不临时编）：
  * 句子里不提内部路径/API，只说用户能采取的动作。
@@ -109,10 +123,18 @@ export const DEFAULT_JM_LINES = Object.freeze({
   groupDisabled: ['这个群没开 JM 搜本。'],
   /** 格式提示：解析失败但确实像在写这条指令。 */
   format: ['格式：搜本 <关键词/编号>；搜本 作者:xxx / 原作:xxx / 角色:xxx / 标签:xxx / 标题:xxx [页码:2]；也可以「搜原神的本子」「来个莉音的本」；下本 <编号或序号>（可一次多个，空格/逗号隔开，最多 5 个）；整本打包；打包1 3 5 7。'],
+  /** 2026-11-20：近失提示的短句（不再甩一整面格式墙；给一个能照抄的例子）。 */
+  formatShort: ['格式没对上。直接照抄：搜本 关键词；搜本 标签:齁；搜 X 的本子；下本 <编号>。'],
+  /** 同群前一条还在处理，本条在排队（2026-11-20：不再无声排队）。 */
+  queued: ['前面还有一单在处理，这条在排队了，稍等…'],
+  /** 搜索超过几秒还没回来（2026-11-20：先给个响应，别让人以为死了）。 */
+  working: ['在搜了，稍等…'],
   /** 一次选太多：明确说上限，不静默截断。 */
   tooMany: ['一次最多下 5 本：用空格或逗号隔开，分批发也行。'],
   /** 明确不支持的条件（例如 年份:2024），不要只说“格式不对”。 */
   unsupportedCondition: ['这个条件不支持。'],
+  /** 搜本后是一组编号，不代用户下载。 */
+  useDownload: ['要下多个编号，请用「下本 <编号1> <编号2>」，每次最多 5 个。'],
   /** 页码写错。 */
   pageFormat: ['页码要是 1..9999 的整数。'],
   /** 打包只能针对本群最近展示的单元清单，不能借用别群或搜索结果。 */
@@ -151,6 +173,37 @@ export const DEFAULT_JM_LINES = Object.freeze({
 /** 没注入 log 时的静默实现（单测可以完全不传）。 */
 const SILENT_LOG = { info() {}, warn() {}, debug() {}, error() {} };
 
+/**
+ * 像指令但解析失败时的**短提示**（2026-11-20）。
+ *
+ * 旧实现无论写成什么样都回同一面一百多字的格式墙；现在先看是不是"只差一个字段键"
+ * （`作都:甲`、`tga:齁`），能给出能照抄的一句就只回那一句，否则回短格式提示。
+ *
+ * @param {string} text 消息正文
+ * @returns {string}
+ */
+export function buildJmFormatHint(text) {
+  return buildJmNearMissHint(text) ?? DEFAULT_JM_LINES.formatShort[0];
+}
+
+function buildJmNearMissHint(text) {
+  const suggestion = suggestJmSyntax(text);
+  if (suggestion?.kind !== 'field' || !suggestion.alias) return null;
+  const label = JM_FIELD_LABELS[suggestion.field] ?? '这个条件';
+  const value = suggestion.value || '关键词';
+  if (suggestion.field === 'page') return `页码写成「页码:${/^\d+$/u.test(value) ? value : '2'}」就行（1..9999）。`;
+  return `想按${label}搜？发「搜本 ${suggestion.alias}:${value}」。只写「搜本 ${value}」是按关键词搜。`;
+}
+
+/** 指令解析失败的回话；近失只给写法提示，不自动执行。 */
+export function buildJmParseFailureReply(text, reason) {
+  if (reason === 'unsupported') return buildJmNearMissHint(text) ?? DEFAULT_JM_LINES.unsupportedCondition[0];
+  if (reason === 'page') return DEFAULT_JM_LINES.pageFormat[0];
+  if (reason === 'tooMany') return DEFAULT_JM_LINES.tooMany[0];
+  if (reason === 'useDownload') return DEFAULT_JM_LINES.useDownload[0];
+  return buildJmFormatHint(text);
+}
+
 /** 每个群一条串行队列（同一个人连发两条时，后一条等前一条结束）+ 最近一次清单/搜索结果。 */
 const GROUP_QUEUES = new Map();
 
@@ -159,6 +212,8 @@ function queueStateFor(groupId) {
   if (!state) {
     state = {
       tail: Promise.resolve(),
+      /** 已入队但还没跑完的条数（2026-11-20：>0 时后一条先回"排队中"）。 */
+      pending: 0,
       /** 上次**成功搜本**的时间（冷却口径；null = 还没成功过）。 */
       lastSearchAt: null,
       /** 最近一次成功的**多本搜索结果**（rank 顺序）：`[{rank, id, title}]`。 */
@@ -263,15 +318,7 @@ function shortTitle(title, max = 20) {
  */
 export function buildSearchListText(results, { total = 0 } = {}) {
   const list = Array.isArray(results) ? results : [];
-  const lines = list.map((item, index) => {
-    const id = String(item?.id ?? '').trim();
-    const rawTitle = String(item?.title ?? '').replace(/\s+/gu, ' ').trim();
-    const chars = Array.from(rawTitle);
-    const title = chars.length > SEARCH_LIST_TITLE_CHARS
-      ? `${chars.slice(0, SEARCH_LIST_TITLE_CHARS).join('')}…`
-      : rawTitle;
-    return `${index + 1}. JM${id}${title ? ` ${title}` : ''}`;
-  });
+  const lines = buildSearchListRows(list);
   const siteTotal = Number(total);
   // 清单头写明可以一次多个（2026-11-17 现场：用户自然就会回「下本1 2」，提示要跟上）。
   const head = Number.isFinite(siteTotal) && siteTotal > list.length
@@ -305,21 +352,19 @@ export function buildStructuredSearchListText({
   const head = conditionText
     ? `本次检查范围内找到 ${matched} 本（条件：${conditionText}；${scope}）。回复 下本 <编号或序号> 或 收藏 <编号>：`
     : `本次检查范围内找到 ${matched} 本（${scope}）。回复 下本 <编号或序号> 或 收藏 <编号>：`;
-  const rows = list.map((item, index) => {
-    const id = String(item?.id ?? '');
-    const title = shortTitle(item?.title, SEARCH_LIST_TITLE_CHARS);
-    const authors = Array.isArray(item?.authors) && item.authors.length > 0
-      ? item.authors.map((name) => shortTitle(name, 20)).join('、')
-      : '作者未知';
-    const tags = Array.isArray(item?.tags) && item.tags.length > 0
-      ? item.tags.slice(0, 6).map((tag) => shortTitle(tag, 20)).join('、')
-      : '标签未知';
-    return `${index + 1}. JM${id}${title ? ` ${title}` : ''}（作者：${authors}；标签：${tags}）`;
-  });
   const tail = matched > list.length
     ? [`本次只列前 ${list.length} 本；可加 页码:${page + 1} 继续。`]
     : [];
-  return [head, ...rows, ...tail].join('\n');
+  return [head, ...buildSearchListRows(list), ...tail].join('\n');
+}
+
+/** 作者与标签只用于复核，不拼进清单行。 */
+function buildSearchListRows(list) {
+  return list.map((item, index) => {
+    const id = String(item?.id ?? '').trim();
+    const title = shortTitle(item?.title, SEARCH_LIST_TITLE_CHARS);
+    return `${index + 1}. JM${id}${title ? ` ${title}` : ''}`;
+  });
 }
 
 /** 结构化检索 0 命中：本次检查范围结论，不说“全站没有”。 */
@@ -373,7 +418,8 @@ export function buildDownloadAck(title, id) {
  *
  * deps 可覆盖：
  *   config / log / runFetch / uploadFile / sendMedia / now / rng / lines
- *   （`reply` 是发固定回话的口子，`src\index.js` 传 `sendChunked`）
+ *   （`reply(text, {startSeq, active, onPassiveSent})` 发送文本；`sendChunked` 逐个报告成功的
+ *    被动 msg_seq，返回 `{sent}`；旧注入也可返回已发条数，发送失败须抛出原 QQ 错误。）
  *
  * @param {{message: object, parsed: object, deps?: object}} input
  * @returns {Promise<{ok: boolean, reason?: string, sent?: number, action?: string}>}
@@ -393,20 +439,56 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
 
   const rawReply = typeof deps.reply === 'function'
     ? deps.reply
-    : async (text) => { log.warn(`JM：没有注入 reply，这句回话被丢弃：${text}`); };
+    : async () => { log.warn('JM：没有注入 reply，回话未发出'); };
   /** 被动槽位记账：文本/文件回话接着彼此的 msg_seq 往下数（与搬图同一口径）。 */
   const passiveId = message?.messageId ?? null;
   let seq = 0;
-  const reply = async (text) => {
+  // 回执、结果、兜底都走同一条发送链，读取/更新 seq 不会并发。
+  let replyChain = Promise.resolve();
+  const enqueueReply = (send) => {
+    replyChain = replyChain.then(send);
+    return replyChain;
+  };
+  const sendReply = async (text) => {
     const startSeq = seq;
     const active = passiveId !== null && startSeq >= PASSIVE_SEQ_MAX;
+    const onPassiveSent = (msgSeq) => {
+      if (!active && passiveId !== null && Number.isSafeInteger(msgSeq) && msgSeq <= PASSIVE_SEQ_MAX) {
+        seq = Math.max(seq, msgSeq);
+      }
+    };
     try {
-      const used = Number(await rawReply(text, { startSeq, active }));
-      if (!active && Number.isFinite(used) && used > 0) seq += used;
+      // sendChunked 按成功分片回调；即使后续分片抛错，也保留已用掉的槽位。
+      // 既有注入也可用纯数字代表已用槽位，不要求逐片回调。
+      const result = await rawReply(text, { startSeq, active, onPassiveSent });
+      const sent = typeof result === 'number' ? result : result?.sent;
+      if (!Number.isSafeInteger(sent) || sent <= 0) {
+        log.error('JM：回话未确认送达');
+        return { ok: false };
+      }
+      if (typeof result === 'number' && seq === startSeq) {
+        onPassiveSent(Math.min(PASSIVE_SEQ_MAX, startSeq + sent));
+      }
+      return { ok: true };
     } catch (err) {
-      log.warn(`JM：回话没发出去（${text}）：${err?.message ?? err}`);
+      const code = err?.code;
+      const moderationRejected = code === QQ_LIST_MODERATION_CODE || code === String(QQ_LIST_MODERATION_CODE);
+      // 不记录正文或可能回显正文的错误详情。
+      const safeCode = typeof code === 'number' || (typeof code === 'string' && /^\d{1,10}$/u.test(code));
+      log.error(`JM：回话没发出去${safeCode ? `（code=${code}）` : ''}`);
+      return { ok: false, moderationRejected };
     }
   };
+  const reply = (text) => enqueueReply(() => sendReply(text));
+  const replyList = (text) => enqueueReply(async () => {
+    const result = await sendReply(text);
+    if (result.ok) return null;
+    if (result.moderationRejected) {
+      const notice = await sendReply(LIST_BLOCKED_NOTICE);
+      if (notice.ok) return 'list_blocked';
+    }
+    return 'list_send_failed';
+  });
 
   const uploadFile = typeof deps.uploadFile === 'function' ? deps.uploadFile : null;
   const sendMedia = typeof deps.sendMedia === 'function' ? deps.sendMedia : null;
@@ -441,26 +523,59 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
     ? Math.floor(Number(jm.max)) : DEFAULT_MAX;
 
   const state = queueStateFor(groupId);
+  const requestTimeoutMs = Number.isFinite(Number(jm.requestTimeoutMs)) && Number(jm.requestTimeoutMs) > 0
+    ? Math.floor(Number(jm.requestTimeoutMs)) : DEFAULT_REQUEST_TIMEOUT_MS;
+  const workingAckMs = Number.isFinite(Number(deps.workingAckMs)) && Number(deps.workingAckMs) >= 0
+    ? Math.floor(Number(deps.workingAckMs)) : JM_WORKING_ACK_MS;
 
-  /** spawn 一次抓取器并解析最后一行 JSON。 */
-  const callFetch = async (args) => {
-    const env = { ...process.env };
-    const fetched = await runFetch({
-      args: [FETCH_SCRIPT, ...args],
-      env,
-      // 子进程硬超时比 CLI 自己的预算多给 15s：让 CLI 有机会把超时写成 JSON 再退出。
-      timeoutMs: timeoutMs + 15_000,
-      cwd: ROOT_DIR,
-    });
-    if (fetched?.timedOut) log.warn('JM：抓取器超时被杀');
-    if (fetched?.stderr) {
-      const tail = String(fetched.stderr).trim().split(/\r?\n/u).slice(-3).join(' / ');
-      if (tail) log.debug(`JM抓取日志：${tail}`);
+  /**
+   * spawn 一次抓取器并解析最后一行 JSON。
+   * `slowAck: true` 时，超过 `workingAckMs` 还没回来就先回一句"在搜了"（只给搜索用；
+   * 下载本来就会先发下载回执，不需要再加一条）。回话走上面那条串行链，不会抢 msg_seq。
+   */
+  const callFetch = async (args, { slowAck = false } = {}) => {
+    let ackTimer = null;
+    let inFlight = true;
+    if (slowAck) {
+      ackTimer = setTimeout(() => {
+        ackTimer = null;
+        if (inFlight) void reply(pickLine('working'));
+      }, workingAckMs);
+      ackTimer.unref?.();
     }
-    return { fetched, payload: lastJsonLine(fetched?.stdout) };
+    try {
+      const env = { ...process.env };
+      const fetched = await runFetch({
+        // 2026-11-20：每个请求的上限跟 `QQBOT_JM_REQUEST_TIMEOUT_MS` 走（旧实现硬编码 15s，
+        // 边车自己的 JM 超时默认 30s，Node 会先把本来能成的搜索判成 timeout）。
+        args: [FETCH_SCRIPT, ...args, '--request-timeout', String(requestTimeoutMs)],
+        env,
+        // 子进程硬超时比 CLI 自己的预算多给 15s：让 CLI 有机会把超时写成 JSON 再退出。
+        timeoutMs: timeoutMs + 15_000,
+        cwd: ROOT_DIR,
+      });
+      if (fetched?.timedOut) log.warn('JM：抓取器超时被杀');
+      if (fetched?.stderr) {
+        const tail = String(fetched.stderr).trim().split(/\r?\n/u).slice(-3).join(' / ');
+        if (tail) log.debug(`JM抓取日志：${tail}`);
+      }
+      return { fetched, payload: lastJsonLine(fetched?.stdout) };
+    } finally {
+      inFlight = false;
+      if (ackTimer) {
+        clearTimeout(ackTimer);
+        ackTimer = null;
+      }
+    }
   };
 
+  // 2026-11-20：同群还有一单没跑完 → 先回一句"排队中"（旧实现让后一条无声等着，
+  // 用户看到的就是"发了指令没反应"）。排队提示也走串行回话链，不会抢 msg_seq。
+  if (state.pending > 0) await reply(pickLine('queued'));
+  state.pending += 1;
+
   const job = state.tail.then(async () => {
+    const jobStartedAt = Number(now());
     // 目录收藏是 JM 搬本的子功能（2026-11-17）：走同一道群白名单与按群队列，
     // 但**不建临时目录、不下载、不读文件**；收藏/取消收藏只碰独立收藏库。
     if (parsed.action === 'favorite' || parsed.action === 'unfavorite' || parsed.action === 'list') {
@@ -532,10 +647,13 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
           : (String(fetched?.stdout ?? '').trim() ? 'bad_payload' : 'service_down');
         const reason = String(payload?.reason ?? fallbackReason);
         const detail = payload?.detail ?? (fetched?.code ? `抓取器退出码 ${fetched.code}` : '没有可读的抓取结果');
-        log.warn(`JM：${download ? '下载' : '搜索'}失败（${reason}）：${detail}`);
+        const elapsedMs = Math.max(0, Number(now()) - jobStartedAt);
+        log.warn(`JM：${download ? '下载' : '搜索'}失败（${reason}，耗时 ${elapsedMs}ms）：${detail}`);
         if (reason === 'not_found') await reply(pickLine('noSuchId'));
         else if (reason === 'timeout') await reply(pickLine('timeout'));
-        else if (reason === 'service_down' || reason === 'http_error') await reply(pickLine('serviceDown'));
+        else if (reason === 'service_down') await reply(pickLine('serviceDown'));
+        // http_error = 边车是活的、回了 4xx/5xx（多半是 JM 上游失败/超时），
+        // 不能再说成"服务没启动"；下载与搜索各回各的失败话术（2026-11-20）。
         else if (download) await reply(pickLine('downloadFailed'));
         else await reply(pickLine('searchFailed'));
         return { ok: false, reason, action: download ? 'download' : 'search' };
@@ -549,8 +667,18 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
         '--timeout', String(timeoutMs),
       ]);
 
-      /** 展示单元清单 + 记住选择状态（后续「下本 <序号/单元编号>」用）。 */
-      const showUnitList = async ({ albumId, albumTitle = '', units, matchedUnitId = null, action = 'search' }) => {
+      /** 只有完整清单送达才允许按序号选；失败时也清掉旧清单，避免歧义。 */
+      const showList = async (text, { results = [], choices = null, startedAt, reason = 'ok', action = 'search', sent = 0 }) => {
+        const failure = await replyList(text);
+        state.lastResults = failure ? [] : results;
+        state.lastChoices = failure ? null : choices;
+        if (failure) return { ok: false, reason: failure, sent, action };
+        if (startedAt !== undefined) state.lastSearchAt = startedAt;
+        return { ok: true, reason, sent, action };
+      };
+
+      /** 展示单元清单（后续「下本 <序号/单元编号>」用）。 */
+      const showUnitList = async ({ albumId, albumTitle = '', units, matchedUnitId = null, startedAt, action = 'search', sent = 0 }) => {
         const list = (Array.isArray(units) ? units : [])
           .map((unit, index) => ({
             index: Number(unit?.index) || index + 1,
@@ -558,15 +686,10 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
             title: String(unit?.title ?? ''),
           }))
           .filter((unit) => unit.unitId !== '');
-        state.lastChoices = {
-          kind: 'units',
-          albumId: String(albumId ?? ''),
-          albumTitle: String(albumTitle ?? ''),
-          units: list,
-        };
-        state.lastResults = [];
-        await reply(buildUnitListText({ albumId, albumTitle, units: list, matchedUnitId }));
-        return { ok: true, reason: 'choose_unit', sent: 0, action };
+        return showList(buildUnitListText({ albumId, albumTitle, units: list, matchedUnitId }), {
+          choices: { kind: 'units', albumId: String(albumId ?? ''), albumTitle: String(albumTitle ?? ''), units: list },
+          startedAt, reason: 'choose_unit', action, sent,
+        });
       };
 
       /**
@@ -734,7 +857,7 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
           '--images', '0',
           '--api', apiBase,
           '--timeout', String(timeoutMs),
-        ]);
+        ], { slowAck: true });
         if (!payload || payload.ok !== true) return await replyFetchFailure(payload, fetched);
 
         let results = Array.isArray(payload.results)
@@ -782,30 +905,26 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
           if (ok) matched.push(item);
         }
 
-        const shown = matched.slice(0, Math.max(1, Math.min(maxCount, 10)));
-        state.lastResults = shown.map((item, index) => ({
-          rank: index + 1,
-          id: String(item.id),
-          title: String(item.title ?? ''),
-        }));
-        state.lastChoices = null;
-
         if (matched.length === 0) {
+          state.lastResults = [];
+          state.lastChoices = null;
           log.info(`JM：结构化检索 0 命中（mode=${mode} page=${page} 扫描=${scanned} 缺详情=${unknownDetails}）`);
           await reply(buildStructuredSearchEmptyText({ scanned, conditions, unknownDetails }));
           return { ok: false, reason: 'no_result', action: 'search' };
         }
 
-        await reply(buildStructuredSearchListText({
+        const shown = matched.slice(0, Math.max(1, Math.min(maxCount, 10)));
+        return showList(buildStructuredSearchListText({
           results: shown,
           page,
           scanned,
           matched: matched.length,
           conditions,
           unknownDetails,
-        }));
-        state.lastSearchAt = startedAt;
-        return { ok: true, reason: 'ok', sent: 0, action: 'search' };
+        }), {
+          results: shown.map((item, index) => ({ rank: index + 1, id: String(item.id), title: String(item.title ?? '') })),
+          startedAt,
+        });
       };
 
       if (parsed.action === 'search') {
@@ -833,13 +952,12 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
           const units = Array.isArray(album.units) ? album.units : [];
           const matched = payload.matchedUnit && typeof payload.matchedUnit === 'object' ? payload.matchedUnit : null;
           if (units.length > 1) {
-            state.lastSearchAt = startedAt;
             return await showUnitList({
               albumId: album.id || keyword,
               albumTitle: album.title || '',
               units,
               matchedUnitId: matched?.unitId ?? null,
-              action: 'search',
+              startedAt,
             });
           }
           const title = String(matched?.title || album.title || '');
@@ -865,7 +983,7 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
           '--api', apiBase,
           '--images', '0',
           '--timeout', String(timeoutMs),
-        ]);
+        ], { slowAck: true });
         if (!payload || payload.ok !== true) return await replyFetchFailure(payload, fetched);
 
         const results = Array.isArray(payload.results)
@@ -898,13 +1016,12 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
           const album = resolved.payload.album && typeof resolved.payload.album === 'object' ? resolved.payload.album : {};
           const units = Array.isArray(album.units) ? album.units : [];
           if (units.length > 1) {
-            state.lastSearchAt = startedAt;
             return await showUnitList({
               albumId: album.id || hit.id,
               albumTitle: album.title || hit.title || '',
               units,
               matchedUnitId: null,
-              action: 'search',
+              startedAt,
             });
           }
           const title = String(album.title || hit.title || '');
@@ -916,16 +1033,15 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
           return { ok: true, reason: 'ok', sent: 1, action: 'search' };
         }
 
-        // ⑤ 多本（或「单本但不是唯一命中」）→ 只回文字清单，记住选择状态。
-        state.lastResults = results.map((item, index) => ({
-          rank: Number(item.rank) || index + 1,
-          id: String(item.id),
-          title: String(item.title ?? ''),
-        }));
-        state.lastChoices = null;
-        await reply(buildSearchListText(results, { total: siteTotal }));
-        state.lastSearchAt = startedAt;
-        return { ok: true, reason: 'ok', sent: 0, action: 'search' };
+        // ⑤ 多本（或「单本但不是唯一命中」）→ 只回文字清单，送达后记住选择状态。
+        return showList(buildSearchListText(results, { total: siteTotal }), {
+          results: results.map((item, index) => ({
+            rank: index + 1,
+            id: String(item.id),
+            title: String(item.title ?? ''),
+          })),
+          startedAt,
+        });
       }
 
       if (parsed.action === 'pack') {
@@ -1005,6 +1121,7 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
               units,
               matchedUnitId: null,
               action: 'download',
+              sent: sentCount,
             });
           } else {
             albumId = String(album.id || directId);
@@ -1046,6 +1163,7 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
                 units,
                 matchedUnitId: null,
                 action: 'download',
+                sent: sentCount,
               });
             }
             albumId = String(album.id || entry.id);
@@ -1090,7 +1208,10 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
     }
   });
 
-  // 队列尾巴只用来衔接，失败不能把后一条堵死。
-  state.tail = job.then(() => {}, () => {});
+  // 队列尾巴只用来衔接，失败不能把后一条堵死；pending 无论成败都要减回去。
+  state.tail = job.then(
+    () => { state.pending = Math.max(0, state.pending - 1); },
+    () => { state.pending = Math.max(0, state.pending - 1); },
+  );
   return job;
 }

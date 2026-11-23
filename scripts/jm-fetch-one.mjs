@@ -46,6 +46,8 @@
  *   --api <base>                 边车地址，默认 http://127.0.0.1:8790
  *   --out-dir <dir>              pdf 必填：PDF 落到这里（调用方负责清理）
  *   --timeout <ms>               整个操作的**总预算**，默认 120000
+ *   --request-timeout <ms>       单次 HTTP 请求上限，默认 45000（2026-11-20 可配；
+ *                                旧版硬编码 15000，比边车自己的 JM 超时 30s 还短）
  *   --pdf-max-bytes N            pdf 上限，默认 200MB（QQ 群文件硬限）
  *
  * 成功/失败都输出 JSON（退出码恒 0，调用方只认那条 JSON；可读的失败比"崩了"好排查）：
@@ -86,7 +88,7 @@ const MAX_LIMIT = 5; // QQ 侧普通搜索一次最多看 5 本（边车契约�
 const MAX_LIMIT_DETAILS = 10; // 结构化检索需要多取候选做 AND 复核；边车上限就是 10
 const SEARCH_MODES = new Set(['site', 'work', 'author', 'tag', 'actor']);
 const MAX_SEARCH_PAGE = 100_000; // 与边车 /search 的 page 上界一致
-const REQUEST_TIMEOUT_MS = 15_000; // 单次请求上限（整体预算另算）
+const DEFAULT_REQUEST_TIMEOUT_MS = 45_000; // 单次请求上限（2026-11-20：旧版硬编码 15s）
 const POLL_MS = 1_500; // 下载任务轮询间隔
 const MAX_KEYWORD_CHARS = 60;
 
@@ -132,6 +134,7 @@ export function parseJmArgs(argv) {
     outDir: '',
     images: true,
     timeoutMs: DEFAULT_TIMEOUT_MS,
+    requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
     pdfMaxBytes: DEFAULT_PDF_MAX_BYTES,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -163,6 +166,7 @@ export function parseJmArgs(argv) {
       }
       case '--no-images': options.images = false; break;
       case '--timeout': options.timeoutMs = Number.parseInt(next(), 10); break;
+      case '--request-timeout': options.requestTimeoutMs = Number.parseInt(next(), 10); break;
       case '--pdf-max-bytes': options.pdfMaxBytes = Number.parseInt(next(), 10); break;
       default:
         log(`忽略不认识的参数:${arg}`);
@@ -172,6 +176,10 @@ export function parseJmArgs(argv) {
   const hardLimit = options.details || options.mode !== 'site' ? MAX_LIMIT_DETAILS : MAX_LIMIT;
   options.limit = Math.min(options.limit, hardLimit);
   if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs <= 0) options.timeoutMs = DEFAULT_TIMEOUT_MS;
+  if (!Number.isSafeInteger(options.requestTimeoutMs) || options.requestTimeoutMs <= 0) {
+    options.requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS;
+  }
+  options.requestTimeoutMs = Math.min(options.requestTimeoutMs, options.timeoutMs);
   if (!Number.isSafeInteger(options.pdfMaxBytes) || options.pdfMaxBytes <= 0) options.pdfMaxBytes = DEFAULT_PDF_MAX_BYTES;
   return options;
 }
@@ -201,14 +209,21 @@ async function fetchJson({ url, init, timeoutMs, fetchImpl }) {
   }
   if (!response.ok) {
     let detail = `HTTP ${response.status} ${url}`;
+    let errorCode = '';
     try {
       const text = await response.text();
       const data = JSON.parse(text);
-      if (data?.message) detail = `${data.error ?? 'http_error'}: ${data.message}`;
+      if (data?.message) {
+        errorCode = String(data.error ?? 'http_error');
+        detail = `${errorCode}: ${data.message}`;
+      }
     } catch {
       // 非 JSON 错误体就用 HTTP 状态。
     }
-    return fail('http_error', detail);
+    // 边车自己的超时（如 jm_search_timeout → 504）要翻译成 timeout：
+    // 超时口径对齐后 Node 会等得比边车久，这类 504 会真的走到这里；
+    // 不翻译就会被误报成"JM 服务没启动"（2026-11-20）。
+    return fail(/timeout/i.test(errorCode) ? 'timeout' : 'http_error', detail);
   }
   let text;
   try {
@@ -330,10 +345,12 @@ export async function runJmFetch(options, deps = {}) {
   const apiBase = String(options?.api ?? DEFAULT_API).trim().replace(/\/+$/u, '') || DEFAULT_API;
   const timeoutMs = Number.isSafeInteger(options?.timeoutMs) && options.timeoutMs > 0
     ? options.timeoutMs : DEFAULT_TIMEOUT_MS;
+  const requestTimeoutMs = Number.isSafeInteger(options?.requestTimeoutMs) && options.requestTimeoutMs > 0
+    ? Math.min(options.requestTimeoutMs, timeoutMs) : Math.min(DEFAULT_REQUEST_TIMEOUT_MS, timeoutMs);
   const pdfMaxBytes = Number.isSafeInteger(options?.pdfMaxBytes) && options.pdfMaxBytes > 0
     ? options.pdfMaxBytes : DEFAULT_PDF_MAX_BYTES;
   const deadline = now() + timeoutMs;
-  const remaining = () => Math.max(1, Math.min(REQUEST_TIMEOUT_MS, deadline - now()));
+  const remaining = () => Math.max(1, Math.min(requestTimeoutMs, deadline - now()));
 
   const op = String(options?.op ?? '').trim().toLowerCase();
   emit(`op=${op || '(空)'} api=${apiBase} timeout=${timeoutMs}`);

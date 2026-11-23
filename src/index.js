@@ -163,7 +163,7 @@ import { createMeituInterpreter } from './meitu-interpret.js';
 // 代码层 JM 搜本/下本(2026-11-12):「搜本/找本 <关键词>」「下本 <编号|序号>」。
 // 与搬图同构:纯解析 + 服务层 + 独立网络子进程 CLI;默认关闭,开启前先部署 JM 边车服务。
 import { looksLikeJmAttempt, parseJmCommand, parseJmFuzzyCommand } from './jm-command.js';
-import { DEFAULT_JM_LINES, handleJmCommand } from './jm-service.js';
+import { buildJmParseFailureReply, handleJmCommand } from './jm-service.js';
 // 通用目录收藏（2026-11-17）：作为 JM 搬本的子功能接入；父组件关闭时整段不进入。
 import { looksLikeCatalogAttempt, parseCatalogCommand } from './catalog-command.js';
 import { DEFAULT_CATALOG_LINES } from './catalog-service.js';
@@ -6595,13 +6595,14 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
    * ⚠️ 节拍:`spokenLineGap`(按待发那条长度算);`typing` 只抖**第一条**。
    * @returns {Promise<number>} 发出去几条
    */
-  async function sendSpokenLines(message, lines, { typing = false } = {}) {
+  async function sendSpokenLines(message, lines, { typing = false, passiveFallback } = {}) {
     const passive = message?.messageId !== undefined && message?.messageId !== null;
     let passiveSeq = 0;
     let sent = 0;
     let failed = 0;
     let warnedOverflow = false;
     for (const [index, line] of (lines ?? []).entries()) {
+      if (passiveFallback?.stopped) break;
       if (index > 0) await spokenLineGap(line);
       // 被动名额用完 → 剩下的段转主动(咏唱技能 D86"六句全发"同款);首溢出记一次 warn
       const active = passive && passiveSeq >= MAX_PASSIVE_SEQ;
@@ -6610,7 +6611,10 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         log.warn(`发言分条超出被动回复上限（${MAX_PASSIVE_SEQ} 条），余下的改走主动消息（吃配额）`);
       }
       try {
-        const used = await sendChunked(message, line, { typing: typing && index === 0, startSeq: passiveSeq, active });
+        const used = await sendChunked(message, line, {
+          typing: typing && index === 0, startSeq: passiveSeq, active, passiveFallback,
+        });
+        if (passiveFallback && !used) continue;
         if (passive && !active) {
           // 整段被剥空时 `sendChunked` 返回 undefined —— 什么都没发,**不占** seq 槽位
           if (used !== undefined) passiveSeq += used;
@@ -6663,7 +6667,9 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
    *   `typing: true` = 这是一次**回复**(而不是即时通知),发出之前先掷一段"打字抖动"
    *   (2026-09-30)。见下面 `applyTypingJitter` 的理由。
    */
-  async function sendChunked(message, text, { typing = false, startSeq = 0, active = false } = {}) {
+  async function sendChunked(message, text, {
+    typing = false, startSeq = 0, active = false, passiveFallback, onPassiveSent,
+  } = {}) {
     // Strip mentions and speaker labels before measuring, so an "@某人" prefix
     // cannot push a chunk over the limit or ping someone, and so a model-written
     // `【主实例】` never reaches QQ.
@@ -6698,34 +6704,62 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
     // 只抖一次(整条回复的头一块),不按分段累加:切成 3 条还各抖一次会明显发木。
     if (typing) await applyTypingJitter(cleaned.length);
 
-    let lastKind = 'active'; // 最后一条实际发出的形态(passiveExpired 会中途转 active)
+    let sent = 0;
+    let lastKind = 'active'; // 最后一条实际发出的形态
     for (const [index, chunk] of chunks.entries()) {
+      if (passiveFallback?.usingPassive && passiveFallback.seq >= MAX_PASSIVE_SEQ) {
+        passiveFallback.stopped = true;
+        log.warn(`文字点名：被动回复槽位已用完（${MAX_PASSIVE_SEQ} 条），余下不发`);
+        break;
+      }
       const send = message.scene === 'c2c'
         ? (target, payload) => api.sendDirect(target, payload)
         : (target, payload) => api.sendGroup(target, payload);
       // ⚠️ 1.106.3(D175):**出站留痕**就挂在这个唯一咽喉上 —— 记的是"真的发出去的"那一条,
       //    因为 transcript 与 memory.db 存的都是 `planSpokenLines()` 之前的模型原文
       //    (2026-10-10 现场:64 字被砍成 28 字,只看 transcript 的人会以为整段都发了)。
-      let sentKind = active || message.messageId === undefined ? 'active' : 'passive';
-      let sentBody = null;
-      try {
-        // A passive reply (msg_id + msg_seq) is exempt from active-message quotas.
-        // `startSeq` 让"一句话分几条发"能接着数下去 —— 咏唱技能的"咏唱 + 结束词
-        // 分多条消息"就是靠它(D82):同一个 msg_id 下 msg_seq 1..5 是允许的。
-        // ⚠️ `active: true` = **不带 msg_id 的主动消息**(吃每月配额):只在
-        //    被动回复的 5 条用完之后才用(D86:"六句全发")。
-        sentBody = await send(message.targetId, active
-          ? { content: chunk }
-          : { content: chunk, msgId: message.messageId, msgSeq: startSeq + index + 1 });
-      } catch (err) {
-        if (err.passiveExpired) {
-          log.warn(`被动回复窗口已失效（code=${err.code}），改用主动消息`);
-          sentKind = 'active';
-          sentBody = await send(message.targetId, { content: chunk });
-        } else {
+      // `startSeq` 接续同一个 msg_id 下的槽位；JM 文本按块上报，所以也在块边界封顶。
+      const normalSeq = startSeq + index + 1;
+      const useActive = active || !message.messageId || (onPassiveSent && normalSeq > MAX_PASSIVE_SEQ);
+      let sentKind = useActive ? 'active' : 'passive';
+      let sentBody;
+      const sendUsingTrigger = async () => {
+        const { trigger, seq } = passiveFallback;
+        try {
+          const body = await send(message.targetId, { content: chunk, msgId: trigger.messageId, msgSeq: seq + 1 });
+          passiveFallback.seq += 1;
+          sentKind = 'passive';
+          return body;
+        } catch (err) {
+          // 窗口已过或平台仍拒绝：不来回切换通道，也不重试剩余分段。
+          passiveFallback.stopped = true;
           throw err;
         }
+      };
+      if (passiveFallback?.usingPassive) {
+        sentBody = await sendUsingTrigger();
+      } else {
+        try {
+          sentBody = await send(message.targetId, useActive
+            ? { content: chunk }
+            : { content: chunk, msgId: message.messageId, msgSeq: normalSeq });
+        } catch (err) {
+          if (passiveFallback && sentKind === 'active' && String(err?.code) === '40034105') {
+            log.info('文字点名：QQ 拒绝主动回复（40034105），改用原消息被动回复');
+            passiveFallback.usingPassive = true;
+            sentBody = await sendUsingTrigger();
+          } else if (err.passiveExpired) {
+            log.warn(`被动回复窗口已失效（code=${err.code}），改用主动消息`);
+            sentKind = 'active';
+            sentBody = await send(message.targetId, { content: chunk });
+          } else {
+            throw err;
+          }
+        }
       }
+      sent += 1;
+      if (passiveFallback) passiveFallback.delivered += 1;
+      if (sentKind === 'passive') onPassiveSent?.(normalSeq);
       // F2:平台回了消息 id → 记成"她刚说的那条"。「可信回复关系」用它:
       // 下一条显式引用这条 = 同一段交流里的追问(引用上一轮触发消息也算)。
       const outboundId = sentBody && typeof sentBody === 'object'
@@ -6735,8 +6769,11 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         lastOutboundMessageIds.delete(outboundKey);
         lastOutboundMessageIds.set(outboundKey, {
           id: String(outboundId),
-          speaker: message.senderId == null ? '' : String(message.senderId),
-          triggerMessageId: message.messageId == null ? null : String(message.messageId),
+          speaker: String((sentKind === 'passive' && passiveFallback?.usingPassive
+            ? passiveFallback.trigger.senderId : message.senderId) ?? ''),
+          triggerMessageId: sentKind === 'passive' && passiveFallback?.usingPassive
+            ? String(passiveFallback.trigger.messageId)
+            : message.messageId == null ? null : String(message.messageId),
         });
         while (lastOutboundMessageIds.size > LAST_OUTBOUND_MAX) {
           lastOutboundMessageIds.delete(lastOutboundMessageIds.keys().next().value);
@@ -6759,13 +6796,15 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
 
     // Recorded here, at the single choke point every outbound message passes
     // through, so a caller cannot forget it. The warm-up gap gate reads it.
+    if (sent === 0) return 0;
     if (message.scene === 'group') lastBotUtteranceAt.set(message.targetId, Date.now());
     // R3(1.198.0,主人拍板):**成功发送也要在日志里看得见** —— recordOutbound 只进库不打
     // console,排查「回话到底发没发出去」时缺指纹(1.197.0 现场:「没登记」回话有没有发出去
     // 只能靠对照项推断)。一行咽喉留痕;答话路径的「已回复会话」是业务语义,二者不冲突。
-    log.info(`出站：已发 ${chunks.length} 条（${cleaned.length} 字，${lastKind}）→ ${String(message.targetId ?? '').slice(0, 8)}`);
-    // 发出去了几条 —— 调用方要接着数 `msgSeq`(咏唱技能:咏唱之后那条"Explosion！！！",D82)。
-    return chunks.length;
+    const sentChars = sent === chunks.length ? cleaned.length : chunks.slice(0, sent).join('').length;
+    log.info(`出站：已发 ${sent} 条（${sentChars} 字，${lastKind}）→ ${String(message.targetId ?? '').slice(0, 8)}`);
+    // JM 逐块记被动槽位，其他调用方保留返回条数的接口。
+    return onPassiveSent ? { sent } : sent;
   }
 
   /**
@@ -7739,13 +7778,13 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
           ? 0
           : jitter.minMs + Math.floor(Math.random() * (jitter.maxMs - jitter.minMs + 1));
         if (delay <= 0) {
-          void maybeGroupReply(message.targetId, { addressed: true, reason, message });
+          void maybeGroupReply(message.targetId, { addressed: true, reason, message, named: keyword !== null });
           return;
         }
         log.info(`打字中：${(delay / 1000).toFixed(1)}s 后开口（${reason}）`);
         const timer = setTimeout(() => {
           groupTimers.delete(message.targetId);
-          void maybeGroupReply(message.targetId, { addressed: true, reason, message });
+          void maybeGroupReply(message.targetId, { addressed: true, reason, message, named: keyword !== null });
         }, delay);
         timer.unref?.();
         groupTimers.set(message.targetId, { timer, kind: 'jitter' });
@@ -7845,13 +7884,19 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       // 父组件开启时不要求再开子开关，群授权沿用 config.jm.groups。
       const parsedCatalog = parseCatalogCommand(message.content, { defaultSource: 'jm' });
       const parsedJm = parsedCatalog.ok ? null : parseJmCommand(message.content, { max: config.jm.max });
-      // 模糊搜本只在“严格指令/收藏都不是”时兜底；它要求“请求动词 + 句尾 本子/本”，
-      // 普通聊天里单独出现“本”字不会进这里。
-      const parsedFuzzy = !parsedCatalog.ok && parsedJm?.ok !== true
+      // 模糊搜本只在未识别严格指令/收藏时兜底；已明确拒绝的条件或编号列表不能重新当关键词搜。
+      const explicitJmRejection = ['unsupported', 'page', 'tooMany', 'useDownload'].includes(parsedJm?.reason);
+      const parsedFuzzy = !parsedCatalog.ok && parsedJm?.ok !== true && !explicitJmRejection
         ? parseJmFuzzyCommand(message.content, { max: config.jm.max })
         : null;
       const parsed = parsedCatalog.ok ? parsedCatalog : (parsedJm?.ok ? parsedJm : parsedFuzzy);
       if (parsed?.ok) {
+        // 2026-11-20 入口审计：只记形状与长度，不把群里正文写进日志。
+        // 作用：以后出现"指令处理了但用户什么都没收到"时，日志至少能证明它进来过、解析成了什么。
+        const fields = parsed.mode === 'structured' ? Object.keys(parsed.conditions ?? {}) : [];
+        log.info(`JM：收到 ${parsed.action}`
+          + `${parsed.mode === 'structured' ? `（结构化 ${fields.join('/') || '无'}）` : ''}`
+          + `${parsed.keyword ? `（关键词 ${Array.from(parsed.keyword).length} 字）` : ''}`);
         void handleJmCommand({
           message,
           parsed,
@@ -7887,17 +7932,16 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         return;
       }
       if (looksLikeJmAttempt(message.content)) {
-        const line = parsedJm?.reason === 'unsupported'
-          ? DEFAULT_JM_LINES.unsupportedCondition[0]
-          : parsedJm?.reason === 'page'
-            ? DEFAULT_JM_LINES.pageFormat[0]
-            : parsedJm?.reason === 'tooMany'
-              ? DEFAULT_JM_LINES.tooMany[0]
-              : DEFAULT_JM_LINES.format[0];
-        await sendChunked(message, line);
+        await sendChunked(message, buildJmParseFailureReply(message.content, parsedJm?.reason));
         return;
       }
-      log.debug(`JM：@ 消息未匹配指令（正文=${JSON.stringify(String(message.content ?? '')).slice(0, 80)}）`);
+      const content = String(message.content ?? '');
+      if (/^(?:搜|找|求|来|要|看|搬)/u.test(content) && /(?:本|本子)/u.test(content)) {
+        // 2026-11-20：像"想搜本"但没命中指令 —— 用 info 级留一条痕（只记长度，不记正文）。
+        log.info(`JM：@ 消息像在搜本但没命中指令（${Array.from(content).length} 字）`);
+      } else {
+        log.debug(`JM：@ 消息未匹配指令（${Array.from(content).length} 字）`);
+      }
     }
 
     // Bridge-level commands are handled here and never reach the agent.
@@ -8733,12 +8777,12 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
    * Speak up in a group, if the gates allow it.
    *
    * @param {string} groupId
-   * @param {{addressed?: boolean, reason?: string, message?: object}} [options]
+   * @param {{addressed?: boolean, reason?: string, message?: object, named?: boolean}} [options]
    *   `addressed` marks a message aimed straight at the bot (keyword or
    *   second-person follow-up): it ignores the message-count gate. `message` is
    *   the triggering message, whose images are fetched for the model.
    */
-  async function maybeGroupReply(groupId, { addressed = false, reason, message } = {}) {
+  async function maybeGroupReply(groupId, { addressed = false, reason, message, named = false } = {}) {
     const conversationKey = sessionIdFor({ scene: 'group', targetId: groupId });
 
     // **F2 群自发入口决策**:在**任何 await 之前**定死(正文取触发这条的那条消息,
@@ -8962,7 +9006,13 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         { label: '自发发言', decision: turnDecision },
       );
       const synthetic = { scene: 'group', targetId: groupId, messageId: undefined, content: '' };
-      await sendSpokenLines(synthetic, lines, { typing: true });
+      // 只用本轮点名的原消息，不借群里最新一条；泛插话和窗口内「你」仍照旧。
+      const passiveFallback = addressed && named && message?.scene === 'group'
+        && !message.isMention && message.targetId === groupId && message.messageId
+        ? { trigger: message, seq: 0, delivered: 0 }
+        : undefined;
+      await sendSpokenLines(synthetic, lines, { typing: true, passiveFallback });
+      if (passiveFallback && passiveFallback.delivered === 0) return;
       // 参与状态机(D277):这轮算不算"她找话"——判据只用本轮**真实被叫**(`addressed`:
       // @ / 关键词 / 私聊 / 读空气重试),不拿 `answering`(它还含"正文像在对她说"的宽判据,
       // 那是**排版**用的)。拿 answering 当分类会把"没人叫、她自己凑上去"记成答话,
@@ -8980,7 +9030,8 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       }
       log.info(
         `自发发言 群=${groupId} ${lines.length} 条 / 共 ${lines.reduce((sum, one) => sum + one.length, 0)} 字` +
-        `${answering ? '（答话）' : '（主动）'}${reason ? `（${reason}）` : ''}（主动消息）`,
+        `${answering ? '（答话）' : '（主动）'}${reason ? `（${reason}）` : ''}`
+        + `${passiveFallback?.seq > 0 ? '（已用原消息被动回复）' : '（主动消息）'}`,
       );
       recordTurn('self', {
         conversationKey,

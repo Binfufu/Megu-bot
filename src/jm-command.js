@@ -12,13 +12,14 @@
  *     找本 全彩                 ← 「找本」与「搜本」同义
  *     搜本 全彩 3               ← 末尾单独一个数量词（1..5，超出夹到上限）
  *     搜本 全彩 三               ← 中文数量也认
- *     搜本 作者:甲                ← 结构化检索：作者（上游 author 模式）
+ *     搜本 作者:甲                ← 结构化检索：作者（上游 author 模式）；也认「作者 甲 / author 甲」
  *     搜本 原作:乙 / 搜本 IP:乙    ← 结构化检索：原作/IP（上游 work 模式）
  *     搜本 角色:丙                ← 结构化检索：角色（上游 actor 模式）
- *     搜本 标签:丁                ← 结构化检索：站点标签（上游 tag 模式）
+ *     搜本 标签:丁                ← 结构化检索：站点标签（上游 tag 模式）；也认「标签 丁 / tag 丁」
  *     搜本 标题:戊                ← 标题文字检索（站点候选后按标题复核）
  *     搜本 作者:甲 标签:丁 2       ← 多条件 AND + 页码；只回本次检查范围内的清单
  *     搜原神的本子               ← 模糊搜本：请求动词 + 句尾“本子/本”，关键词=原神
+ *     搜齁的本 / 来个齁的本       ← 单字关键词也认（裸「本」不再强制≥2 字，2026-11-20）
  *     来个莉音的本               ← 同上；只给清单，不自动下载
  *     （结构化/模糊检索永远只给清单；普通「搜本 关键词」旧行为不变）
  *     下本 1490076              ← 直接给作品编号（至少两位数字；边车按 id 下载）
@@ -32,8 +33,9 @@
  *
  * 解析顺序（每一步只做一件小事，selftest 按表钉着）：
  *   ⓪ 归一化：trim → 去前导标点/空白 → 去句末标点 → 剥前导 `@残留` → 剥末尾 `@残留`；
- *   ① 搜索指令：`^(搜本|找本|搜索本子|找本子)\s*(.*)$` —— 剩余段非空、长度 1..60 字；
- *      剩余段**末尾以空白分隔**的数量词（阿拉伯或中文 1..5）当数量，其余全是关键词。
+ *   ① 搜索指令：`^(搜本|找本|搜索本子|找本子)\s*(.*)$`（正文可跨行）；
+ *      纯多编号/序号清单回 `useDownload`，不搜索/下载；保留同一行的短数量旧写法（如 `搜本 123456 2`）。
+ *      剩余段**末尾以空白分隔**的数量词（阿拉伯数字或中文 1..5）当数量，其余全是关键词。
  *      ⚠️ 数量必须与关键词之间有空白：「搜本 全彩3」里的 `3` 算关键词（宁窄勿宽，
  *      关键词里出现数字很常见，不能瞎猜）；
  *   ② 下载指令：`^(下本|下载本子|下载本)\s*(.*)$` —— 按空白/逗号/顿号/斜杠/和与及切成多个目标；
@@ -58,22 +60,62 @@ export const DEFAULT_JM_MAX = 5;
 export const MAX_JM_KEYWORD_CHARS = 60;
 
 /** 搜索动词与下载动词。⚠️ 同义写法只在这里加一处，`looksLikeJmAttempt` 自动跟上。 */
-const SEARCH_VERBS = '搜本|找本|搜索本子|找本子';
+// 有分隔的「找本子」是别名；无分隔的「找本子宫」仍按「找本 子宫」解析。
+const SEARCH_VERBS = '搜本|找本子(?=\\s|$)|找本|搜索本子';
 const DOWNLOAD_VERBS = '下本|下载本子|下载本';
+const SEARCH_COMMAND_RE = new RegExp(`^(?:${SEARCH_VERBS})\\s*(.*)$`, 'su');
+const DOWNLOAD_COMMAND_RE = new RegExp(`^(?:${DOWNLOAD_VERBS})\\s*(.*)$`, 'su');
 
 /** 中文数量 → 数值（只收 1..5 与常见写法；「十几」之类落不到数字 = 当关键词）。 */
 const CN_NUM = { 一: 1, 两: 2, 二: 2, 三: 3, 四: 4, 五: 5 };
 
-/** 结构化检索的条件键；只收明确写出来的键，未知键回 unsupported。 */
+/**
+ * 结构化检索的条件键：中文主名 + 常见中英别名（2026-11-20 放宽）。
+ * 未知键仍然回 unsupported（不静默当关键词），但近失键会由 `suggestJmSyntax` 给出纠正提示。
+ */
 const STRUCTURED_FIELDS = new Map([
   ['作者', 'creator'],
+  ['作者名', 'creator'],
+  ['画师', 'creator'],
+  ['author', 'creator'],
+  ['artist', 'creator'],
   ['原作', 'original'],
+  ['作品', 'original'],
   ['IP', 'original'],
   ['ip', 'original'],
+  ['work', 'original'],
   ['角色', 'character'],
+  ['人物', 'character'],
+  ['character', 'character'],
+  ['actor', 'character'],
   ['标签', 'tag'],
+  ['标签名', 'tag'],
+  ['tag', 'tag'],
+  ['tags', 'tag'],
   ['标题', 'title'],
+  ['title', 'title'],
 ]);
+
+/** 页码键（`页码:2` 与「页码 2」都认）。 */
+const PAGE_KEYS = new Set(['页码', '页', 'page']);
+
+/** 字段规范名 → 中文标签（近失提示用）。 */
+const FIELD_LABELS = Object.freeze({
+  creator: '作者', original: '原作', character: '角色', tag: '标签', title: '标题', page: '页码',
+});
+
+/** 取条件键的规范字段名；不是条件键返回 null（英文键大小写不敏感）。 */
+function structuredField(key) {
+  const raw = String(key ?? '').normalize('NFKC').trim();
+  if (!raw) return null;
+  return STRUCTURED_FIELDS.get(raw) ?? STRUCTURED_FIELDS.get(raw.toLowerCase()) ?? null;
+}
+
+/** 是不是页码键（英文 page 大小写不敏感）。 */
+function isPageKey(key) {
+  const raw = String(key ?? '').normalize('NFKC').trim();
+  return PAGE_KEYS.has(raw) || PAGE_KEYS.has(raw.toLowerCase());
+}
 
 /** 结构化检索的值/页码上限；页码与列表页码同一口径。 */
 const MAX_STRUCTURED_VALUE_CHARS = 60;
@@ -83,7 +125,7 @@ const MAX_STRUCTURED_PAGE = 9999;
 function splitKeyValue(token) {
   const match = /^([^:：]+)[:：](.*)$/u.exec(String(token ?? ''));
   if (!match) return null;
-  return { key: match[1].trim(), value: match[2].trim() };
+  return { key: match[1].normalize('NFKC').trim(), value: match[2].trim() };
 }
 
 /**
@@ -111,14 +153,15 @@ function parseStructuredSearchRest(body) {
     return true;
   };
 
-  for (const token of tokens) {
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
     const pair = splitKeyValue(token);
     if (pair) {
-      if (pair.key === '页码' || pair.key === '页') {
+      if (isPageKey(pair.key)) {
         if (!/^\d+$/u.test(pair.value) || !setPage(pair.value)) return { ok: false, reason: 'page' };
         continue;
       }
-      const field = STRUCTURED_FIELDS.get(pair.key);
+      const field = structuredField(pair.key);
       if (!field) return { ok: false, reason: 'unsupported', field: pair.key };
       const value = pair.value.normalize('NFKC').trim();
       if (!value || Array.from(value).length > MAX_STRUCTURED_VALUE_CHARS) {
@@ -129,6 +172,37 @@ function parseStructuredSearchRest(body) {
       list.push(value);
       conditions[field] = list;
       hasCondition = true;
+      continue;
+    }
+
+    // 2026-11-20：条件键与值之间只写空格也认（「搜本 标签 齁」「搜本 tag 齁」）。
+    // 只在下一个 token 不是另一个条件键时消费；写了键却没有值 → 明确回格式错误（不静默当关键词）。
+    const bareField = structuredField(token);
+    if (bareField) {
+      const next = tokens[i + 1];
+      const nextIsKey = next !== undefined && (
+        splitKeyValue(next) !== null || structuredField(next) !== null || isPageKey(next));
+      if (next === undefined || nextIsKey) return { ok: false, reason: 'format', field: token };
+      const value = String(next).normalize('NFKC').trim();
+      if (!value || Array.from(value).length > MAX_STRUCTURED_VALUE_CHARS) {
+        return { ok: false, reason: 'format', field: token };
+      }
+      const list = conditions[bareField] ?? [];
+      if (list.length >= 5) return { ok: false, reason: 'format', field: token };
+      list.push(value);
+      conditions[bareField] = list;
+      hasCondition = true;
+      i += 1;
+      continue;
+    }
+
+    // 页码的空格写法：「搜本 作者:甲 页码 2」。
+    if (isPageKey(token)) {
+      const next = tokens[i + 1];
+      if (next === undefined || !/^\d+$/u.test(next) || !setPage(next)) {
+        return { ok: false, reason: 'page' };
+      }
+      i += 1;
       continue;
     }
 
@@ -145,7 +219,8 @@ function parseStructuredSearchRest(body) {
 
   if (!hasCondition) {
     // 没有条件键：交回普通关键词路径；页码词/数字由原解析器处理（或当关键词）。
-    return null;
+    // 但只写了页码没写条件键（`搜本 页码 2`）不是一次有意义的检索，明确回格式错误。
+    return pageGiven ? { ok: false, reason: 'format' } : null;
   }
 
   if (numericPages.length > 0) {
@@ -264,10 +339,10 @@ function cleanFuzzyKeyword(raw, marker) {
     .trim();
   if (!text || FUZZY_STOP_WORDS.has(text)) return null;
   if (FUZZY_CHAT_PREFIXES.test(text) || FUZZY_CHAT_CONTAINS.test(text)) return null;
-  // 裸“本”前面只有一个字时太容易是“本来/基本/成本”这类句子；要求至少两字。
-  if (marker === '本' && Array.from(text).length < 2) return null;
   if (Array.from(text).length > MAX_JM_KEYWORD_CHARS) return null;
   // 句尾裸“本”可能是复合词的词尾：来个日本 / 来个成本 / 来个笔记本。
+  // 2026-11-20：不再额外要求「裸本至少两字」—— 那条规则会误杀「搜齁的本」这类单字关键词；
+  // 复合词由下面这张黑名单负责挡（成本/日本/基本/剧本…），单字但不在名单里的照常放行。
   const compound = `${text}${marker}`;
   if (FUZZY_BEN_COMPOUNDS.has(compound) || FUZZY_BEN_COMPOUNDS.has(text)) return null;
   return text;
@@ -284,6 +359,9 @@ function cleanFuzzyKeyword(raw, marker) {
 export function parseJmFuzzyCommand(text, { max = DEFAULT_JM_MAX } = {}) {
   const normalized = normalize(text);
   if (!normalized || Array.from(normalized).length > FUZZY_MAX_INPUT_CHARS) return null;
+  // 显式搜本的编号清单已经被严格入口拒绝；末尾「本」是目标后缀，不是模糊请求。
+  const search = SEARCH_COMMAND_RE.exec(normalized);
+  if (search && isDownloadTargetList(search[1])) return null;
   const split = splitFuzzyMarker(normalized);
   if (!split) return null;
   let rest = split.body.replace(/[的\s]+$/u, '');
@@ -316,6 +394,7 @@ const MAX_RANK = 9;
  * 每个都要真下载 + 打包 + 发文件，还会把本群串行队列占住几分钟。
  */
 export const MAX_DOWNLOAD_TARGETS = 5;
+const DOWNLOAD_TARGET_SEPARATOR_RE = /[\s,，、;；/和与及]+/u;
 
 /** 导航用的宽松形状：只要开头是搜索/下载动词，就算"在尝试这条指令"。 */
 const ATTEMPT_RE = new RegExp(`^(?:${SEARCH_VERBS}|${DOWNLOAD_VERBS}|整本打包|打包)`, 'u');
@@ -396,10 +475,12 @@ function normalize(text) {
  * @param {number} max 数量上限（来自 `config.jm.max`）
  * @returns {{ok: true, action: 'search', keyword: string, count: number,
  *            countGiven: boolean}
- *   | {ok: false, reason: 'format'|'count'|'keyword'}}
+ *   | {ok: false, reason: 'format'|'count'|'keyword'|'useDownload'}}
  */
 function parseSearchRest(rest, max) {
-  const body = String(rest ?? '').trim();
+  if (isDownloadTargetList(rest)) return { ok: false, reason: 'useDownload' };
+  // 搜索文本跨行时把换行当词间空格；单行中原有的空格不改动。
+  const body = rest.split(/[\r\n\u2028\u2029]+/u).map((line) => line.trim()).filter(Boolean).join(' ');
   if (!body) return { ok: false, reason: 'format' };
 
   // 结构化条件（作者/原作/IP/角色/标签/标题/页码）优先；没有条件键时回到普通关键词。
@@ -409,12 +490,12 @@ function parseSearchRest(rest, max) {
   // 末尾单独一个数量词（必须**以空白分隔**，见文件头 ① 的宁窄勿宽口径）。
   let keyword = body;
   let count = null;
-  const spaced = /^(.*?)\s+([0-9一二两三四五六七八九十]+)$/u.exec(body);
-  if (spaced && spaced[1].trim()) {
-    const parsed = parseCountToken(spaced[2]);
+  const spaced = /\s([0-9一二两三四五六七八九十]+)$/u.exec(body);
+  if (spaced) {
+    const parsed = parseCountToken(spaced[1]);
     // 「搜本 xxx 十几」这种落不到数字的，不当数量 —— 整段仍算关键词（不瞎猜）。
     if (Number.isSafeInteger(parsed)) {
-      keyword = spaced[1].trim();
+      keyword = body.slice(0, spaced.index).trimEnd();
       count = parsed;
     }
   }
@@ -434,28 +515,14 @@ function parseSearchRest(rest, max) {
 }
 
 /**
- * 解析下载指令的剩余段：「编号 / 序号」，可一次给多个。
- *
- * 宽松口径（2026-11-17 现场：清单之后回「下本1489725 1488143」「下本1 2」都被拒）：
- *   · 目标之间用空白、逗号、顿号、分号、斜杠或「和/与/及」分隔；
- *   · 每个目标可带 `#`/`第`/`JM` 前缀与尾部「本/号/个」；
- *   · 全角数字先 NFKC 归一；同一目标重复写只算一次。
- *
- * @param {string} rest 动词之后的正文
- * @returns {{ok: true, action: 'download',
- *            targets: Array<{kind:'id', target:string}|{kind:'ordinal', ordinal:number}>,
- *            raw: string}
- *   | {ok: false, reason: 'format'|'tooMany', count?: number, max?: number}}
+ * 共用的编号/序号清单解析：支持空白（含换行）、逗号、顿号、分号、斜杠或「和/与/及」混排；
+ * 目标可带 `#`/`第`/`JM` 前缀和「本/号/个」后缀；全角经 NFKC；同一个目标只算一次。
+ * 保留去重前的项数，让搜本也能识别重复粘贴的清单；这里只解析，不套下载数量上限。
  */
-function parseDownloadRest(rest) {
-  const body = String(rest ?? '')
-    .normalize('NFKC')
-    .replace(/^[\s:：,，、;；/]+/u, '')
-    .trim();
-  if (!body) return { ok: false, reason: 'format' };
-
-  const chunks = body.split(/[\s,，、;；/和与及]+/u).filter(Boolean);
-  if (chunks.length === 0) return { ok: false, reason: 'format' };
+function parseDownloadTargets(rest) {
+  const body = rest.normalize('NFKC').replace(/^[\s:：,，、;；/]+/u, '').trim();
+  const chunks = body.split(DOWNLOAD_TARGET_SEPARATOR_RE).filter(Boolean);
+  if (chunks.length === 0) return null;
 
   const targets = [];
   const seen = new Set();
@@ -467,27 +534,41 @@ function parseDownloadRest(rest) {
       .replace(/^第/u, '')
       .replace(/[本号个.。]+$/u, '')
       .trim();
-    if (!token || !/^\d+$/u.test(token)) return { ok: false, reason: 'format' };
+    if (!/^\d+$/u.test(token)) return null;
 
     // 序号只有一位 1..9；两位及以上一律当作品编号（JM 的 id 是六位数级别）。
     if (token.length === 1) {
       const rank = Number.parseInt(token, 10);
-      if (rank < 1 || rank > MAX_RANK) return { ok: false, reason: 'format' };
+      if (rank < 1 || rank > MAX_RANK) return null;
       if (seen.has(`rank:${rank}`)) continue;
       seen.add(`rank:${rank}`);
       targets.push({ kind: 'ordinal', ordinal: rank });
       continue;
     }
-    if (!Number.isSafeInteger(Number(token))) return { ok: false, reason: 'format' };
+    if (!Number.isSafeInteger(Number(token))) return null;
     if (seen.has(`id:${token}`)) continue;
     seen.add(`id:${token}`);
     targets.push({ kind: 'id', target: token });
   }
+  return { targets, raw: body, itemCount: chunks.length };
+}
 
+/** 搜本遇到纯目标清单只提示；同一行「单目标 + 单位数」仍按旧数量语法解析。 */
+function isDownloadTargetList(rest) {
+  const shortCount = /^(\S+)[^\S\r\n\u2028\u2029]+[0-9]$/u.exec(rest);
+  if (shortCount && !DOWNLOAD_TARGET_SEPARATOR_RE.test(shortCount[1].normalize('NFKC'))) return false;
+  return (parseDownloadTargets(rest)?.itemCount ?? 0) > 1;
+}
+
+/** 下本限定去重后的目标个数，不静默截断。 */
+function parseDownloadRest(rest) {
+  const parsed = parseDownloadTargets(rest);
+  if (!parsed) return { ok: false, reason: 'format' };
+  const { targets, raw } = parsed;
   if (targets.length > MAX_DOWNLOAD_TARGETS) {
     return { ok: false, reason: 'tooMany', count: targets.length, max: MAX_DOWNLOAD_TARGETS };
   }
-  return { ok: true, action: 'download', targets, raw: body };
+  return { ok: true, action: 'download', targets, raw };
 }
 
 /**
@@ -501,7 +582,7 @@ function parseDownloadRest(rest) {
  *   | {ok: true, action: 'download',
  *      targets: Array<{kind:'id', target:string}|{kind:'ordinal', ordinal:number}>, raw: string}
  *   | {ok: true, action: 'pack', all: boolean, ordinals: number[]}
- *   | {ok: false, reason: 'format'|'count'|'keyword'|'page'|'unsupported'|'tooMany', field?: string}}
+ *   | {ok: false, reason: 'format'|'count'|'keyword'|'page'|'unsupported'|'tooMany'|'useDownload', field?: string}}
  */
 export function parseJmCommand(text, { max = DEFAULT_JM_MAX } = {}) {
   const normalized = normalize(text);
@@ -513,10 +594,10 @@ export function parseJmCommand(text, { max = DEFAULT_JM_MAX } = {}) {
   const pack = parsePackCommand(normalized);
   if (pack) return pack;
 
-  const search = new RegExp(`^(?:${SEARCH_VERBS})\\s*(.*)$`, 'u').exec(normalized);
+  const search = SEARCH_COMMAND_RE.exec(normalized);
   if (search) return parseSearchRest(search[1], max);
 
-  const download = new RegExp(`^(?:${DOWNLOAD_VERBS})\\s*(.*)$`, 'u').exec(normalized);
+  const download = DOWNLOAD_COMMAND_RE.exec(normalized);
   if (download) return parseDownloadRest(download[1]);
 
   return { ok: false, reason: 'format' };
@@ -533,4 +614,87 @@ export function parseJmCommand(text, { max = DEFAULT_JM_MAX } = {}) {
  */
 export function looksLikeJmAttempt(text) {
   return ATTEMPT_RE.test(normalize(text));
+}
+
+/** 字段规范名 → 中文标签；近失提示与帮助文案共用这一处，避免再抄第二份名单。 */
+export const JM_FIELD_LABELS = FIELD_LABELS;
+
+/**
+ * 一次编辑内的近似判定（含相邻换位），用于「你是不是想写 X」的字段键提示。
+ * 做法与 Git 的 `help.autoCorrect`（Damerau-Levenshtein 距离 ≤1 才建议）同族；
+ * 这里只判"是否 ≤1"，不需要完整距离矩阵，所以是一段几十行的确定性比较。
+ */
+function withinOneEdit(a, b) {
+  const left = Array.from(String(a ?? '').normalize('NFKC').toLowerCase());
+  const right = Array.from(String(b ?? '').normalize('NFKC').toLowerCase());
+  if (left.length === right.length) {
+    const diffs = [];
+    for (let i = 0; i < left.length; i += 1) if (left[i] !== right[i]) diffs.push(i);
+    if (diffs.length <= 1) return true;
+    // 相邻两字写反（tga → tag）也只算一次。
+    return diffs.length === 2
+      && diffs[1] === diffs[0] + 1
+      && left[diffs[0]] === right[diffs[1]]
+      && left[diffs[1]] === right[diffs[0]];
+  }
+  const [short, long] = left.length < right.length ? [left, right] : [right, left];
+  if (long.length - short.length !== 1) return false;
+  let i = 0;
+  let j = 0;
+  let skipped = false;
+  while (i < short.length && j < long.length) {
+    if (short[i] === long[j]) { i += 1; j += 1; continue; }
+    if (skipped) return false;
+    skipped = true;
+    j += 1;
+  }
+  return true;
+}
+
+/** 找与 `key` 只差一次编辑的条件键；找不到返回 null。单字键（如「页」）不参与近失猜测，避免误报。 */
+function nearestFieldKey(key) {
+  const raw = String(key ?? '').normalize('NFKC').trim();
+  if (Array.from(raw).length < 2) return null;
+  for (const candidate of [...STRUCTURED_FIELDS.keys(), ...PAGE_KEYS]) {
+    if (Array.from(candidate).length < 2) continue;
+    if (withinOneEdit(raw, candidate)) {
+      return { alias: candidate, field: structuredField(candidate) ?? 'page' };
+    }
+  }
+  return null;
+}
+
+/**
+ * **近失提示**（2026-11-20，对标 Git 的 did-you-mean）：消息像搜本指令但解析失败时，
+ * 从里面找"差一点的条件键"（`作都:甲`、`tga:齁`、`标签 齁` 的漏冒号不算失败），
+ * 返回给人话提示用的结构化建议；找不到返回 null（调用方回一条短格式提示即可）。
+ *
+ * 只做提示，不自动执行用户没写出来的条件 —— 猜错方向比让人再打一遍更糟。
+ *
+ * @param {string} text 消息正文
+ * @returns {{kind:'field', field:string, alias:string, value:string}|null}
+ */
+export function suggestJmSyntax(text) {
+  const normalized = normalize(text);
+  if (!normalized) return null;
+  const tokens = normalized.split(/\s+/u).filter(Boolean);
+  for (let i = 0; i < tokens.length; i += 1) {
+    const pair = splitKeyValue(tokens[i]);
+    if (pair) {
+      if (structuredField(pair.key) || isPageKey(pair.key)) continue;
+      const near = nearestFieldKey(pair.key);
+      if (near) return { kind: 'field', field: near.field, alias: near.alias, value: pair.value };
+      continue;
+    }
+    // 本身已经是合法条件键的 token 不参与"近失"猜测（否则「标题」会被猜成「标签」）。
+    if (structuredField(tokens[i]) || isPageKey(tokens[i])) continue;
+    const near = nearestFieldKey(tokens[i]);
+    if (near && tokens[i + 1] !== undefined
+      && splitKeyValue(tokens[i + 1]) === null
+      && structuredField(tokens[i + 1]) === null
+      && !isPageKey(tokens[i + 1])) {
+      return { kind: 'field', field: near.field, alias: near.alias, value: tokens[i + 1] };
+    }
+  }
+  return null;
 }

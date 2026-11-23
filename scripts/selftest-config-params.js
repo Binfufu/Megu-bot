@@ -35,12 +35,12 @@ const read = (id, input) => resolveParams(CONFIG_PARAM_DEFINITIONS, { env: { [id
 
 export function registerConfigParamsTests({ test, assert }) {
   test('config params: complete typed catalogue and defaults are registered without secrets', () => {
-    assert.equal(CONFIG_PARAM_DEFINITIONS.length, 237); // 235 + 目录收藏 2 项（2026-11-17）。
-    assert.equal(new Set(CONFIG_PARAM_DEFINITIONS.map((def) => def.id)).size, 237);
+    assert.equal(CONFIG_PARAM_DEFINITIONS.length, 238); // 237 + JM 单次请求上限 1 项（2026-11-20）。
+    assert.equal(new Set(CONFIG_PARAM_DEFINITIONS.map((def) => def.id)).size, 238);
     assert.equal(CONFIG_PARAM_DEFINITIONS.some((def) => def.type === 'custom'), false);
     const typeCounts = {};
     for (const def of CONFIG_PARAM_DEFINITIONS) typeCounts[def.type] = (typeCounts[def.type] ?? 0) + 1;
-    assert.deepEqual(typeCounts, { int: 94, boolean: 49, number: 10, string: 30, url: 7, path: 16, enum: 12, object: 4, array: 15 });
+    assert.deepEqual(typeCounts, { int: 95, boolean: 49, number: 10, string: 30, url: 7, path: 16, enum: 12, object: 4, array: 15 });
     const defaults = resolveParams(CONFIG_PARAM_DEFINITIONS);
     assert.deepEqual(defaults.inputs, {});
     assert.equal(defaults.values.QQBOT_MOOD_TTL_MS, 600000);

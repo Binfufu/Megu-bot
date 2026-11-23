@@ -881,7 +881,8 @@ test('meitu-service:R3 判据(源码扫描) —— sendChunked 成功路径必�
     path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'index.js'),
     'utf8',
   );
-  const marker = /log\.info\(`出站：已发 \$\{chunks\.length\} 条（\$\{cleaned\.length\} 字，\$\{lastKind\}）/;
+  // 文字点名回退可能触及被动槽位上限；留痕必须用实发计数而非原计划块数。
+  const marker = /log\.info\(`出站：已发 \$\{sent\} 条（\$\{sentChars\} 字，\$\{lastKind\}）/;
   assert.ok(marker.test(source), 'sendChunked 的「出站：已发」留痕丢了(R3)');
   const atMarker = source.search(marker);
   const atRecord = source.indexOf('stateStore.recordOutbound({');

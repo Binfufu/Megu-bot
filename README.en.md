@@ -220,6 +220,7 @@ QQBOT_JM_COOLDOWN_MS=30000
 QQBOT_JM_ROOT=data/demo/jm-images
 QQBOT_JM_MAX_BYTES=10485760
 QQBOT_JM_TIMEOUT_MS=120000
+QQBOT_JM_REQUEST_TIMEOUT_MS=45000
 QQBOT_CATALOG_DB=data/demo/catalog.db
 QQBOT_CATALOG_PAGE_SIZE=8
 ```
@@ -227,6 +228,7 @@ QQBOT_CATALOG_PAGE_SIZE=8
 - `QQBOT_JM_GROUPS`: group openids allowed to use this feature, filled in by you. **An empty value rejects all groups**, not "all allowed"; set `*` to explicitly allow every group (review responsibility is yours). It is independent of `QQBOT_IDS`.
 - `QQBOT_JM_API`: sidecar address. The template defaults to `http://127.0.0.1:8790`; change it here if your sidecar listens on another port (this repo does not hard-code a port).
 - `QQBOT_JM_COOLDOWN_MS` only limits **book search**; downloads do not consume the cooldown (otherwise a search followed immediately by a download would be blocked by itself), and failures do not consume it either.
+- `QQBOT_JM_REQUEST_TIMEOUT_MS` caps a **single HTTP request** (default 45000 ms, provisional) and must stay below the `QQBOT_JM_TIMEOUT_MS` operation budget; a slow sidecar/upstream fails here first.
 - `QQBOT_CATALOG_DB` is the separate SQLite file for favorites; do not share it with chat or memory DBs. When unset, it follows the directory of `QQBOT_STATE_DB` (`data/demo/catalog.db` in the demo layout). It falls back to `data/catalog.db` only when no state DB path is set either. `QQBOT_CATALOG_PAGE_SIZE` sets the favorites page size (default 8, tentative).
 - The rest are count limits, timeouts, and a legacy image limit kept for compatibility; all are template defaults, not a promise of success rate.
 
