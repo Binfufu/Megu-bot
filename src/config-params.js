@@ -143,6 +143,8 @@ export function createConfigParamDefinitions(parsers) {
   nonnegative('QQBOT_JM_COOLDOWN_MS', 30_000);
   positive('QQBOT_JM_MAX_BYTES', 10_485_760);
   positive('QQBOT_JM_TIMEOUT_MS', 120_000);
+  // 2026-11-20：单次请求上限（旧实现硬编码 15s，比边车 JM 超时 30s 还短）。
+  positive('QQBOT_JM_REQUEST_TIMEOUT_MS', 45_000);
   // 通用目录收藏（2026-11-17）：独立库、每页条数；父开关沿用 QQBOT_JM。
   positive('QQBOT_CATALOG_PAGE_SIZE', 8, { max: 50 }); // 【暂定】8；清单一页最多 50
   boolean('QQBOT_PROMPT_CONTEXT', true);

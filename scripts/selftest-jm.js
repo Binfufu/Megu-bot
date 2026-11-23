@@ -28,10 +28,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { DEFAULT_JM_MAX, looksLikeJmAttempt, parseJmCommand, parseJmFuzzyCommand } from '../src/jm-command.js';
+import { DEFAULT_JM_MAX, looksLikeJmAttempt, parseJmCommand, parseJmFuzzyCommand, suggestJmSyntax } from '../src/jm-command.js';
 import {
   DEFAULT_JM_LINES,
   buildDownloadAck,
+  buildJmFormatHint,
+  buildJmParseFailureReply,
   buildSearchListText,
   buildUnitListText,
   handleJmCommand,
@@ -158,6 +160,37 @@ test('jm-command:下本可一次选多个(2026-11-17 现场原文),分隔符与J
   assert.equal(parseJmCommand('下本 1 2 3 4 5 6').reason, 'tooMany', '超过 5 个明确拒绝，不静默截断');
 });
 
+test('jm-command:搜本纯多编号只引导下本，不能被模糊入口重新吃掉', () => {
+  for (const text of ['搜本\n900001\n900002', '搜本 900001 900002', '搜本 900001、900002本']) {
+    assert.equal(parseJmCommand(text).reason, 'useDownload', text);
+    assert.equal(parseJmFuzzyCommand(text), null, text);
+  }
+  assert.deepEqual(parseJmCommand('搜本 900001 2'), {
+    ok: true, action: 'search', keyword: '900001', count: 2, countGiven: true,
+  });
+});
+
+test('jm-command:多行搜本一体解析 CRLF 关键词、数量与结构化条件', () => {
+  assert.deepEqual(parseJmCommand('搜本\r\n合成\n关键词\r\n3'), {
+    ok: true, action: 'search', keyword: '合成 关键词', count: 3, countGiven: true,
+  });
+  const structured = parseJmCommand('搜本\r\n作者:甲\n标签:乙\r\n页码:2');
+  assert.equal(structured.ok, true);
+  assert.deepEqual(structured.conditions, { creator: ['甲'], tag: ['乙'] });
+  assert.equal(structured.page, 2);
+});
+
+test('jm-command:多行下本支持 CRLF、混排分隔与去重，六项明确拒绝', () => {
+  const parsed = parseJmCommand('下载本子\r\nＪＭ９００００１、#900002号\n第3本 / 900001');
+  assert.equal(parsed.ok, true);
+  assert.deepEqual(parsed.targets, [
+    { kind: 'id', target: '900001' }, { kind: 'id', target: '900002' }, { kind: 'ordinal', ordinal: 3 },
+  ]);
+  assert.deepEqual(parseJmCommand('下本\r\n900001、900002\n900003 900004／900005；900006'), {
+    ok: false, reason: 'tooMany', count: 6, max: 5,
+  });
+});
+
 test('jm-command:下本非法输入不认(不猜)', () => {
   for (const text of ['下本', '下本 abc', '下本 0', '下本 12a', '下本 1 abc', '下本 10a 2']) {
     assert.equal(parseJmCommand(text).ok, false, text);
@@ -185,6 +218,55 @@ test('jm-command:作者/原作(IP)/角色/标签/标题/页码结构化条件可
   assert.equal(parseJmCommand('搜本 年份:2024').reason, 'unsupported');
   assert.equal(parseJmCommand('搜本 全彩 3').keyword, '全彩');
   assert.equal(parseJmCommand('搜本 全彩 3').count, 3);
+});
+
+test('jm-command:字段别名与「键 值」空格写法(2026-11-20 现场:搜本 tag 齁)', () => {
+  const structured = (conditions, page = 1) => ({
+    ok: true, action: 'search', mode: 'structured', conditions, page, keyword: null, countGiven: false,
+  });
+  assert.deepEqual(parseJmCommand('搜本 tag 齁'), structured({ tag: ['齁'] }));
+  assert.deepEqual(parseJmCommand('搜本 标签 齁'), structured({ tag: ['齁'] }));
+  assert.deepEqual(parseJmCommand('搜本 tag:齁'), structured({ tag: ['齁'] }));
+  assert.deepEqual(parseJmCommand('搜本 tags：齁'), structured({ tag: ['齁'] }), '全角冒号与英文复数');
+  assert.deepEqual(parseJmCommand('搜本 作者 张三'), structured({ creator: ['张三'] }));
+  assert.deepEqual(parseJmCommand('搜本 author 张三'), structured({ creator: ['张三'] }));
+  assert.deepEqual(parseJmCommand('搜本 作者 张三 标签 齁'), structured({ creator: ['张三'], tag: ['齁'] }));
+  assert.deepEqual(parseJmCommand('搜本 标题 全彩'), structured({ title: ['全彩'] }));
+  assert.deepEqual(parseJmCommand('搜本 标签 齁 2'), structured({ tag: ['齁'] }, 2));
+  assert.deepEqual(parseJmCommand('搜本 标签:齁 页码 2'), structured({ tag: ['齁'] }, 2));
+  // 写了条件键却没有值 → 明确回格式错误，不能静默降级成关键词（旧行为会拿「标签」去搜）。
+  for (const text of ['搜本 标签', '搜本 作者', '搜本 标题']) {
+    assert.equal(parseJmCommand(text).reason, 'format', text);
+  }
+  // 只有页码没有条件键，不是一次有意义的检索。
+  assert.equal(parseJmCommand('搜本 页码 2').reason, 'format');
+  // 未知键仍然拒绝，不静默当关键词。
+  assert.equal(parseJmCommand('搜本 年份:2024').reason, 'unsupported');
+  // 普通关键词语义不变。
+  assert.equal(parseJmCommand('搜本 全彩').keyword, '全彩');
+  assert.equal(parseJmCommand('搜本 全彩 3').count, 3);
+});
+
+test('jm-command:模糊搜本的裸“本”接受单字关键词(2026-11-20 现场:搜齁的本)', () => {
+  const expected = (keyword) => ({
+    ok: true, action: 'search', keyword, count: DEFAULT_JM_MAX, countGiven: false, fuzzy: true,
+  });
+  for (const [text, keyword] of [
+    ['搜齁的本', '齁'], ['来个齁的本', '齁'], ['求齁的本', '齁'], ['搜龘的本', '龘'],
+  ]) {
+    assert.deepEqual(parseJmFuzzyCommand(text), expected(keyword), text);
+  }
+  // 单字也不能放过复合词：成本/日本/基本/剧本…
+  for (const text of ['来个日本', '来个成本', '来个基本', '来个剧本', '搜日本']) {
+    assert.equal(parseJmFuzzyCommand(text), null, text);
+  }
+});
+
+test('jm-command:近失提示只指出最可能写歪的字段键,不猜也不自动执行', () => {
+  assert.deepEqual(suggestJmSyntax('搜本 作都:甲'), { kind: 'field', field: 'creator', alias: '作者', value: '甲' });
+  assert.deepEqual(suggestJmSyntax('搜本 tga:齁'), { kind: 'field', field: 'tag', alias: 'tag', value: '齁' });
+  assert.equal(suggestJmSyntax('搜本 年份:2024'), null, '离得太远的不猜');
+  assert.equal(suggestJmSyntax('搜本 标签 齁'), null, '已经能解析的不用提示');
 });
 
 test('jm-command:模糊搜本只认“请求动词 + 句尾 本子/本”,复合词与闲聊不命中', () => {
@@ -270,6 +352,7 @@ test('jm-fetch:参数默认值与越界夹取(含 unit/images)', () => {
   const defaults = parseJmArgs([]);
   assert.equal(defaults.api, 'http://127.0.0.1:8790');
   assert.equal(defaults.timeoutMs, 120_000);
+  assert.equal(defaults.requestTimeoutMs, 45_000, '单次请求默认 45s（旧版硬编码 15s，比边车 30s 还短）');
   assert.equal(defaults.limit, 5);
   assert.equal(defaults.images, true);
   assert.equal(defaults.unit, '');
@@ -278,6 +361,10 @@ test('jm-fetch:参数默认值与越界夹取(含 unit/images)', () => {
   assert.equal(clamped.op, 'search');
   assert.equal(clamped.limit, 5);
   assert.equal(clamped.timeoutMs, 120_000);
+  assert.equal(clamped.requestTimeoutMs, 45_000, '坏值回落默认');
+  assert.equal(parseJmArgs(['--request-timeout', '60000']).requestTimeoutMs, 60_000);
+  assert.equal(parseJmArgs(['--request-timeout', 'bad']).requestTimeoutMs, 45_000);
+  assert.equal(parseJmArgs(['--timeout', '10000', '--request-timeout', '60000']).requestTimeoutMs, 10_000, '单次请求不能超出总预算');
   assert.equal(clamped.q, '全彩');
   assert.equal(clamped.images, false);
   assert.equal(parseJmArgs(['--unit', '1205081']).unit, '1205081');
@@ -338,6 +425,16 @@ test('jm-fetch:连不上=service_down、超时=timeout、HTTP 非 2xx=http_error
   assert.equal((await run(async () => { throw new TypeError('fetch failed'); })).reason, 'service_down');
   assert.equal((await run(async () => { throw TIMEOUT_ERROR; })).reason, 'timeout');
   assert.equal((await run(async () => httpRes(503))).reason, 'http_error');
+  // 边车自己的超时（jm_search_timeout → 504）必须翻成 timeout，不能报成"服务没启动"。
+  assert.equal(
+    (await run(async () => jsonRes({ ok: false, error: 'jm_search_timeout', message: 'JM 搜索超时，请稍后重试' }, 504))).reason,
+    'timeout',
+  );
+  assert.equal(
+    (await run(async () => jsonRes({ ok: false, error: 'jm_search_failed', message: 'JM 搜索失败' }, 502))).reason,
+    'http_error',
+    '非超时的上游失败仍是 http_error（由服务层回"没成功"而不是"服务没启动"）',
+  );
 });
 
 test('jm-fetch:search 带 images=0 并返回约定形状(不再下载拼图/封面)', async () => {
@@ -750,6 +847,7 @@ function makeDeps({
   groups = ['g-jm'],
   cooldownMs = 0,
   max = 5,
+  requestTimeoutMs = 45_000,
   payloads = [searchPayload()],
   now,
   lines,
@@ -757,6 +855,7 @@ function makeDeps({
   uploadFile,
   sendMedia,
   reply,
+  workingAckMs,
 } = {}) {
   const calls = { fetch: [], upload: [], send: [], reply: [], replyOpts: [], order: [] };
   let index = 0;
@@ -770,11 +869,13 @@ function makeDeps({
         cooldownMs,
         root: path.join(dir, 'jm-images'),
         timeoutMs: 120_000,
+        requestTimeoutMs,
       },
     },
     log: SILENT_LOG,
     now: typeof now === 'function' ? now : () => 1_700_000_000_000,
     rng: () => 0,
+    ...(typeof workingAckMs === 'number' ? { workingAckMs } : {}),
     runFetch: runFetch ?? (async (input) => {
       calls.fetch.push(input);
       const payload = payloads[Math.min(index, payloads.length - 1)];
@@ -914,8 +1015,9 @@ test('jm-service:结构化检索按作者/标签/标题/原作/角色选 mode，
     assert.ok(fixture.searchArgs().includes('--images'));
     assert.equal(fixture.searchArgs()[fixture.searchArgs().indexOf('--images') + 1], '0');
     assert.match(fixture.calls.reply.at(-1), /本次检查范围内找到 2 本/u);
-    assert.match(fixture.calls.reply.at(-1), /JM101/u);
-    assert.match(fixture.calls.reply.at(-1), /JM102/u);
+    assert.deepEqual(fixture.calls.reply.at(-1).split('\n').slice(1), [
+      '1. JM101 全彩甲', '2. JM102 黑白乙',
+    ], '结构化命中行仅序号、JM 编号和标题；作者/标签仅用于匹配');
     assert.equal(fixture.calls.upload.length, 0);
     assert.equal(fixture.calls.send.length, 0);
 
@@ -961,6 +1063,112 @@ test('jm-service:结构化检索按作者/标签/标题/原作/角色选 mode，
     assert.equal(fixture.calls.upload.length, 0);
     assert.equal(fixture.calls.send.length, 0);
     assert.deepEqual(fixture.operations().filter((op) => op !== 'health' && op !== 'search'), []);
+  });
+});
+
+const BLOCKED_LIST_NOTICE = '抱歉，这份清单没法发。如果你知道编号，可以直接用「下本 <编号>」。';
+const listModerationError = (code = 40034006) => Object.assign(new Error('QQ 拒绝发送'), { code });
+
+test('jm-service:结构化清单遇 40034006 仅发送固定提示，回话串行且不复用已送达分片的 seq', async () => {
+  await withTemp(async (dir) => {
+    const group = 'g-jm-structured-blocked';
+    const events = [];
+    const delivered = [];
+    const errors = [];
+    let inFlight = 0;
+    let peak = 0;
+    const payload = searchPayload({ results: [
+      { id: '18472', title: '合成清单标题', authors: ['合成作者'], tags: ['合成标签'], detailOk: true },
+    ] });
+    const { deps, calls } = makeDeps({
+      dir, groups: [group], workingAckMs: 0, cooldownMs: 5000,
+      runFetch: async ({ args }) => {
+        const op = args[args.indexOf('--op') + 1];
+        if (op === 'search') await new Promise((resolve) => setTimeout(resolve, 5));
+        const data = op === 'health' ? { ok: true, capabilities: ['details'] } : payload;
+        return { code: 0, stdout: JSON.stringify(data), stderr: '', timedOut: false };
+      },
+      reply: async (text, { startSeq, active, onPassiveSent }) => {
+        events.push({ text, startSeq, active });
+        peak = Math.max(peak, ++inFlight);
+        try {
+          if (text === DEFAULT_JM_LINES.working[0]) {
+            // 抓取已返回时此回执仍在发；下一条得等它完成并消耗 msg_seq=1。
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            delivered.push(text);
+            return 1; // 现有 reply 注入的数字返回接口继续可用。
+          }
+          if (text.startsWith('本次检查范围内找到')) {
+            onPassiveSent?.(startSeq + 1); // 模拟首块送达、下一块被拒绝。
+            throw listModerationError();
+          }
+          delivered.push(text);
+          onPassiveSent?.(startSeq + 1);
+          return { sent: 1 };
+        } finally {
+          inFlight -= 1;
+        }
+      },
+    });
+    deps.log = { ...SILENT_LOG, error: (...parts) => errors.push(parts.join(' ')) };
+    const run = (text) => handleJmCommand({ message: message(group), parsed: parseJmCommand(text), deps });
+    const rejected = await run('搜本 标签:合成标签');
+    assert.deepEqual(delivered, [DEFAULT_JM_LINES.working[0], BLOCKED_LIST_NOTICE], '假 reply 确认实际接收的只有回执和固定提示');
+    assert.deepEqual(events.map(({ startSeq, active }) => ({ startSeq, active })), [
+      { startSeq: 0, active: false }, { startSeq: 1, active: false }, { startSeq: 2, active: false },
+    ], '兜底占下一可用槽位，不覆盖首个成功分片');
+    assert.equal(peak, 1, '回执、清单和兜底不能并发发送');
+    assert.match(events[1].text, /JM18472 合成清单标题/u);
+    assert.doesNotMatch(errors.join('\n'), /合成清单标题|合成作者|合成标签|18472/u, '被拒内容不写进发送失败日志');
+    assert.deepEqual(rejected, { ok: false, reason: 'list_blocked', sent: 0, action: 'search' });
+    assert.equal((await run('下本 1')).reason, 'ordinal_missing', '部分发送的清单也不可按序号选择');
+    assert.equal(calls.upload.length, 0);
+    assert.equal((await run('搜本 标签:合成标签')).reason, 'list_blocked', '未送达不占搜索冷却');
+  });
+});
+
+test('jm-service:普通/模糊搜本和单元清单共用出站判据，其他错误不兜底、兜底失败只试一次', async () => {
+  await withTemp(async (dir) => {
+    const list = searchPayload({ results: [{ id: '201', title: '合成甲' }, { id: '202', title: '合成乙' }] });
+    const units = resolvePayload({ album: albumPayload({ id: '700', units: [
+      { index: 1, unitId: '711', title: '合成单元甲' }, { index: 2, unitId: '722', title: '合成单元乙' },
+    ] }) });
+    const cases = [
+      { text: '搜本 合成 2', payload: list, error: Object.assign(new Error('上下文提及 40034006'), { code: 40034105 }), attempts: 1 },
+      { text: '搜合成的本子', payload: list, error: listModerationError(), fallbackError: listModerationError(), attempts: 2 },
+      { text: '搜本 700', payload: units, error: listModerationError('40034006'), attempts: 2, delivered: true },
+      { text: '下本 700', payload: units, error: new Error('消息内容违规'), attempts: 1, action: 'download' },
+      { text: '搜本 合成 2', payload: list, attempts: 1 }, // reply 返回 undefined（未发）也不能当成功。
+      { text: '搜本 合成 2', payload: list, error: listModerationError(), attempts: 2 }, // 兜底无输出不是成功。
+    ];
+    for (const [i, { text, payload, error, fallbackError, attempts, action = 'search', delivered = false }] of cases.entries()) {
+      const group = `g-jm-list-send-${i}`;
+      const prepared = makeDeps({ dir, groups: [group], payloads: [list] });
+      const run = (parsed, deps) => handleJmCommand({ message: message(group), parsed, deps });
+      assert.equal((await run(parseJmCommand('搜本 合成 2'), prepared.deps)).ok, true, '预先建立一份可见清单');
+      const tried = [];
+      const seen = [];
+      const { deps, calls } = makeDeps({
+        dir, groups: [group], payloads: [payload],
+        reply: async (out, { startSeq, active }) => {
+          tried.push({ out, startSeq, active });
+          if (tried.length === 1 && error) throw error;
+          if (tried.length === 2 && fallbackError) throw fallbackError;
+          if (tried.length === 2 && delivered) { seen.push(out); return 1; }
+          return undefined;
+        },
+      });
+      const result = await run(parseJmFuzzyCommand(text) ?? parseJmCommand(text), deps);
+      assert.equal(tried.length, attempts, text);
+      if (attempts === 2) assert.deepEqual(tried[1], { out: BLOCKED_LIST_NOTICE, startSeq: 0, active: false });
+      assert.deepEqual(seen, delivered ? [BLOCKED_LIST_NOTICE] : []);
+      assert.deepEqual(result, { ok: false, reason: delivered ? 'list_blocked' : 'list_send_failed', sent: 0, action });
+      assert.equal((await run(parseJmCommand('下本 1'), prepared.deps)).reason, 'ordinal_missing');
+      assert.equal((await run(parseJmCommand('整本打包'), prepared.deps)).reason, 'no_units');
+      assert.equal(prepared.calls.fetch.length, 1, '失败清单不能触发任何序号下载或打包，也不能落回旧清单');
+      assert.equal(calls.fetch.length, 1);
+      assert.equal(calls.send.length, 0);
+    }
   });
 });
 
@@ -1456,6 +1664,8 @@ test('jm-service:边车不可用/子进程坏输出/超时 → fail closed 固�
       { stdout: '', timedOut: false, key: 'serviceDown' },
       { stdout: 'not-json-at-all\n', timedOut: false, key: 'searchFailed' },
       { stdout: '', timedOut: true, key: 'timeout' },
+      // 边车活着但回了 4xx/5xx（JM 上游失败）：说"没成功"，不能说"服务没启动"。
+      { stdout: JSON.stringify({ ok: false, reason: 'http_error', detail: 'HTTP 502' }), timedOut: false, key: 'searchFailed' },
     ];
     for (const [index, item] of scenarios.entries()) {
       const group = `g-jm-fail-${index}`;
@@ -1761,6 +1971,91 @@ test('jm-service:合并PDF失败不发送已下载单元的替代文件', async 
   });
 });
 
+test('jm-service:抓取器带 --request-timeout(默认 45s,可配),不再硬编码 15s', async () => {
+  await withTemp(async (dir) => {
+    const group = 'g-jm-reqtimeout';
+    const results = [{ id: '101', title: '合成本甲' }, { id: '102', title: '合成本乙' }];
+    const def = makeDeps({ dir, groups: [group], payloads: [searchPayload({ results })] });
+    await handleJmCommand({ message: message(group), parsed: parseJmCommand('搜本 全彩'), deps: def.deps });
+    const args = def.calls.fetch[0].args;
+    assert.equal(args[args.indexOf('--request-timeout') + 1], '45000');
+
+    const custom = makeDeps({ dir, groups: [group], payloads: [searchPayload({ results })], requestTimeoutMs: 60_000 });
+    await handleJmCommand({ message: message(group), parsed: parseJmCommand('搜本 全彩'), deps: custom.deps });
+    const customArgs = custom.calls.fetch[0].args;
+    assert.equal(customArgs[customArgs.indexOf('--request-timeout') + 1], '60000');
+  });
+});
+
+test('jm-service:近失提示只说一句能照抄的话(不再甩整面格式墙)', () => {
+  assert.equal(
+    buildJmFormatHint('搜本 作都:甲'),
+    '想按作者搜？发「搜本 作者:甲」。只写「搜本 甲」是按关键词搜。',
+  );
+  assert.equal(buildJmFormatHint('搜本 标签'), DEFAULT_JM_LINES.formatShort[0]);
+  assert.ok(buildJmFormatHint('搜本 标签').length <= Array.from(DEFAULT_JM_LINES.formatShort[0]).length);
+  assert.ok(DEFAULT_JM_LINES.formatShort[0].length < DEFAULT_JM_LINES.format[0].length, '短提示必须真的比旧格式墙短');
+});
+
+test('jm-service:解析失败分流保留页码/超量/格式，近失才提示纠正，多编号引导下本', () => {
+  for (const [text, reason, expected] of [
+    ['搜本 作都:甲', 'unsupported', '想按作者搜？发「搜本 作者:甲」。只写「搜本 甲」是按关键词搜。'],
+    ['搜本 年份:2024', 'unsupported', DEFAULT_JM_LINES.unsupportedCondition[0]],
+    ['搜本 原作:甲 角色:乙', 'unsupported', DEFAULT_JM_LINES.unsupportedCondition[0]],
+    ['搜本 标签:甲 页码:0', 'page', DEFAULT_JM_LINES.pageFormat[0]],
+    ['下本 1 2 3 4 5 6', 'tooMany', DEFAULT_JM_LINES.tooMany[0]],
+    ['搜本 标签', 'format', DEFAULT_JM_LINES.formatShort[0]],
+    ['搜本 123456 234567', 'useDownload', '要下多个编号，请用「下本 <编号1> <编号2>」，每次最多 5 个。'],
+  ]) {
+    assert.equal(parseJmCommand(text).reason, reason);
+    assert.equal(buildJmParseFailureReply(text, reason), expected, text);
+  }
+});
+
+test('jm-service:同群前一条没跑完 → 后一条先回「排队中」(不再无声等待)', async () => {
+  await withTemp(async (dir) => {
+    const group = 'g-jm-queue';
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    let first = true;
+    const runFetch = async () => {
+      if (first) { first = false; await gate; }
+      return {
+        code: 0, stderr: '', timedOut: false,
+        stdout: JSON.stringify(searchPayload({ results: [{ id: '101', title: '合成本甲' }, { id: '102', title: '合成本乙' }] })),
+      };
+    };
+    const { deps, calls } = makeDeps({ dir, groups: [group], runFetch });
+    const a = handleJmCommand({ message: message(group), parsed: parseJmCommand('搜本 全彩'), deps });
+    // 第一条已经同步入队（pending=1）；等一拍再发第二条，确保它看到排队现场。
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const b = handleJmCommand({ message: message(group), parsed: parseJmCommand('搜本 全彩'), deps });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.ok(calls.reply.includes(DEFAULT_JM_LINES.queued[0]), '后一条应先收到排队提示');
+    release();
+    await Promise.all([a, b]);
+  });
+});
+
+test('jm-service:搜索超过等待线先回「在搜了」,最终结果按序到', async () => {
+  await withTemp(async (dir) => {
+    const group = 'g-jm-slow';
+    const runFetch = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      return {
+        code: 0, stderr: '', timedOut: false,
+        stdout: JSON.stringify(searchPayload({ results: [{ id: '101', title: '合成本甲' }, { id: '102', title: '合成本乙' }] })),
+      };
+    };
+    const { deps, calls } = makeDeps({ dir, groups: [group], runFetch, workingAckMs: 5 });
+    const result = await handleJmCommand({ message: message(group), parsed: parseJmCommand('搜本 全彩'), deps });
+    assert.equal(result.ok, true);
+    const at = calls.reply.indexOf(DEFAULT_JM_LINES.working[0]);
+    assert.ok(at >= 0, '慢搜索要先回「在搜了」');
+    assert.ok(at < calls.reply.length - 1, '最终结果必须在提示之后（回话串行链）');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // ④ 接线哨兵（只读源码/生成物，证明"真的接上了"而不是只有模块）
 // ---------------------------------------------------------------------------
@@ -1773,7 +2068,16 @@ test('jm-service 接线哨兵:index.js 按配置开启接入、命令表与生�
   assert.ok(indexSource.includes('parseJmFuzzyCommand(message.content'), 'index.js 必须接模糊搜本兜底');
   assert.ok(indexSource.includes('handleJmCommand({'), 'index.js 必须调服务层');
   assert.ok(indexSource.includes('looksLikeJmAttempt(message.content)'), 'index.js 必须有格式提示分支');
-  assert.ok(indexSource.includes("parsedJm?.reason === 'tooMany'"), 'index.js 必须给“一次选太多”明确提示');
+  assert.ok(indexSource.includes('buildJmParseFailureReply(message.content, parsedJm?.reason)'),
+    'index.js 必须将真实解析的失败原因交给近失/格式提示函数');
+  assert.ok(indexSource.includes('JM：收到 ${parsed.action}'), 'index.js 必须有入口审计日志');
+
+  const configSource = fs.readFileSync(path.join(root, 'src', 'config.js'), 'utf8');
+  assert.ok(configSource.includes("QQBOT_JM_REQUEST_TIMEOUT_MS"), 'config.js 必须登记单次请求上限');
+  const configParamsSource = fs.readFileSync(path.join(root, 'src', 'config-params.js'), 'utf8');
+  assert.ok(configParamsSource.includes("'QQBOT_JM_REQUEST_TIMEOUT_MS'"), 'config-params.js 必须登记新 env 键');
+  const fetchSource = fs.readFileSync(path.join(root, 'scripts', 'jm-fetch-one.mjs'), 'utf8');
+  assert.ok(fetchSource.includes("'--request-timeout'"), '抓取器必须接受 --request-timeout');
 
   const commandsSource = fs.readFileSync(path.join(root, 'src', 'commands.js'), 'utf8');
   assert.ok(commandsSource.includes('parseJmCommand'), '命令表必须登记 JM 指令');
@@ -1783,7 +2087,7 @@ test('jm-service 接线哨兵:index.js 按配置开启接入、命令表与生�
   const envExample = fs.readFileSync(path.join(root, '.env.example'), 'utf8');
   for (const key of ['QQBOT_JM=false', 'QQBOT_JM_GROUPS=', 'QQBOT_JM_API=http://127.0.0.1:8790', 'QQBOT_JM_MAX=5',
     'QQBOT_JM_COOLDOWN_MS=30000', 'QQBOT_JM_ROOT=data/demo/jm-images',
-    'QQBOT_JM_MAX_BYTES=10485760', 'QQBOT_JM_TIMEOUT_MS=120000']) {
+    'QQBOT_JM_MAX_BYTES=10485760', 'QQBOT_JM_TIMEOUT_MS=120000', 'QQBOT_JM_REQUEST_TIMEOUT_MS=45000']) {
     assert.ok(envExample.includes(key), `.env.example 缺 ${key}`);
   }
 });

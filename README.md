@@ -220,6 +220,7 @@ QQBOT_JM_COOLDOWN_MS=30000
 QQBOT_JM_ROOT=data/demo/jm-images
 QQBOT_JM_MAX_BYTES=10485760
 QQBOT_JM_TIMEOUT_MS=120000
+QQBOT_JM_REQUEST_TIMEOUT_MS=45000
 QQBOT_CATALOG_DB=data/demo/catalog.db
 QQBOT_CATALOG_PAGE_SIZE=8
 ```
@@ -227,6 +228,7 @@ QQBOT_CATALOG_PAGE_SIZE=8
 - `QQBOT_JM_GROUPS`：允许使用这个功能的群 openid，由你在本地填写。**空值表示拒绝所有群**，不是全开；要显式全开填 `*`（自担审核责任）。它与 `QQBOT_IDS` 的用户授权相互独立。
 - `QQBOT_JM_API`：边车地址。模板默认 `http://127.0.0.1:8790`，边车监听别的端口就改这里（本仓库不硬编码端口）。
 - `QQBOT_JM_COOLDOWN_MS` 只拦**搜本**；下本不吃冷却（否则搜完立刻下会被自己拦住），失败也不占冷却。
+- `QQBOT_JM_REQUEST_TIMEOUT_MS` 是**单次 HTTP 请求**上限（默认 45000ms，暂定），比 `QQBOT_JM_TIMEOUT_MS` 的总预算小；边车/上游慢时先由它判超时。
 - `QQBOT_CATALOG_DB` 是收藏用的独立 SQLite 文件，不要与聊天/记忆库共用。未显式填写时跟随 `QQBOT_STATE_DB` 的同级目录（demo 布局下即 `data/demo/catalog.db`）；只有连状态库路径都没设时才兜底到 `data/catalog.db`。`QQBOT_CATALOG_PAGE_SIZE` 是收藏夹每页条数（默认 8，暂定）。
 - 其余是数量上限、超时与兼容保留的旧图上限；都是模板默认值，不是成功率承诺。
 

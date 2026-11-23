@@ -827,7 +827,9 @@ function buildRuntimeConfig({ rootDir, envFile, loadedEnvFile }) {
        *   · `cooldownMs` 同群两次**搜本**的最小间隔（下本不吃冷却）；
        *   · `root`       临时文件（目前是下载后待上传的 PDF）的落盘根目录，发完即清；
        *   · `maxBytes`   兼容保留：1.210.2 起 Node 侧不再发结果图，该值不参与运行时判断；
-       *   · `timeoutMs`  一次搜索/下载的总预算（也是子进程硬超时的基准）。
+       *   · `timeoutMs`  一次搜索/下载的总预算（也是子进程硬超时的基准）；
+       *   · `requestTimeoutMs` 单次 HTTP 请求的上限（2026-11-20）。旧实现硬编码 15s，
+       *                 比边车自己的 JM 超时（默认 30s）还短，慢一点的搜索会被 Node 先判超时。
        *
        * ⚠️ **数字全是【暂定】**（2026-11-12），部署者可调；默认关闭、启动不联网。
        */
@@ -844,6 +846,7 @@ function buildRuntimeConfig({ rootDir, envFile, loadedEnvFile }) {
         root: path.resolve(rootDir, raw('QQBOT_JM_ROOT') ?? 'data/demo/jm-images'),
         maxBytes: asInt('QQBOT_JM_MAX_BYTES', 10_485_760), // 兼容保留；不再参与运行时判断
         timeoutMs: asInt('QQBOT_JM_TIMEOUT_MS', 120_000), // 【暂定】120s
+        requestTimeoutMs: asInt('QQBOT_JM_REQUEST_TIMEOUT_MS', 45_000), // 【暂定】单次请求 45s
       },
       /**
        * **通用本地目录收藏**（2026-11-17）：与 JM 搬本解耦的独立 SQLite 收藏库。
