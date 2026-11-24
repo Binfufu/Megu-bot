@@ -814,15 +814,19 @@ test('jm接线:收藏夹/取消收藏不 spawn 抓取器（列表路径无网络
 test('接线哨兵:index/config/commands/env 真的接上，且父开关关闭时不响应', () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const indexSource = fs.readFileSync(path.join(root, 'src', 'index.js'), 'utf8');
-  const jmBranchStart = indexSource.indexOf('config.jm?.enabled');
-  const jmBranchEnd = indexSource.indexOf('// Bridge-level commands', jmBranchStart);
-  assert.ok(jmBranchStart >= 0 && jmBranchEnd > jmBranchStart, '必须沿用 JM 父开关');
+  // 2026-11-24 审查 P2-9：按**函数边界**切 tryHandleSearchCommand，不能再用首个
+  // `config.jm?.enabled`（那已落在工具可用性 helper 里，切片会膨胀到整个文件）。
+  const jmBranchStart = indexSource.indexOf('  async function tryHandleSearchCommand(');
+  const jmBranchEnd = indexSource.indexOf('\n  async function handleMessage(', jmBranchStart);
+  assert.ok(jmBranchStart >= 0 && jmBranchEnd > jmBranchStart, '必须找到命令唯一入口 tryHandleSearchCommand');
   const jmBranch = indexSource.slice(jmBranchStart, jmBranchEnd);
-  assert.ok(jmBranch.includes('parseCatalogCommand(message.content'), '父开关分支内必须调收藏纯解析器');
+  // 收藏仍只认真 @ 且仍在父开关内（本轮只放宽搜本/搜图两个功能）。
+  assert.match(jmBranch, /if \(isMention && config\.jm\?\.enabled\)[\s\S]*?parseCatalogCommand\(content/,
+    '收藏解析必须在「真 @ + JM 父开关」分支内');
   assert.ok(jmBranch.includes('handleJmCommand({'), '必须经 JM 服务层统一白名单/队列');
   assert.ok(jmBranch.includes('looksLikeCatalogAttempt'), '格式提示分支要存在');
   assert.ok(jmBranch.includes('DEFAULT_CATALOG_LINES'), '固定话术要接上');
-  assert.ok(!indexSource.slice(0, jmBranchStart).includes('parseCatalogCommand(message.content'),
+  assert.ok(!indexSource.slice(0, jmBranchStart).includes('parseCatalogCommand(content'),
     '收藏解析不能被放到父开关之外');
 
   const configSource = fs.readFileSync(path.join(root, 'src', 'config.js'), 'utf8');

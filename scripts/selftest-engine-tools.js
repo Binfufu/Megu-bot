@@ -12,6 +12,7 @@ import * as assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createOwnEngine } from '../src/engine.js';
 import { SqliteStateStore } from '../src/sqlite-store.js';
 import { defineCapability, turnContextFor } from '../src/capabilities.js';
@@ -25,6 +26,33 @@ function scriptedLlm(script) {
     const step = script[Math.min(i, script.length - 1)];
     i += 1;
     return { text: step.text ?? '', toolCalls: step.toolCalls ?? null, finishReason: step.finishReason ?? (step.toolCalls ? 'tool_calls' : 'stop'), raw: {} };
+  };
+  return { chat, calls, get count() { return i; } };
+}
+
+/**
+ * 首轮失败的假 llm:第 1 次按给定 status 抛错(缺省 = 网络错/无 status),
+ * 之后按脚本返回 —— 覆盖"工具协议 400/422 → 降级重试"的分支。
+ */
+function statusFailingLlm({ status = null, message = '首轮失败', script = [{ text: '降级后的回答' }] }) {
+  const calls = [];
+  let i = 0;
+  const chat = async (messages, callOptions = {}) => {
+    calls.push({ messages: JSON.parse(JSON.stringify(messages)), callOptions: { ...callOptions } });
+    const index = i;
+    i += 1;
+    if (index === 0) {
+      const error = new Error(message);
+      if (status !== null) error.status = status;
+      throw error;
+    }
+    const step = script[Math.min(index - 1, script.length - 1)];
+    return {
+      text: step.text ?? '',
+      toolCalls: step.toolCalls ?? null,
+      finishReason: step.toolCalls ? 'tool_calls' : 'stop',
+      raw: {},
+    };
   };
   return { chat, calls, get count() { return i; } };
 }
@@ -248,13 +276,21 @@ export function registerEngineToolTests({ test, assert: a }) {
 
   test('wiring:index 装配、config 默认关、快照在 scoped 上(扫源码)', () => {
     const indexSource = fs.readFileSync(path.resolve('src', 'index.js'), 'utf8');
-    // 三个 chat 入口都带工具上下文;内部播报路径保持四参(不带)。
-    const count = (indexSource.match(/buildToolContext\(message, conversationKey\)/g) ?? []).length;
-    a.ok(count >= 2, `主答话+网页都要带工具上下文,实际 ${count}`);
-    a.match(indexSource, /buildToolContext\(merged, conversationKey\)/, '合并答话也要带');
+    // 三个 chat 入口带逐轮 runtime；网页入口**不带**（没有 QQ 消息，组件工具不该出现）。
+    // 2026-11-24 审查 P2-9：不能只数 `>=4`——要钉住「哪个入口带/哪个不带」这个安全边界。
+    a.match(indexSource, /runner\.runTurn\(conversationKey, prompt, config\.policy\.replyTimeoutMs, null, buildToolContext\(message, conversationKey\), \{ scene: 'web' \}\)/,
+      '网页聊天必须不带 runtime（没有可用的群消息/发送口）');
+    const pinnedEntries = [
+      /buildToolContext\(message, conversationKey, makeToolRuntime\(message, outbound\)\)/,
+      /buildToolContext\(merged, conversationKey, makeToolRuntime\(merged, outbound\)\)/,
+      /buildToolContext\(source, conversationKey, makeToolRuntime\(selfSynthetic, outbound\)\)/,
+    ];
+    for (const pattern of pinnedEntries) a.match(indexSource, pattern, `缺少带 runtime 的聊天入口：${pattern}`);
+    const count = (indexSource.match(/(?<!function )buildToolContext\(/g) ?? []).length;
+    a.equal(count, 4, `工具上下文必须恰好四个入口（@/合并/自发/网页），实际 ${count}`);
     // 判据顺序:总闸最前,协议闸在 advertise 之前( Responses 发了会 400)。
     const fnStart = indexSource.indexOf('function buildToolContext(');
-    const fnBody = indexSource.slice(fnStart, fnStart + 1400);
+    const fnBody = indexSource.slice(fnStart, fnStart + 3200);
     const enabledAt = fnBody.indexOf('if (!toolsCfg.enabled) return null;');
     const modelAt = fnBody.indexOf('if (toolsCfg.modelFunctionTools !== true) return null;');
     const respAt = fnBody.indexOf('isResponsesApi(');
@@ -269,4 +305,141 @@ export function registerEngineToolTests({ test, assert: a }) {
     const settingsSource = fs.readFileSync(path.resolve('src', 'llm-settings.js'), 'utf8');
     a.match(settingsSource, /snapshot: \(\) =>/, 'scoped 必须提供整轮快照');
   });
+
+  // ——— 工具协议降级兜底(2026-11-24):仅首轮 400/422 去掉 tools 重试一次 ———
+
+  test('首轮 400/422(工具协议不被接受):去掉 tools 重试一次,降级成功并通知装配层、warn', async () => {
+    for (const status of [400, 422]) {
+      const fx = tempFixture();
+      const llm = statusFailingLlm({ status, script: [{ text: '降级后的回答' }] });
+      const warns = [];
+      const engine = createOwnEngine({
+        llm, store: fx.store, personaPath: fx.personaPath, budget: null,
+        log: { warn: (message) => warns.push(String(message)) },
+      });
+      let notified = 0;
+      try {
+        await engine.initialize();
+        const result = await engine.runTurn('k', '问', 5000, null,
+          baseToolContext({ onUnsupportedTools: () => { notified += 1; } }));
+        a.equal(result.text, '降级后的回答', `${status}: 降级后照常出正文`);
+        a.equal(llm.calls.length, 2, `${status}: 首轮 + 降级重试 = 两次模型调用`);
+        a.ok(llm.calls[0].callOptions.tools, `${status}: 首轮带 tools`);
+        a.equal(llm.calls[1].callOptions.tools, undefined, `${status}: 重试必须去掉 tools`);
+        a.equal(notified, 1, `${status}: 装配层要收到一次降级通知`);
+        a.ok(warns.some((message) => /工具协议不被接受/.test(message)), `${status}: 要有 warn 日志`);
+        // 降级本回合不进入工具循环,落库形状与普通无工具轮一致。
+        const rows = fx.store.conversationTurns('k');
+        a.deepEqual(rows.map((row) => row.role), ['user', 'assistant']);
+        a.equal(rows[1].meta.toolsUsed, undefined, `${status}: 没真用工具就不该有 toolsUsed`);
+      } finally {
+        await engine.stop();
+        fx.store.close();
+        fs.rmSync(fx.dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test('首轮 500 / 无 status 的网络错:不降级,原样抛出,只调一次模型', async () => {
+    for (const status of [500, null]) {
+      const fx = tempFixture();
+      const llm = statusFailingLlm({ status, message: `原始故障 status=${status}` });
+      const engine = createOwnEngine({ llm, store: fx.store, personaPath: fx.personaPath, budget: null, log: {} });
+      let notified = 0;
+      try {
+        await engine.initialize();
+        await a.rejects(
+          engine.runTurn('k', '问', 5000, null, baseToolContext({ onUnsupportedTools: () => { notified += 1; } })),
+          (error) => {
+            a.equal(error.message, `原始故障 status=${status}`, `status=${status}: 必须把原错误原样抛出`);
+            return true;
+          },
+        );
+        a.equal(llm.calls.length, 1, `status=${status}: 非 400/422 不许重试`);
+        a.equal(notified, 0, `status=${status}: 不许误报降级`);
+      } finally {
+        await engine.stop();
+        fx.store.close();
+        fs.rmSync(fx.dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test('首轮 400、去掉 tools 的重试也失败:抛**原错误**,降级只重试一次且不通知成功', async () => {
+    const fx = tempFixture();
+    const calls = [];
+    const llm = {
+      chat: async (messages, callOptions = {}) => {
+        calls.push({ callOptions: { ...callOptions } });
+        if (calls.length === 1) {
+          const first = new Error('原始 400(工具协议)');
+          first.status = 400;
+          throw first;
+        }
+        const second = new Error('降级重试也失败');
+        second.status = 500;
+        throw second;
+      },
+    };
+    const engine = createOwnEngine({ llm, store: fx.store, personaPath: fx.personaPath, budget: null, log: {} });
+    let notified = 0;
+    try {
+      await engine.initialize();
+      await a.rejects(
+        engine.runTurn('k', '问', 5000, null, baseToolContext({ onUnsupportedTools: () => { notified += 1; } })),
+        (error) => {
+          a.equal(error.message, '原始 400(工具协议)', '次生错误不许顶替原错误');
+          return true;
+        },
+      );
+      a.equal(calls.length, 2, '降级只重试一次(第三次不存在)');
+      a.equal(calls[1].callOptions.tools, undefined, '重试去掉 tools');
+      a.equal(notified, 0, '降级没成功就不许发"已降级"通知');
+    } finally {
+      await engine.stop();
+      fx.store.close();
+      fs.rmSync(fx.dir, { recursive: true, force: true });
+    }
+  });
+
+  test('成功路径一字不变:正常带 tools 的一轮不触发降级通知', async () => {
+    const fx = tempFixture();
+    const llm = scriptedLlm([{ text: '直接回答' }]);
+    const engine = createOwnEngine({ llm, store: fx.store, personaPath: fx.personaPath, budget: null, log: {} });
+    let notified = 0;
+    try {
+      await engine.initialize();
+      const result = await engine.runTurn('k', '问', 5000, null,
+        baseToolContext({ onUnsupportedTools: () => { notified += 1; } }));
+      a.equal(result.text, '直接回答');
+      a.equal(llm.calls.length, 1);
+      a.ok(llm.calls[0].callOptions.tools, '成功路径照旧带 tools');
+      a.equal(notified, 0, '成功路径不许触发降级');
+    } finally {
+      await engine.stop();
+      fx.store.close();
+      fs.rmSync(fx.dir, { recursive: true, force: true });
+    }
+  });
+}
+
+// 直接跑本文件时也能独立出结果(被 selftest-public/private 注册时只登记、不执行)。
+const SELF_FILE = fileURLToPath(import.meta.url);
+if (process.argv[1] && path.resolve(process.argv[1]) === SELF_FILE) {
+  const cases = [];
+  const test = (name, fn) => cases.push([name, fn]);
+  registerEngineToolTests({ test, assert });
+  let passed = 0;
+  for (const [name, fn] of cases) {
+    try {
+      await fn();
+      passed += 1;
+      console.log(`✓ ${name}`);
+    } catch (err) {
+      console.error(`✗ ${name}`);
+      console.error(err);
+      process.exitCode = 1;
+    }
+  }
+  console.log(`${passed}/${cases.length} 通过`);
 }

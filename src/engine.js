@@ -618,12 +618,39 @@ export function createOwnEngine(options) {
           saveState(key, s);
           // **P3-b**:整轮 client 快照(有没有工具都快照 —— 同一轮的语义一致)。
           const roundClient = llm.snapshot ? llm.snapshot() : llm;
-          const tools = (toolContext && Array.isArray(toolContext.tools) && toolContext.tools.length > 0)
+          let tools = (toolContext && Array.isArray(toolContext.tools) && toolContext.tools.length > 0)
             ? toolContext.tools : null;
-          let response = await cancellableChat(messages,
-            { timeoutMs: turnTimeoutMs ?? timeoutMs, images: imageBlocks, signal,
-              observation: { key, userTurnId, resetId: s.resetId }, ...(tools ? { tools } : {}) },
-            key, 'main', roundClient);
+          // **工具协议降级兜底**(2026-11-24,只加这一处,不改工具循环其它语义):
+          // 有些模型/通道会把**带 tools 的请求**直接 400/422 拒掉(参数/协议不被接受,
+          // 最常见的原因是模型根本不支持 function calling)。这种错重试同一请求不会变好,
+          // 所以去掉 tools 重试**一次**,本回合按无工具继续;
+          // · 重试仍失败 ⇒ 抛**原错误**(次生错误不覆盖原始故障面);
+          // · 重试成功 ⇒ warn + 通知装配层(`onUnsupportedTools`),本回合不再发 tools。
+          const firstOptions = { timeoutMs: turnTimeoutMs ?? timeoutMs, images: imageBlocks, signal,
+            observation: { key, userTurnId, resetId: s.resetId }, ...(tools ? { tools } : {}) };
+          let response;
+          try {
+            response = await cancellableChat(messages, firstOptions, key, 'main', roundClient);
+          } catch (error) {
+            const status = Number(error?.status);
+            const unsupportedTools = tools !== null && (status === 400 || status === 422);
+            if (!unsupportedTools) throw error;
+            const noToolsOptions = { timeoutMs: turnTimeoutMs ?? timeoutMs, images: imageBlocks, signal,
+              observation: { key, userTurnId, resetId: s.resetId } };
+            try {
+              response = await cancellableChat(messages, noToolsOptions, key, 'main', roundClient);
+            } catch {
+              throw error;
+            }
+            log.warn?.('[engine] 工具协议不被接受，已降级无工具本回合');
+            // 2026-11-24 审查 P2-11：把原始错误面交给装配层，由它决定是否**进程级**关闭工具
+            // （只按 status 归因会把"上下文超长/参数错"等其它 400 误判成工具不支持）。
+            toolContext.onUnsupportedTools?.({
+              status,
+              message: String(error?.message ?? error?.body ?? '').slice(0, 200),
+            });
+            tools = null;
+          }
           let toolsUsed = [];
           if (tools) {
             // **工具循环**(P3-a 状态机驱动):assistant 原样接回 → tool 结果配对 → 再问,

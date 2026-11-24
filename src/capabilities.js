@@ -192,8 +192,13 @@ export function denial(effect, reason) {
 /**
  * **执行端再授权**——即使模型伪造了被隐藏工具的调用,这里也拦得住。
  *
+ * mutating 能力(会对外发消息/发文件)必须**两道授权同时成立**:
+ * `allowToolIds`(能不能见到、能不能调)∩ `allowMutatingIds`(这个会写外部世界的工具
+ * 是否被显式放开)。第二道缺省为空 ⇒ 与之前"首批只开放只读"完全一样的默认拒绝;
+ * 只有装配层明确把 id 放进 `allowMutatingIds` 才放行(2026-11-24 起)。
+ *
  * @param {{capability: object|null, args: unknown, turnContext: object,
- *          grant: {allowToolIds: Set<string>|null}}} input
+ *          grant: {allowToolIds: Set<string>|null, allowMutatingIds?: Set<string>|null}}} input
  * @returns {{ok: boolean, error?: {code: string, message: string}, capability?: object, args?: object}}
  */
 export function authorizeExecution({ capability, args, turnContext, grant }) {
@@ -206,7 +211,13 @@ export function authorizeExecution({ capability, args, turnContext, grant }) {
     return denial('DENIED', `工具 ${capability.id} 未获实例授权`);
   }
   if (capability.effect !== 'read-only') {
-    return denial('EFFECT_DENIED', `工具 ${capability.id} 是 ${capability.effect},首批只开放只读`);
+    // 只对**已登记为 mutating** 且被 `allowMutatingIds` 显式点名的 id 放行;其余 effect 仍拒。
+    const mutatingAllowed = capability.effect === 'mutating'
+      && grant?.allowMutatingIds instanceof Set
+      && grant.allowMutatingIds.has(capability.id);
+    if (!mutatingAllowed) {
+      return denial('EFFECT_DENIED', `工具 ${capability.id} 是 ${capability.effect},未获 allowMutatingIds 显式放行`);
+    }
   }
   const check = validateAgainstSchema(args, capability.inputSchema);
   if (!check.ok) return denial('INVALID_ARGUMENTS', check.reason);

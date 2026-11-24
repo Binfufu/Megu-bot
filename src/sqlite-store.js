@@ -2245,6 +2245,46 @@ export function openReadOnly(file) {
         text: String(row.text),
       }));
     },
+    // 世界档自有会话历史的只读读口(这张表 1.146.1 起由 own 引擎写;聊天记录/报表脚本用)。
+    //
+    // ⚠️ 与 `SqliteStateStore.conversationTurns` 是**同一张表的另一条读路**:那条按 key
+    //    精确读、给引擎拼前缀;这条按**会话前缀批量读**、带 key/at,并按时间正序返回,
+    //    好让脚本直接逐条打印。两条路读的是同一批行,不要各改各的 SQL(本方法末尾注释)。
+    // ⚠️ 参数**全部**走 prepared statement 绑定:调用方的前缀来自命令行,绝不能拼进 SQL。
+    //    `prefix` 转成 `LIKE prefix%`,其中 `%` / `_` / `\` 必须转义 —— 一个带 `_` 的前缀
+    //    会意外命中别的会话,读聊天正文时那是**隐私问题**,不只是查错了。
+    // ⚠️ 老库可能还没有这张表(还没被新版 bridge 打开过):如实回 `[]`,脚本/报表不炸
+    //    (与 outbound / metric_point 同一条纪律)。
+    conversationTurns: ({ key = null, prefix = null, since = 0, limit = 500 } = {}) => {
+      if (!db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'conversation_turn'").get()) return [];
+      const cap = Math.max(1, Math.min(2000, Number(limit) || 500));
+      const from = Number(since) || 0;
+      const exactKey = key === null || key === undefined ? null : String(key);
+      const prefixText = prefix === null || prefix === undefined ? null : String(prefix);
+      // ⚠️ LIKE 的通配符必须转义,`ESCAPE '\'` 在下面的 SQL 里声明;不转义就成了通配查询。
+      const likeParam = prefixText === null ? null : `${prefixText.replace(/[\\%_]/g, '\\$&')}%`;
+      // ⚠️ 这段 SQL 与 `SqliteStateStore.conversationTurns` 的读法一致(时间正序、limit 取最近),
+      //    但这里是**前缀**批量读;改口径时两处一起改(聊天记录与引擎前缀必须看到同一批行)。
+      const rows = db
+        .prepare(
+          `SELECT id, key, at, role, content, meta FROM conversation_turn
+            WHERE at >= ?
+              AND (? IS NULL OR key = ?)
+              AND (? IS NULL OR key LIKE ? ESCAPE '\\')
+            ORDER BY at DESC, id DESC LIMIT ?`,
+        )
+        .all(from, exactKey, exactKey, likeParam, likeParam, cap);
+      // DESC 取的是"最近 cap 条",翻回时间正序(与上面 limit 分支同一个先例)。
+      rows.reverse();
+      return rows.map((row) => ({
+        id: Number(row.id),
+        key: String(row.key),
+        at: Number(row.at),
+        role: String(row.role),
+        content: String(row.content),
+        meta: safeJson(row.meta),
+      }));
+    },
     // 指标(2026-10-02,D94)。⚠️ **老库可能没有 metric_point**(还没被新版 bridge 打开过):
     // 报表要如实说"这一版还没开始记",而不是抛错 —— 与上面 growth 那条同一个理由。
     hasMetricPoints: () => Boolean(

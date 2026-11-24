@@ -254,6 +254,12 @@ function createHarness({ source = readIndex(), kbEnabled = false, kbHit = false,
     storyKeyFor: () => 'fixture-story',
     noteGroupEngagement: () => {},
     rememberConversationImages: () => {},
+    // 2026-11-24：补图账新增「每条入站消息先编号」；这里只桩掉，决策测试不关心补图。
+    conversationImageCarry: { note: () => 0, sources: () => [] },
+    // 2026-11-24：搜本/搜图统一入口与工具运行时（入口切片会调到；这些测试只看决策传递）。
+    tryHandleSearchCommand: async () => false,
+    makeOutboundBudget: () => ({ seq: 0 }),
+    makeToolRuntime: () => null,
     carriedConversationSources: () => [],
     fetchImageBlocks: async () => [],
     moodFor: () => moodNote(),

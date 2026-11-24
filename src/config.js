@@ -884,6 +884,16 @@ function buildRuntimeConfig({ rootDir, envFile, loadedEnvFile }) {
           // mention — reply only when addressed (buffered context still used)
           // auto    — may also speak up on its own, subject to the gates below
           mode: (raw('QQBOT_GROUP_MODE') ?? 'mention').toLowerCase(),
+          // 非 @ 的群消息也触发「搜本/搜图」确定性指令（QQBOT_SEARCH_ANY_MESSAGE）。
+          // 默认 false = 只在 @ 时认（旧行为）；只对这两个组件生效，其它命令一律不扩。
+          commandsAnyMessage: asBool('QQBOT_SEARCH_ANY_MESSAGE', false),
+          // 非 @ 执行时"这是在叫别的 bot"的排除名（2026-11-24 审查 P1-3）：填**另一只角色**的
+          // 名字/别名，消息里出现就跳过非 @ 执行，避免一条写给别的 bot 的指令被这只执行。
+          // 空 = 不排除。只服务非 @ 命令分派，不影响模型聊天。
+          searchAnyIgnoreNames: (raw('QQBOT_SEARCH_ANY_IGNORE_NAMES') ?? '')
+            .split(',')
+            .map((entry) => entry.trim())
+            .filter(Boolean),
           contextSize: asInt('QQBOT_GROUP_CONTEXT', 15),
           // How long a buffered message stays eligible as context. In a quiet
           // group messages may be half an hour apart, and a short window would
@@ -1124,6 +1134,12 @@ function buildRuntimeConfig({ rootDir, envFile, loadedEnvFile }) {
           enabled: asBool('QQBOT_TOOLS', false),
           modelFunctionTools: asBool('QQBOT_TOOLS_MODEL_FN', false),
           allow: (raw('QQBOT_TOOLS_ALLOW') ?? '')
+            .split(',')
+            .map((entry) => entry.trim())
+            .filter(Boolean),
+          // **会发群消息/落文件的工具**（2026-11-24）：能力层默认只自动执行只读工具；
+          // 搜本/搜图这类"办完事会把结果发出去"的能力必须在这里再列一次，双清单缺一不给。
+          allowMutating: (raw('QQBOT_TOOLS_ALLOW_MUTATING') ?? '')
             .split(',')
             .map((entry) => entry.trim())
             .filter(Boolean),

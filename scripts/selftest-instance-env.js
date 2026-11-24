@@ -233,6 +233,14 @@ export function registerInstanceEnvTests({ test, assert = assertStrict }) {
     a.deepEqual(parsed.bots.megumin, {
       QQBOT_SELFCARE: '1',
       QQBOT_FEED_DB: 'E:/PersonalDSH/feed-lab/data/feed.db',
+      // 2026-11-24：两实例都开多功能组件工具（惠惠只有发图，搜本组件没开）。
+      QQBOT_TOOLS: '1',
+      QQBOT_TOOLS_MODEL_FN: '1',
+      QQBOT_TOOLS_ALLOW: 'meitu_send',
+      QQBOT_TOOLS_ALLOW_MUTATING: 'meitu_send',
+      QQBOT_TOOLS_MAX_ROUNDS: '2',
+      // 非 @ 只开在主实例（aris）：两只都开会重复执行/替对方执行（审查 P1-3）。
+      QQBOT_SEARCH_ANY_MESSAGE: '0',
     });
     // JM 搜本（2026-11-12 / 1.210.1）：只给爱丽丝开，且是显式全部群（`*`）——
     // 惠惠不拿到这两个键。`*` 不是"空 = 全开"，是写出来的选择。
@@ -241,6 +249,13 @@ export function registerInstanceEnvTests({ test, assert = assertStrict }) {
       QQBOT_FEED_QQ: '1',
       QQBOT_JM: '1',
       QQBOT_JM_GROUPS: '*',
+      QQBOT_TOOLS: '1',
+      QQBOT_TOOLS_MODEL_FN: '1',
+      QQBOT_TOOLS_ALLOW: 'jm_search,meitu_send',
+      QQBOT_TOOLS_ALLOW_MUTATING: 'jm_search,meitu_send',
+      QQBOT_TOOLS_MAX_ROUNDS: '2',
+      QQBOT_SEARCH_ANY_MESSAGE: '1',
+      QQBOT_SEARCH_ANY_IGNORE_NAMES: '惠惠,小惠,megumin',
     });
 
     const env = {};
@@ -249,7 +264,8 @@ export function registerInstanceEnvTests({ test, assert = assertStrict }) {
       file: REAL_OVERRIDE_FILE, envFile: MEGUMIN_ENV, env, log: () => {},
     });
     a.equal(real.reason, 'applied');
-    a.deepEqual(real.applied, ['QQBOT_SELFCARE', 'QQBOT_FEED_DB']);
+    a.deepEqual(real.applied, ['QQBOT_SELFCARE', 'QQBOT_FEED_DB', 'QQBOT_TOOLS', 'QQBOT_TOOLS_MODEL_FN',
+      'QQBOT_TOOLS_ALLOW', 'QQBOT_TOOLS_ALLOW_MUTATING', 'QQBOT_TOOLS_MAX_ROUNDS', 'QQBOT_SEARCH_ANY_MESSAGE']);
     a.equal(env.QQBOT_SELFCARE, '1');
     a.equal(env.QQBOT_FEED_DB, 'E:/PersonalDSH/feed-lab/data/feed.db');
     a.equal(Object.hasOwn(env, 'QQBOT_FEED_QQ'), false, '惠惠不投递盯梢私聊（那是爱丽丝的活）');
@@ -261,7 +277,14 @@ export function registerInstanceEnvTests({ test, assert = assertStrict }) {
       QQBOT_FEED_QQ: '1',
       QQBOT_JM: '1',
       QQBOT_JM_GROUPS: '*',
-    }, '爱丽丝只拿到盯梢库、推送开关与 JM 全群开关，不共享惠惠的开关');
+      QQBOT_TOOLS: '1',
+      QQBOT_TOOLS_MODEL_FN: '1',
+      QQBOT_TOOLS_ALLOW: 'jm_search,meitu_send',
+      QQBOT_TOOLS_ALLOW_MUTATING: 'jm_search,meitu_send',
+      QQBOT_TOOLS_MAX_ROUNDS: '2',
+      QQBOT_SEARCH_ANY_MESSAGE: '1',
+      QQBOT_SEARCH_ANY_IGNORE_NAMES: '惠惠,小惠,megumin',
+    }, '爱丽丝拿到盯梢库、推送开关、JM 全群开关、双组件工具放行与非 @ 排除名');
   });
 
   test('instance env: zone-manifest 把覆盖文件登记为 C 区私有内容', () => {

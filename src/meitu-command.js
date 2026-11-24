@@ -64,7 +64,30 @@
  *
  * ⚠️ 除「涩图档的未成年外观标签黑名单 fail-closed」之外**不加任何内容限制** ——
  *    人外、mature 之类的旧白名单**不搬**(主人明确说不要擅自加限制)。
+ *
+ * 2026-11-24「命令路由」收口补的两条边界(都只是为了**不再把找本的指令当发图**):
+ *   · 导出 `hasImageTarget(text)`:图像目标名词的唯一一份词表,供 `src\command-router.js` 复用;
+ *   · 残缺指令**兜底闸**:剩余段有书/媒体名词、没有图像名词(「来点本子」「来点作者甲的本子」)
+ *     → 这条不认,返回 null 交回路由/模型;不能靠 service 查不到角色后随机发图。
  */
+import { hasBookTarget } from './jm-command.js';
+
+/**
+ * **图像目标名词**(目标名词闸的图像侧唯一词表)。
+ * 与 `src\jm-command.js` 的 `hasBookTarget` 分工:那边判书/媒体目标,这边判图像目标,
+ * 两边各一份、由 router 同时引用 —— 不在 router 里再抄第二张表。
+ * 「图」是总类,其余是更具体的写法(有人写成「照片/壁纸/截图」)。
+ */
+const IMAGE_TARGET_NOUNS = [
+  '擦边图', '涩图', '色图', '美图', '图片', '图集', '图', '照片', '壁纸', '截图',
+];
+
+/** 文本里有没有**图像目标名词**(纯函数、零 IO;目标名词闸的图像侧判定)。 */
+export function hasImageTarget(text) {
+  const value = String(text ?? '').normalize('NFKC');
+  if (!value) return false;
+  return IMAGE_TARGET_NOUNS.some((noun) => value.includes(noun));
+}
 
 /**
  * 修饰词 → 标签。顺序有意义:「足控」要先于「足」,否则只切出「足」以外的部分;
@@ -875,6 +898,10 @@ function parseFromStart(normalized, max) {
   // ② 残缺指令:动词 + (数量可省) + 张,剩余段尽力提取;提取不到角色 = 随机。
   const flex = FLEX_RE.exec(normalized);
   if (flex) {
+    // 2026-11-24 兜底闸(命令路由的交叉闸在解析器内的一道保险):剩余段有书/媒体名词、
+    // 没有图像名词 → 这是找本的指令,不是发图(「来点本子」「来点作者甲的本子」「来点全彩的本」)。
+    // 返回 null 不是“格式错误”,所以不会回发图格式提示,也不会落到随机角色。
+    if (hasBookTarget(flex[2]) && !hasImageTarget(flex[2])) return null;
     const count = parseCount(flex[1]);
     if (!Number.isSafeInteger(count) || count <= 0) return { ok: false, reason: 'count' };
     const rest = parseFlexRest(flex[2]);
