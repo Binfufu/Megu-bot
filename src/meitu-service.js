@@ -159,7 +159,9 @@ export function spawnMeituFetch({ args, env, timeoutMs = 90_000, cwd = ROOT_DIR 
   });
 }
 
-function allowGroup(groups, groupId) {
+// ⚠️ 2026-11-24 导出：装配层给模型发工具前要先判"这个群开没开美图"，
+// 判定必须与命令入口共用这一份（不许在 index.js 再抄一张名单语义）。
+export function allowGroup(groups, groupId) {
   if (groups instanceof Set) return groups.has(groupId);
   if (Array.isArray(groups)) return groups.includes(groupId);
   return false;

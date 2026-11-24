@@ -197,6 +197,9 @@ export function createConfigParamDefinitions(parsers) {
   boolean('QQBOT_TOOLS', false);
   boolean('QQBOT_TOOLS_MODEL_FN', false);
   nonnegative('QQBOT_TOOLS_MAX_ROUNDS', 3);
+  // 非 @ 的群消息也允许触发「搜本/搜图」的确定性指令（2026-11-24 主人拍板：普通用户
+  // 不会每次都 @；只服务这两个组件，不扩到其它命令）。默认关 = 旧行为。
+  boolean('QQBOT_SEARCH_ANY_MESSAGE', false);
   nonnegative('QQBOT_SEARCH_TIMEOUT_SECONDS', 20);
   nonnegative('QQBOT_SEARCH_DAILY_LIMIT_CNY', 1);
   boolean('QQBOT_NARRATION', false);
@@ -361,7 +364,8 @@ export function createConfigParamDefinitions(parsers) {
   };
   for (const id of ['QQBOT_ALLOWLIST', 'QQBOT_IDS', 'QQBOT_SELF_GROUP_IDS', 'QQBOT_MEITU_GROUPS',
     'QQBOT_JM_GROUPS',
-    'QQBOT_GROUP_IGNORE_IDS', 'QQBOT_ADMIN_IDS', 'QQBOT_TOOLS_ALLOW', 'QQBOT_WEBFETCH_ALLOW',
+    'QQBOT_GROUP_IGNORE_IDS', 'QQBOT_ADMIN_IDS', 'QQBOT_TOOLS_ALLOW', 'QQBOT_TOOLS_ALLOW_MUTATING',
+    'QQBOT_WEBFETCH_ALLOW', 'QQBOT_SEARCH_ANY_IGNORE_NAMES',
     'QQBOT_STRIP_NAME_LABELS', 'QQBOT_PANEL_ALLOWED_HOSTS', 'QQBOT_ACCOUNTS_STAFF']) {
     complex(id, id === 'QQBOT_IDS' ? undefined : [], csv, {
       scope: ['QQBOT_ALLOWLIST', 'QQBOT_IDS', 'QQBOT_SELF_GROUP_IDS', 'QQBOT_ADMIN_IDS', 'QQBOT_PANEL_ALLOWED_HOSTS', 'QQBOT_ACCOUNTS_STAFF'].includes(id) ? 'deployment' : 'runtime',

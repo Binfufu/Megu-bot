@@ -230,8 +230,11 @@ function queueStateFor(groupId) {
  * 群白名单判定。**空名单 = 谁都不给（fail closed）**，这是默认且不变的口径。
  *
  * 显式「全部群」只有一种写法：名单里含 `*`。
+ *
+ * ⚠️ 2026-11-24 导出：装配层给模型发工具前要先判"这个群开没开搜本"，判定必须
+ * 与命令入口共用这一份（不许在 index.js 再抄一张名单语义）。
  */
-function allowGroup(groups, groupId) {
+export function allowGroup(groups, groupId) {
   if (groups instanceof Set) return groups.has('*') || groups.has(groupId);
   if (Array.isArray(groups)) return groups.includes('*') || groups.includes(groupId);
   return false;
@@ -1004,8 +1007,10 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
 
         // 模糊搜本（「搜原神的本子」「来个莉音的本」）是新入口：只给清单，
         // 不沿用普通搜索“唯一命中自动下载”的旧行为，避免用户还没选就发文件。
+        // 2026-11-24 审查 P1-2：模型工具 `jm_search` 也承诺“只给清单”，用 `listOnly:true`
+        // 走同一个闸 —— 否则唯一命中会在模型只想要候选时直接发 PDF。
         const autoSingle = results.length === 1 && siteTotal === 1
-          && !parsed.countGiven && parsed.fuzzy !== true;
+          && !parsed.countGiven && parsed.fuzzy !== true && parsed.listOnly !== true;
         if (autoSingle) {
           const hit = results[0];
           // 单本也要先解析单元：多单元作品不能整本下。

@@ -60,8 +60,10 @@ export const DEFAULT_JM_MAX = 5;
 export const MAX_JM_KEYWORD_CHARS = 60;
 
 /** 搜索动词与下载动词。⚠️ 同义写法只在这里加一处，`looksLikeJmAttempt` 自动跟上。 */
-// 有分隔的「找本子」是别名；无分隔的「找本子宫」仍按「找本 子宫」解析。
-const SEARCH_VERBS = '搜本|找本子(?=\\s|$)|找本|搜索本子';
+// 有分隔的「搜本子/找本子」是别名；无分隔的「搜本子宫」仍按「搜本 子宫」解析
+// （2026-11-24：补上「搜本子」—— 以前「搜本子 全彩」被「搜本」咬走，关键词变成「子 全彩」）。
+// 长词必须排在前：「搜本子」先于「搜本」，「搜索本子」先于「搜本」。
+const SEARCH_VERBS = '搜索本子|搜本子(?=\\s|$)|搜本|找本子(?=\\s|$)|找本';
 const DOWNLOAD_VERBS = '下本|下载本子|下载本';
 const SEARCH_COMMAND_RE = new RegExp(`^(?:${SEARCH_VERBS})\\s*(.*)$`, 'su');
 const DOWNLOAD_COMMAND_RE = new RegExp(`^(?:${DOWNLOAD_VERBS})\\s*(.*)$`, 'su');
@@ -126,6 +128,28 @@ function splitKeyValue(token) {
   const match = /^([^:：]+)[:：](.*)$/u.exec(String(token ?? ''));
   if (!match) return null;
   return { key: match[1].normalize('NFKC').trim(), value: match[2].trim() };
+}
+
+/**
+ * **粘连键**：`标签全彩` / `作者甲` / `页码2`（2026-11-24，命令路由收口现场写法）。
+ * 只认「条件键（最长优先）+ 直接跟值」，值不能为空，不做子串扫描。
+ * ⚠️ 换来的代价：`标题党` 会当成 title=党、`作品集` 当成 original=集 —— 这是“用户把键和值
+ *    粘在一起”的既有语义；按条件走比把整段当关键词（搜出 0 条）更容易解释。
+ * @returns {{field: string, key: string, value: string}|null}
+ */
+function splitGluedCondition(token) {
+  const raw = String(token ?? '').normalize('NFKC').trim();
+  if (!raw) return null;
+  // 长键先试：「作者名」先于「作者」、「tags」先于「tag」。
+  const candidates = [...STRUCTURED_FIELDS.keys(), ...PAGE_KEYS].sort((a, b) => b.length - a.length);
+  for (const key of candidates) {
+    if (!raw.startsWith(key) || raw.length === key.length) continue;
+    const value = raw.slice(key.length).trim();
+    if (!value) continue;
+    const field = structuredField(key);
+    return field ? { field, key, value } : { field: 'page', key, value };
+  }
+  return null;
 }
 
 /**
@@ -203,6 +227,26 @@ function parseStructuredSearchRest(body) {
         return { ok: false, reason: 'page' };
       }
       i += 1;
+      continue;
+    }
+
+    // 粘连键（2026-11-24）：「搜本 标签全彩」「搜本作者甲」—— 键和值之间没写冒号/空格。
+    // 必须排在“裸条件键”和页码之后：单独一个「标签」仍是明确的格式错误。
+    const glued = splitGluedCondition(token);
+    if (glued) {
+      if (glued.field === 'page') {
+        if (!/^\d+$/u.test(glued.value) || !setPage(glued.value)) return { ok: false, reason: 'page' };
+        continue;
+      }
+      const value = glued.value.normalize('NFKC').trim();
+      if (!value || Array.from(value).length > MAX_STRUCTURED_VALUE_CHARS) {
+        return { ok: false, reason: 'format', field: glued.key };
+      }
+      const list = conditions[glued.field] ?? [];
+      if (list.length >= 5) return { ok: false, reason: 'format', field: glued.key };
+      list.push(value);
+      conditions[glued.field] = list;
+      hasCondition = true;
       continue;
     }
 
@@ -303,6 +347,70 @@ const FUZZY_STOP_WORDS = new Set([
   '随便', '好看', '不错', '那个本', '这个本',
 ]);
 
+/**
+ * **书/媒体目标名词**（2026-11-24，命令路由的目标名词闸）：
+ * 「目标名词闸」判定“这句话在找书还是找图”时，书侧只有这一份词表；
+ * 图像侧对应 `src\meitu-command.js` 的 `hasImageTarget`（各自一份，供 router 复用，不互相抄）。
+ * 裸「本」不写在这里 —— 它必须过上面的 `FUZZY_BEN_COMPOUNDS` 复合词护栏（日本/成本/剧本…）。
+ *
+ * ⚠️ 2026-11-24 审查 P2-2：裸 `书` / `漫画` 太宽（`来张秘书图`、`来张书签图`、`来点漫画风图`
+ * 会被判成「书+图」两边都有 → 误澄清）。这里只保留**本身就像书/媒体目标**的名词：
+ * `本子/单行本/同人本/漫画书/画集/资源`；裸「书」「漫画」不再算目标（宁可当闲聊/不认）。
+ */
+const BOOK_TARGET_NOUNS = ['本子', '单行本', '同人本', '漫画书', '画集', '资源'];
+
+/**
+ * `index` 处的「本」是不是**复合词**的一部分（复用 `FUZZY_BEN_COMPOUNDS`，不另写词表）。
+ * 做法 = 枚举包含这个「本」的 2..4 字子串，命中词表就算复合词（「日本」「成本」「笔记本」
+ * 「笔记本子」「剧本」都在表里）。词表最大就是 4 字，所以不需要更长。
+ */
+function isBenCompoundAt(text, index) {
+  const value = String(text ?? '');
+  if (value[index] !== '本') return false;
+  for (let length = 2; length <= 4; length += 1) {
+    for (let start = Math.max(0, index - length + 1); start <= index; start += 1) {
+      const chunk = value.slice(start, start + length);
+      if (chunk.length === length && FUZZY_BEN_COMPOUNDS.has(chunk)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 文本里有没有**书/媒体目标**（命令路由的目标名词闸；纯函数、零 IO）。
+ *
+ * 只判“提到了书/媒体名词”，不判“是不是命令” —— 「这个本子不错」也算提到了本子，
+ * 由上面的命令形状闸（strict/fuzzy/自然句式/`looksLikeJmAttempt`）决定它是不是指令。
+ * 复合词护栏复用 `FUZZY_BEN_COMPOUNDS`：日本 / 本来 / 成本 / 基本 / 老板本来 / 剧本 都不算。
+ *
+ * @param {string} text 消息正文
+ * @returns {boolean}
+ */
+export function hasBookTarget(text) {
+  const normalized = normalizeCommandText(text);
+  if (!normalized) return false;
+  for (const noun of BOOK_TARGET_NOUNS) {
+    let from = 0;
+    for (;;) {
+      const at = normalized.indexOf(noun, from);
+      if (at === -1) break;
+      // 「本子」的「本」在词首；「单行本/同人本」的「本」在词尾 —— 复合词检查要指到「本」上。
+      const benIndex = noun === '本子' ? at : at + noun.length - 1;
+      if ((noun === '本子' || noun.endsWith('本')) && isBenCompoundAt(normalized, benIndex)) {
+        from = at + 1;
+        continue;
+      }
+      return true;
+    }
+  }
+  for (let i = 0; i < normalized.length; i += 1) {
+    if (normalized[i] !== '本') continue;
+    if (isBenCompoundAt(normalized, i)) continue;
+    return true;
+  }
+  return false;
+}
+
 /** 关键词开头若是这些，说明更像“看了/说过/想知道”的闲聊，而不是下指令。 */
 const FUZZY_CHAT_PREFIXES = /^(?:了|过|着|完|到|说|讲|聊|起|觉|知道|看过|看看|瞧瞧)/u;
 
@@ -357,7 +465,7 @@ function cleanFuzzyKeyword(raw, marker) {
  *            fuzzy:true} | {ok:false, reason:'format'} | null}
  */
 export function parseJmFuzzyCommand(text, { max = DEFAULT_JM_MAX } = {}) {
-  const normalized = normalize(text);
+  const normalized = normalizeCommandText(text);
   if (!normalized || Array.from(normalized).length > FUZZY_MAX_INPUT_CHARS) return null;
   // 显式搜本的编号清单已经被严格入口拒绝；末尾「本」是目标后缀，不是模糊请求。
   const search = SEARCH_COMMAND_RE.exec(normalized);
@@ -456,8 +564,12 @@ function stripTrailingMentions(text) {
   return out;
 }
 
-/** 归一化：去装饰性标点与残留 @。返回空串 = 没有可用正文。 */
-function normalize(text) {
+/**
+ * 归一化：去装饰性标点与残留 @。返回空串 = 没有可用正文。
+ * 2026-11-24 起对外导出（`normalizeCommandText`）：命令路由与需求方要按同一个口径
+ * 判“这条正文算不算一条指令”，不能各自 trim 一遍。
+ */
+export function normalizeCommandText(text) {
   let out = String(text ?? '')
     .trim()
     .replace(/^[，,、;；\s]+/u, '')
@@ -585,7 +697,7 @@ function parseDownloadRest(rest) {
  *   | {ok: false, reason: 'format'|'count'|'keyword'|'page'|'unsupported'|'tooMany'|'useDownload', field?: string}}
  */
 export function parseJmCommand(text, { max = DEFAULT_JM_MAX } = {}) {
-  const normalized = normalize(text);
+  const normalized = normalizeCommandText(text);
   if (!normalized) return { ok: false, reason: 'format' };
 
   // 「搜本子」「找本子」没有关键词：不能把动词后面的「子」当关键词搜出去。
@@ -593,6 +705,17 @@ export function parseJmCommand(text, { max = DEFAULT_JM_MAX } = {}) {
 
   const pack = parsePackCommand(normalized);
   if (pack) return pack;
+
+  // 2026-11-24 真实群语料（c106）：「下这个JM1485799」「下那张 12345」——用户不会照
+  // 帮助写「下本」；带指示词的下载简写按同一份目标解析走。
+  const downloadShorthand = /^(?:下|下载)\s*(?:这个|那张|这条|这个本子|这本|这一本|那个)\s*(.+)$/u.exec(normalized);
+  if (downloadShorthand) return parseDownloadRest(downloadShorthand[1]);
+
+  // 2026-11-24 真实群语料（c106）：「搜作者kusui」「查标签全彩」——省掉「本」的写法。
+  // 只认明确的**结构化条件键**开头，仍交给 parseSearchRest 解析（字段/AND/页码一份实现）。
+  if (/^(?:搜|找|查)\s*(?:作者名|作者|画师|原作|作品|角色|人物|标签名|标签|标题)(?=\S)/u.test(normalized)) {
+    return parseSearchRest(normalized.replace(/^(?:搜|找|查)\s*/u, ''));
+  }
 
   const search = SEARCH_COMMAND_RE.exec(normalized);
   if (search) return parseSearchRest(search[1], max);
@@ -613,7 +736,7 @@ export function parseJmCommand(text, { max = DEFAULT_JM_MAX } = {}) {
  * @param {string} text
  */
 export function looksLikeJmAttempt(text) {
-  return ATTEMPT_RE.test(normalize(text));
+  return ATTEMPT_RE.test(normalizeCommandText(text));
 }
 
 /** 字段规范名 → 中文标签；近失提示与帮助文案共用这一处，避免再抄第二份名单。 */
@@ -675,7 +798,7 @@ function nearestFieldKey(key) {
  * @returns {{kind:'field', field:string, alias:string, value:string}|null}
  */
 export function suggestJmSyntax(text) {
-  const normalized = normalize(text);
+  const normalized = normalizeCommandText(text);
   if (!normalized) return null;
   const tokens = normalized.split(/\s+/u).filter(Boolean);
   for (let i = 0; i < tokens.length; i += 1) {

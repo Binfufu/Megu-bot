@@ -117,6 +117,8 @@ try {
       'src/meitu-alias.js', 'src/meitu-command.js', 'src/meitu-interpret.js', 'src/meitu-service.js',
       // JM 搜本/下本（默认关闭）：命令解析、服务层与网络边界 CLI，公开套件只注入假 fetch
       'src/jm-command.js', 'src/jm-service.js', 'scripts/jm-fetch-one.mjs', 'scripts/selftest-jm.js',
+      // 2026-11-24：搜本/搜图统一路由（jm 接线哨兵要读它）+ 组件工具适配层
+      'src/command-router.js', 'src/search-tools.js',
       // 通用本地目录收藏（JM 子功能）：SQLite 数据层、纯解析、服务层、JM 适配器与公开套件
       'src/catalog-store.js', 'src/catalog-command.js', 'src/catalog-service.js',
       'src/jm-catalog.js', 'scripts/selftest-catalog.js',

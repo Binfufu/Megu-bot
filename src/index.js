@@ -158,12 +158,16 @@ import { parseSummarySessionMeta, pickSummarySession, summarySessionKey, SUMMARY
 import { planReset } from './reset-reply.js';
 // 代码层发美图(2026-10-23):「发N张<角色>美图」——解析与发送都不经过模型。
 import { looksLikeMeituAttempt, parseMeituCommand } from './meitu-command.js';
-import { handleMeituCommand, describeMeituTask } from './meitu-service.js';
+import { handleMeituCommand, describeMeituTask, allowGroup as meituAllowGroup } from './meitu-service.js';
 import { createMeituInterpreter } from './meitu-interpret.js';
 // 代码层 JM 搜本/下本(2026-11-12):「搜本/找本 <关键词>」「下本 <编号|序号>」。
 // 与搬图同构:纯解析 + 服务层 + 独立网络子进程 CLI;默认关闭,开启前先部署 JM 边车服务。
 import { looksLikeJmAttempt, parseJmCommand, parseJmFuzzyCommand } from './jm-command.js';
-import { buildJmParseFailureReply, handleJmCommand } from './jm-service.js';
+import { buildJmParseFailureReply, handleJmCommand, allowGroup as jmAllowGroup } from './jm-service.js';
+// 搜本/搜图统一意图路由(2026-11-24):「目标名词闸 + 解析器复用」都在那一个纯函数里。
+import { allowsNonMentionTrigger, routeSearchCommand } from './command-router.js';
+// 多功能组件工具(2026-11-24):让模型在聊天里能真正调用搜本/发图（复用 capabilities + 服务层）。
+import { buildSearchTools, SEARCH_TOOL_IDS } from './search-tools.js';
 // 通用目录收藏（2026-11-17）：作为 JM 搬本的子功能接入；父组件关闭时整段不进入。
 import { looksLikeCatalogAttempt, parseCatalogCommand } from './catalog-command.js';
 import { DEFAULT_CATALOG_LINES } from './catalog-service.js';
@@ -1103,6 +1107,26 @@ export async function main() {
    * 所以"咏唱分句 + 结束词"总数不能超过它 —— 见 `explosionBeatsMax`。
    */
   const MAX_PASSIVE_SEQ = 5;
+
+  /**
+   * 搜本/搜图工具可用时的表达要求（2026-11-24）。
+   *
+   * 现场问题：模型在没有工具时经常「嘴上说正在搜，实际只是在聊天」。工具接上以后，
+   * 这条要求必须随轮注入 —— 要搜就**真的调工具**（工具会把清单/图片发到群里），
+   * 不搜就别装。只在工具这一轮真的可用时才加（不占普通闲聊的 token）。
+   */
+  const SEARCH_TOOLS_NOTE = '需要搜本/搜图时**调用对应工具**（jm_search / meitu_send）真正去办；'
+    + '工具会把清单/图片发到群里。不要只口头说「正在搜」。用不着就别调用。';
+
+  /**
+   * 搜本/搜图歧义澄清（2026-11-24）：目标名词书/图两边都有、或明显是命令却分不出边，
+   * **只问一句不猜**——猜错边的代价是"要本子结果发来一张图"。
+   */
+  const SEARCH_CLARIFY_LINE = '你是想搜本子还是搜图？搜本发「搜本 关键词」，要图发「来张角色图」。';
+  /** 只说了找书、没给关键词（「来点本子」）。 */
+  const SEARCH_KEYWORD_LINE = '想搜什么本子？发「搜本 关键词」就行。';
+  /** 美图格式提示（沿用旧文案，字数与判据不变）。 */
+  const MEITU_FORMAT_LINE = '格式：<发/来/找><N>张<角色名或「随机」><美图/涩图>，要<足控/胸控/单人/多人等>的';
 
   /**
    * 滚动摘要那一拍往回扫多少条 `stats_event`(1.106.4 / D176)。
@@ -2393,25 +2417,199 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       log.info('[工具] 搜索凭据不可用(bot slot 未配好且未显式配置),web_search/web_fetch 不注册');
     }
   }
-  const toolGrant = { allowToolIds: new Set(config.policy.tools?.allow ?? []) };
+  // ---------------------------------------------------------------------------
+  // **多功能组件工具**(2026-11-24):搜本/发图这类"办完事会把结果发到群里"的能力。
+  // 目的＝模型在普通聊天里也能真正开搜（不再只嘴上说"正在搜"），与命令入口共用
+  // 同一套服务层判定(群名单/冷却/被动槽位/失败话术都在服务层，这里只做参数归一 + 调用)。
+  // 默认关；开 = `QQBOT_TOOLS=1` + `QQBOT_TOOLS_MODEL_FN=1` + 双清单：
+  // `QQBOT_TOOLS_ALLOW`(能不能见/调) ∩ `QQBOT_TOOLS_ALLOW_MUTATING`(会发消息是否放行)。
+  // 不配 = 一个组件工具都不发，行为与 1.212.4 完全一致。
+  const SEARCH_TOOL_ID_SET = new Set(Object.values(SEARCH_TOOL_IDS));
+  /** 工具协议不被模型接受 → 本进程不再发工具（engine 已先自动降级一次并回调这里）。 */
+  let toolsProtocolUnsupported = false;
+  /** 降级次数：错误体没提工具时，同一种 400 出现第二次才进程级关闭（审查 P2-11）。 */
+  let toolsDowngradeCount = 0;
+  /** 本轮模型侧的被动槽位计数：工具先发、最终回复接着数，避免都挤在 seq=1。 */
+  function makeOutboundBudget() { return { seq: 0 }; }
+  /**
+   * 工具运行的"本轮上下文"：消息 / 发送口 / 槽位账。只给组件工具用；
+   * 网页聊天等没有 QQ 消息的场景不传 ⇒ 这一轮组件工具不发。
+   */
+  function makeToolRuntime(message, outbound) {
+    return {
+      message,
+      outbound,
+      /** 工具发送口＝**出站唯一咽喉** sendChunked；用掉的被动槽位回报给本轮账本。 */
+      reply: (text, opts = {}) => {
+        const startSeq = Number.isSafeInteger(outbound?.seq) ? outbound.seq : 0;
+        return sendChunked(message, text, {
+          ...opts,
+          startSeq,
+          active: false,
+          onPassiveSent: (seq) => {
+            if (Number.isSafeInteger(seq)) outbound.seq = Math.max(outbound?.seq ?? 0, seq);
+          },
+        });
+      },
+    };
+  }
+  /** 该群此刻能不能用搜本/发图工具（组件开 + 群名单放行；与命令入口共用 allowGroup）。 */
+  function jmToolAvailableForGroup(groupId) {
+    return Boolean(config.jm?.enabled) && jmAllowGroup(config.jm?.groups, String(groupId ?? ''));
+  }
+  function meituToolAvailableForGroup(groupId) {
+    return Boolean(config.meitu?.enabled) && meituAllowGroup(config.meitu?.groups, String(groupId ?? ''));
+  }
+  /** jm_search 的装配层 handler：parsed 已由 search-tools 归一，这里只调服务层并回结构化结果。 */
+  async function runJmSearchTool(parsed, ctx) {
+    const runtime = ctx?.runtime;
+    if (!runtime?.message) return { ok: false, error: { code: 'UNAVAILABLE', message: '没有可用的发送上下文' } };
+    const result = await handleJmCommand({
+      message: runtime.message,
+      parsed,
+      deps: {
+        config,
+        log,
+        uploadFile: (args) => api.uploadFile(args),
+        sendMedia: (args) => api.sendMedia(args),
+        reply: (text, opts) => runtime.reply(text, opts),
+      },
+    });
+    return {
+      ok: result?.ok !== false,
+      data: {
+        action: parsed?.action ?? null,
+        reason: result?.reason ?? null,
+        note: '搜索结果/回执已由代码按既定格式发到群里；用一句话自然接住即可，不要重复列清单。',
+      },
+    };
+  }
+  /** meitu_send 的装配层 handler：与命令入口同一条 handleMeituCommand 链路。 */
+  async function runMeituTool(parsed, ctx) {
+    const runtime = ctx?.runtime;
+    if (!runtime?.message) return { ok: false, error: { code: 'UNAVAILABLE', message: '没有可用的发送上下文' } };
+    const message = runtime.message;
+    // ⚠️ 2026-11-24 审查 P0：`outbound` 是 turn 闭包里的局部变量，`runMeituTool` 看不到；
+    //    必须从逐轮 runtime 拿。少了这一行，真实发图会在 sendMedia 里 ReferenceError，
+    //    被服务层当"单张失败"吞掉 → 工具永远发不出图（静默功能失效）。
+    const outbound = runtime.outbound ?? { seq: 0 };
+    const meituScope = `group:${message.targetId}`;
+    actionLog.record(meituScope, {
+      kind: 'meitu', taskId: null, status: 'running',
+      text: describeMeituTask({ status: 'running', originText: '(模型工具调用)' }),
+    });
+    const result = await handleMeituCommand({
+      message,
+      parsed,
+      deps: {
+        config,
+        log,
+        uploadFile: (args) => api.uploadFile(args),
+        // 图片由服务层自己发（它不知道本轮的共享槽位账），这里包一层：
+        // · 还有被动名额 → 用 `outbound.seq + 1` 接着数；
+        // · 名额用完 → 去掉 msgId 转主动（与 sendChunked 同口径）。
+        sendMedia: async (args) => {
+          const wantPassive = args?.msgId !== undefined && args.msgId !== null
+            && (outbound.seq ?? 0) < MAX_PASSIVE_SEQ;
+          const body = await api.sendMedia(wantPassive
+            ? { ...args, msgSeq: (outbound.seq ?? 0) + 1 }
+            : { scene: args.scene, openid: args.openid, fileInfo: args.fileInfo });
+          if (wantPassive) outbound.seq = (outbound.seq ?? 0) + 1;
+          return body;
+        },
+        // 搬图服务要"发出去几条"(number)；sendChunked 带 onPassiveSent 时回 `{sent}`，
+        // 在这里转成数字，保持服务层旧约定。
+        reply: async (text, opts) => {
+          const sent = await runtime.reply(text, opts);
+          return Number.isSafeInteger(sent?.sent) ? sent.sent : (Number(sent) || 0);
+        },
+        gallery: meituGallery,
+        recordMediaLink: (entry) => stateStore.recordMediaLink({
+          bot: gateway.botName || 'bot', scene: 'group', target: message.targetId,
+          outboundId: entry?.outboundId, itemSeq: entry?.itemSeq, kind: 'meitu',
+          md5: entry?.md5, source: entry?.source, sourceId: entry?.sourceId,
+        }),
+        interpretCommand: (input) => createMeituInterpreter({
+          llm: llmSettings.scoped('bot'),
+          requestOptions: config.engine.requestOptions,
+          store: stateStore,
+          key: sessionIdFor(message),
+          log,
+        })(input),
+      },
+    });
+    const task = result?.task ?? null;
+    actionLog.record(meituScope, {
+      kind: 'meitu', taskId: task?.taskId ?? null, status: task?.status ?? 'failed',
+      originText: task?.originText ?? '(模型工具调用)',
+      resolved: task?.resolved ?? null, requested: task?.requested ?? null,
+      sent: task?.sent ?? 0, failed: task?.failed ?? 0, reason: task?.reason ?? null,
+      text: describeMeituTask(task) ?? `搬图结束（${result?.reason ?? 'unknown'}）`,
+    });
+    return {
+      ok: result?.ok !== false,
+      data: {
+        reason: result?.reason ?? null,
+        sent: task?.sent ?? 0,
+        note: '图片/回执已由代码层发到群里；用一句话自然接住即可。',
+      },
+    };
+  }
+  if (config.policy.tools?.enabled && (config.jm?.enabled || config.meitu?.enabled)) {
+    const built = buildSearchTools({
+      defineCapability,
+      handlers: {
+        jmSearch: (parsed, ctx) => runJmSearchTool(parsed, ctx),
+        meituSend: (parsed, ctx) => runMeituTool(parsed, ctx),
+      },
+    });
+    for (const cap of built) {
+      if (cap.id === SEARCH_TOOL_IDS.jmSearch && !config.jm?.enabled) continue;
+      if (cap.id === SEARCH_TOOL_IDS.meituSend && !config.meitu?.enabled) continue;
+      toolRegistry.push(cap);
+    }
+    const componentIds = toolRegistry.filter((cap) => SEARCH_TOOL_ID_SET.has(cap.id)).map((cap) => cap.id);
+    if (componentIds.length > 0) log.info(`[工具] 已注册多功能组件能力:${componentIds.join('、')}`);
+  }
+  const toolGrant = {
+    allowToolIds: new Set(config.policy.tools?.allow ?? []),
+    // 会发群消息/发文件的工具必须**第二道清单**显式放行（能力层默认只自动执行只读）。
+    allowMutatingIds: new Set(config.policy.tools?.allowMutating ?? []),
+  };
   /**
    * 这一轮的工具上下文(engine 第 5 参)。**关闭/不可用 = null,引擎行为一字不变**。
    * ⚠️ 判据顺序 = 能力等式的实例侧落地:总闸 → 模型已验证 → 协议兼容 → 有能力可给 → 授权后非空。
+   * `runtime` = 带 QQ 消息/发送口的一轮上下文（组件工具必需；网页聊天不传 ⇒ 不发组件工具）。
    */
-  function buildToolContext(message, conversationKey) {
+  function buildToolContext(message, conversationKey, runtime = null) {
     const toolsCfg = config.policy.tools ?? {};
     if (!toolsCfg.enabled) return null;
     if (toolsCfg.modelFunctionTools !== true) return null;
+    if (toolsProtocolUnsupported) return null;
     if (toolRegistry.length === 0) return null;
-    // **日额度闸**(1¥/日,2026-10-28 主人拍板):花完当日不给(省 token,模型也不问),
-    // execute 里还有第二道(防竞态);次日自愈。
-    if (toolBudget && !toolBudget.canSpend()) return null;
     // 协议闸:Responses 路当前不发工具(适配器未实现,发了会 400 —— 见 llm.js)。
     try {
       if (isResponsesApi(llmSettings.get('bot')?.baseUrl ?? '')) return null;
     } catch {
       return null; // 模型没配好 → 没有工具(主流程自己的 fail fast 会管)
     }
+    // **日额度闸**只针对计费工具（web 搜索）；组件工具 costCny=0，不该被搜索额度连坐。
+    // 超限时把计费能力剔掉；它们 execute 里还有第二道（防竞态），次日自愈。
+    const spendable = toolBudget ? toolBudget.canSpend() : false;
+    const groupId = String(message?.targetId ?? '');
+    const capabilities = toolRegistry
+      .filter((cap) => (cap.costCny > 0 ? spendable : true))
+      .filter((cap) => {
+        if (cap.id === SEARCH_TOOL_IDS.jmSearch) return runtime !== null && jmToolAvailableForGroup(groupId);
+        if (cap.id === SEARCH_TOOL_IDS.meituSend) return runtime !== null && meituToolAvailableForGroup(groupId);
+        return true;
+      })
+      // 把本轮 runtime 注入每个 execute（模型看不到它；只在服务调用里用）。
+      .map((cap) => (runtime === null ? cap : Object.freeze({
+        ...cap,
+        execute: (args, ctx) => cap.execute(args, { ...ctx, runtime }),
+      })));
+    if (capabilities.length === 0) return null;
     const turnContext = turnContextFor({
       botId: gateway.botName || 'bot',
       actorId: message?.senderId ?? null,
@@ -2420,13 +2618,30 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       purpose: 'chat',
     });
     const tools = advertisedTools({
-      capabilities: toolRegistry,
+      capabilities,
       turnContext,
       grant: toolGrant,
       modelCaps: { functionTools: true },
     });
     if (tools.length === 0) return null;
-    return { tools, capabilities: toolRegistry, grant: toolGrant, turnContext, maxRounds: toolsCfg.maxRounds };
+    return {
+      tools, capabilities, grant: toolGrant, turnContext, maxRounds: toolsCfg.maxRounds,
+      // engine 侧：带 tools 的请求被 400/422 拒掉时先降级重试；成功则回调这里。
+      // 2026-11-24 审查 P2-11：只有错误体明确在说工具/函数/schema，或者同一种降级第二次
+      // 出现，才进程级关闭；否则可能把"上下文超长/参数错"等其它 400 误归因成工具不支持，
+      // 导致一次偶发就把工具永久关掉（下次启动还会白打一次）。
+      onUnsupportedTools: ({ message: reason } = {}) => {
+        if (toolsProtocolUnsupported) return;
+        const saidTools = /tool|function|schema|工具|函数/i.test(String(reason ?? ''));
+        toolsDowngradeCount += 1;
+        if (saidTools || toolsDowngradeCount >= 2) {
+          toolsProtocolUnsupported = true;
+          log.warn('[工具] 模型/通道不接受 tools，已在本进程关闭工具（降级为纯聊天）');
+        } else {
+          log.warn('[工具] 带 tools 请求被拒并降级成功；错误体没提工具，先只本回合降级（同错再出现一次才进程级关闭）');
+        }
+      },
+    };
   }
   // 记忆那套(含摘要拍子)比 runner 早装好 —— 这里把"叫模型"那条线接上(见 `runnerRef` 的说明)。
   //
@@ -5601,10 +5816,12 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
    */
   async function turnNotes(
     moodDecision, message = null, ledger = [], recall = null,
-    { hasImage = null, backgroundImages = false, decision = null } = {},
+    { hasImage = null, backgroundImages = false, decision = null, searchTools = false } = {},
   ) {
     // 直接回应不属于口语花活：任务/知识、严肃场景和随机风格关闭时也必须到达。
     const notes = [...DIRECT_RESPONSE_NOTES, ...REALITY_GROUNDING_NOTES];
+    // 2026-11-24：这一轮真的带了搜本/搜图工具 → 要搜就必须调工具，不许只嘴上说在搜。
+    if (searchTools === true) notes.push(SEARCH_TOOLS_NOTE);
     // recallFor 与"本轮决策"都必须在**这次 await 之前**定下来:
     // 旧实现是 await 长期记忆**之后**才判 mode 并写共享状态,同会话另一轮在 await 里
     // 跑完就能改写它 —— 先到的这一轮于是按别人的状态回答(F2 修的正是这个)。
@@ -6595,9 +6812,11 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
    * ⚠️ 节拍:`spokenLineGap`(按待发那条长度算);`typing` 只抖**第一条**。
    * @returns {Promise<number>} 发出去几条
    */
-  async function sendSpokenLines(message, lines, { typing = false, passiveFallback } = {}) {
+  async function sendSpokenLines(message, lines, { typing = false, passiveFallback, initialSeq = 0 } = {}) {
     const passive = message?.messageId !== undefined && message?.messageId !== null;
-    let passiveSeq = 0;
+    // 2026-11-24：本轮前面若有工具已经用掉被动槽位（搜本清单/搜图回执），这里必须
+    // 从同一计数接着发，否则会撞在 seq=1 上。`initialSeq` = 工具侧回报的已用槽位数。
+    let passiveSeq = Number.isSafeInteger(initialSeq) && initialSeq > 0 ? initialSeq : 0;
     let sent = 0;
     let failed = 0;
     let warnedOverflow = false;
@@ -6629,6 +6848,22 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       log.warn(`发言分条：${failed}/${lines?.length ?? '?'} 段没发出去（已发的段不重发）`);
     }
     return sent;
+  }
+
+  /**
+   * 工具先发过东西后，本轮最终文字回复的出口（2026-11-24 审查 P1-4）。
+   *
+   * 被动回复槽位一共 `MAX_PASSIVE_SEQ` 个，工具（搜本清单/搜图回执+图片）与最终回复
+   * 共用账本。若工具已经用满，`sendSpokenLines` 会把文字转主动 —— 没主动配额/没权限的群
+   * （40034105）就会整段静默丢。这里宁可**不追发这段文字**，也不让它无声消失：
+   * 工具结果已经发到群里，用户看得到，日志里留一条 warn 便于事后核对。
+   */
+  async function sendFinalReplyAfterTools(message, lines, { typing = false, passiveFallback, initialSeq = 0 } = {}) {
+    if (Number.isSafeInteger(initialSeq) && initialSeq >= MAX_PASSIVE_SEQ) {
+      log.warn(`工具已用满被动回复槽位（${initialSeq}/${MAX_PASSIVE_SEQ}），本轮文字回复省略（避免转主动被拒后静默丢）`);
+      return 0;
+    }
+    return sendSpokenLines(message, lines, { typing, passiveFallback, initialSeq });
   }
 
   /**
@@ -7522,6 +7757,216 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
     return true;
   }
 
+  /**
+   * 搜本/搜图命令的**唯一入口**（2026-11-24）：
+   *
+   *   - 目标名词闸 / 歧义澄清 / 解析器复用全在 `src/command-router.js`（纯函数，可单测）；
+   *   - 群名单、冷却、被动槽位、失败话术仍在服务层（与旧命令入口**同一份**判定，
+   *     不会出现"指令不让发、模型能发"的两套权限）；
+   *   - 返回 true = 这条消息已经按指令处理，调用方不要再走聊天/背景。
+   *
+   * 非 @ 触发（`allowNonMention`，`QQBOT_SEARCH_ANY_MESSAGE`）：
+   *   · 只执行确定性动作（search / download / send），不追问、不解释格式；
+   *   · 组件或群没开就**静默跳过**——否则一条普通群聊会换来一句"这个群没开"；
+   *   · 本轮只放宽搜本/搜图；目录收藏等其它命令仍只认真 @。
+   */
+  async function tryHandleSearchCommand(message, { allowNonMention = false } = {}) {
+    const isMention = message.isMention === true;
+    if (!isMention && !allowNonMention) return false;
+    if (message.scene !== 'group' || !message.targetId) return false;
+    if (message.isPoke || message.isFace) return false;
+    // 这条在叫别人（另一个 bot 或普通用户）→ 不抢话、不执行。
+    if (message.mentionsForeignBot || message.mentionsOthers) return false;
+    const groupId = String(message.targetId);
+    const content = String(message.content ?? '');
+    if (!content.trim()) return false;
+
+    // 目录收藏是 JM 的子功能：仍只认真 @（本轮只放宽搜本/搜图两个功能）。
+    if (isMention && config.jm?.enabled) {
+      const parsedCatalog = parseCatalogCommand(content, { defaultSource: 'jm' });
+      if (parsedCatalog.ok) {
+        void handleJmCommand({
+          message,
+          parsed: parsedCatalog,
+          deps: {
+            config,
+            log,
+            uploadFile: (args) => api.uploadFile(args),
+            sendMedia: (args) => api.sendMedia(args),
+            reply: (text, opts) => sendChunked(message, text, opts),
+          },
+        }).then((result) => {
+          if (result?.ok !== true && result?.reason !== 'cooldown') {
+            log.info(`JM：${parsedCatalog.action} 没成（${result?.reason ?? 'unknown'}）`);
+          }
+        }).catch((err) => {
+          log.error('JM：处理管道意外失败', err);
+        });
+        return true;
+      }
+      if (looksLikeCatalogAttempt(content)) {
+        const line = parsedCatalog?.reason === 'unsupported'
+          ? DEFAULT_CATALOG_LINES.unsupported
+          : parsedCatalog?.reason === 'page'
+            ? DEFAULT_CATALOG_LINES.pageFormat
+            : parsedCatalog?.reason === 'tag'
+              ? DEFAULT_CATALOG_LINES.tagFormat
+              : DEFAULT_CATALOG_LINES.format;
+        await sendChunked(message, line);
+        return true;
+      }
+    }
+
+    const route = routeSearchCommand(content, {
+      maxJm: config.jm?.max ?? 5,
+      maxMeitu: config.meitu?.max ?? 5,
+    });
+
+    if (route.kind === 'none') {
+      // 保留旧的两条留痕（只记长度/形状，不记正文），排查"指令没命中"时用。
+      if (isMention && config.jm?.enabled
+        && /^(?:搜|找|求|来|要|看|搬)/u.test(content) && /(?:本|本子)/u.test(content)) {
+        log.info(`JM：@ 消息像在搜本但没命中指令（${Array.from(content).length} 字）`);
+      } else if (isMention && config.meitu?.enabled) {
+        log.debug(`美图：@ 消息未匹配指令（正文=${JSON.stringify(content).slice(0, 80)}）`);
+      }
+      return false;
+    }
+
+    // 歧义：只要还有任一组件可用就澄清一句；非 @ 不刷屏。
+    if (route.kind === 'ambiguous') {
+      if (!isMention) return false;
+      if (!config.jm?.enabled && !config.meitu?.enabled) return false;
+      await sendChunked(message, SEARCH_CLARIFY_LINE);
+      return true;
+    }
+
+    const componentEnabled = route.component === 'jm'
+      ? Boolean(config.jm?.enabled)
+      : Boolean(config.meitu?.enabled);
+    // 组件没开：@ 交回模型（旧行为）；非 @ 静默跳过。
+    if (!componentEnabled) return false;
+
+    if (!isMention) {
+      if (!config.policy.group.commandsAnyMessage) return false;
+      const groupAllowed = route.component === 'jm'
+        ? jmAllowGroup(config.jm?.groups, groupId)
+        : meituAllowGroup(config.meitu?.groups, groupId);
+      if (!groupAllowed) return false;
+      // 非 @ 不做"追问/格式提示"这类对话动作；只执行确定性动作。
+      if (route.hint) return false;
+      if (!['search', 'download', 'send'].includes(route.action)) return false;
+      // **意图闸**（2026-11-24 审查 P1-1）：路由的宽形状（`来张纸`、`找本工作`、`看本小说`）
+      // 不能直接当非 @ 命令；必须是显式搜索/请求句式或带图像名词，否则水群闲聊会被执行。
+      if (!allowsNonMentionTrigger(route, content)) return false;
+      // **"这是在叫另一只 bot" 排除**（审查 P1-3）：非 @ 消息没有平台 @ 元数据，只能按
+      // 另一只角色的名字/别名排除（实例配置 `QQBOT_SEARCH_ANY_IGNORE_NAMES`），
+      // 避免写给惠惠的指令被爱丽丝执行。空名单 = 不排除（默认）。
+      const ignoreNames = config.policy.group.searchAnyIgnoreNames ?? [];
+      if (ignoreNames.some((name) => name && content.includes(name))) {
+        log.info(`搜索指令：非@消息在叫别的 bot（命中排除名），跳过（群 ${groupId.slice(0, 8)}…）`);
+        return false;
+      }
+      log.info(`搜索指令：非@消息命中确定性指令（群 ${groupId.slice(0, 8)}… 组件=${route.component} action=${route.action}）`);
+    }
+
+    if (route.hint === 'clarify') {
+      await sendChunked(message, SEARCH_CLARIFY_LINE);
+      return true;
+    }
+    if (route.hint === 'keyword') {
+      await sendChunked(message, SEARCH_KEYWORD_LINE);
+      return true;
+    }
+    if (route.hint === 'format') {
+      await sendChunked(message, route.component === 'jm'
+        ? buildJmParseFailureReply(content, route.reason)
+        : MEITU_FORMAT_LINE);
+      return true;
+    }
+
+    const conversationKey = sessionIdFor(message);
+    if (route.component === 'jm' && route.parsed?.ok) {
+      const parsed = route.parsed;
+      // 入口审计：只记形状与长度，不把群里正文写进日志（1.212.3 起口径）。
+      const fields = parsed.mode === 'structured' ? Object.keys(parsed.conditions ?? {}) : [];
+      log.info(`JM：收到 ${parsed.action}`
+        + `${parsed.mode === 'structured' ? `（结构化 ${fields.join('/') || '无'}）` : ''}`
+        + `${parsed.keyword ? `（关键词 ${Array.from(parsed.keyword).length} 字）` : ''}`);
+      void handleJmCommand({
+        message,
+        parsed,
+        deps: {
+          config,
+          log,
+          uploadFile: (args) => api.uploadFile(args),
+          sendMedia: (args) => api.sendMedia(args),
+          reply: (text, opts) => sendChunked(message, text, opts),
+        },
+      }).then((result) => {
+        if (result?.ok !== true && result?.reason !== 'cooldown') {
+          log.info(`JM：${parsed.action} 没成（${result?.reason ?? 'unknown'}）`);
+        }
+      }).catch((err) => {
+        log.error('JM：处理管道意外失败', err);
+      });
+      return true;
+    }
+
+    if (route.component === 'meitu' && route.parsed?.ok) {
+      const parsed = route.parsed;
+      // T2:动作观察 —— 接纳即登记 running；完成后用真实 task 覆盖（失败也如实）。
+      const meituScope = `group:${message.targetId}`;
+      actionLog.record(meituScope, {
+        kind: 'meitu', taskId: null, status: 'running',
+        text: describeMeituTask({ status: 'running', originText: String(message.content ?? '') }),
+      });
+      void handleMeituCommand({
+        message,
+        parsed,
+        deps: {
+          config,
+          log,
+          // ⚠️ reply 透传 `{startSeq, active}`：服务层把文本回话与图片排在**同一条**
+          //    被动回复序列里（seq 1..5），图片超限才转主动（40034105 的教训）。
+          uploadFile: (args) => api.uploadFile(args),
+          sendMedia: (args) => api.sendMedia(args),
+          reply: (text, opts) => sendChunked(message, text, opts),
+          gallery: meituGallery,
+          recordMediaLink: (entry) => stateStore.recordMediaLink({
+            bot: gateway.botName || 'bot', scene: 'group', target: message.targetId,
+            outboundId: entry?.outboundId, itemSeq: entry?.itemSeq, kind: 'meitu',
+            md5: entry?.md5, source: entry?.source, sourceId: entry?.sourceId,
+          }),
+          // 仅别名/角色解析未命中才使用一次 bot 模型；正常指令仍不花模型调用。
+          interpretCommand: (input) => createMeituInterpreter({
+            llm: llmSettings.scoped('bot'),
+            requestOptions: config.engine.requestOptions,
+            store: stateStore,
+            key: conversationKey,
+            log,
+          })(input),
+        },
+      }).then((result) => {
+        const task = result?.task ?? null;
+        actionLog.record(meituScope, {
+          kind: 'meitu', taskId: task?.taskId ?? null, status: task?.status ?? 'failed',
+          originText: task?.originText ?? String(message.content ?? '').slice(0, 40),
+          resolved: task?.resolved ?? null, requested: task?.requested ?? null,
+          sent: task?.sent ?? 0, failed: task?.failed ?? 0, reason: task?.reason ?? null,
+          text: describeMeituTask(task) ?? `搬图结束（${result?.reason ?? 'unknown'}）`,
+        });
+      }).catch((err) => {
+        // 正常失败路径在 handleMeituCommand 内部已经 try/catch 收口，这里只防装配层意外
+        // 走 unhandledRejection 把整个进程带崩。
+        log.error('美图：处理管道意外失败', err);
+      });
+      return true;
+    }
+
+    return false;
+  }
+
   async function handleMessage(message) {
     const who = message.scene === 'c2c' ? '单聊' : '群聊';
     const conversationKey = sessionIdFor(message);
@@ -7683,7 +8128,17 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
     // 带图的消息要进"窗内补图"那本账 —— ⚠️ **放在 @ 分支之外**:
     // 被 @ 的那一轮自己带的图也要能被后面几轮看到(现场:图在 @ 之前 12 秒到,而 @ 那条没有图)。
     // ⚠️ 2026-10-16:私聊也记(同一本账) —— 「发图 → 隔几秒追问颜色」现场,追问轮不该盲。
+    // ⚠️ 2026-11-24:每条入站消息(含纯文字)**先编号**——补图闸用「图在触发前第几条」判断紧邻;
+    //    只给带图消息编号的话，纯文字触发的轮次没有序号，保守闸会退化成旧行为(窗内全带)。
+    conversationImageCarry.note(message.targetId, message);
     rememberConversationImages(message.targetId, message);
+
+    // 2026-11-24：**非 @ 的搜本/搜图确定性指令**（QQBOT_SEARCH_ANY_MESSAGE）。
+    // 普通用户不会每次都 @；只服务这两个组件，命中就执行并结束（不进背景缓冲、不自发接话），
+    // 没命中照旧走下面的背景/读空气。歧义/格式提示在非 @ 一律不回（避免水群刷屏）。
+    if (message.scene === 'group' && !message.isMention && config.policy.group.commandsAnyMessage) {
+      if (await tryHandleSearchCommand(message, { allowNonMention: true })) return;
+    }
 
     // Group messages the bot was not addressed in are buffered, never answered
     // directly: buffering is free, and an @ later carries them as context. They
@@ -7807,142 +8262,13 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       }
     }
 
-    // 「发N张<角色>美图/涩图」—— 确定性解析/找图/发送优先；仅角色未命中单次模型理解。
-    // 只认群里的 @;解析失败但确实像这条指令时回一句格式提示(别让她当成闲聊去接)。
-    // 1.181.0:美图/涩图分档(检索路径两条)、动词加「搬」、「来3张随便的」残缺指令直接接走。
-    if (message.scene === 'group' && message.isMention && config.meitu?.enabled) {
-      const parsedMeitu = parseMeituCommand(message.content, { max: config.meitu.max });
-      if (parsedMeitu.ok) {
-        // T2:动作观察 —— 接纳即登记 running;完成后用真实 task 覆盖(失败也如实)。
-        const meituScope = `group:${message.targetId}`;
-        actionLog.record(meituScope, {
-          kind: 'meitu', taskId: null, status: 'running',
-          text: describeMeituTask({ status: 'running', originText: String(message.content ?? '') }),
-        });
-        void handleMeituCommand({
-          message,
-          parsed: parsedMeitu,
-          deps: {
-            config,
-            log,
-            // 上传/发送复用主循环里那一个 QqApi 实例;回话复用现成的 sendChunked。
-            // ⚠️ reply 透传 `{startSeq, active}`:服务层把文本回话与图片排在**同一条**
-            //    被动回复序列里(seq 1..5),图片超限才转主动(40034105 的教训)。
-            uploadFile: (args) => api.uploadFile(args),
-            sendMedia: (args) => api.sendMedia(args),
-            reply: (text, opts) => sendChunked(message, text, opts),
-            // 展览处埋点(2026-10-23 / 刀 2):发成功 recordSent、被拦 recordBlocked。
-            // null(没开美图线 / QQBOT_GALLERY=0 / 库打不开)→ 服务层全程跳过,不影响发图。
-            gallery: meituGallery,
-            // T3:媒体发送绑定(出站消息↔资产身份)写状态库;引用解析同作用域查这张表。
-            recordMediaLink: (entry) => stateStore.recordMediaLink({
-              bot: gateway.botName || 'bot', scene: 'group', target: message.targetId,
-              outboundId: entry?.outboundId, itemSeq: entry?.itemSeq, kind: 'meitu',
-              md5: entry?.md5, source: entry?.source, sourceId: entry?.sourceId,
-            }),
-            // 仅别名/角色解析未命中才使用一次 bot 模型；正常指令仍不花模型调用。
-            interpretCommand: (input) => createMeituInterpreter({
-              llm: llmSettings.scoped('bot'),
-              requestOptions: config.engine.requestOptions,
-              store: stateStore,
-              key: conversationKey,
-              log,
-            })(input),
-          },
-        }).then((result) => {
-          // T2:真实任务产物回填动作观察账(成功/部分/失败三态都覆盖 pending)。
-          const task = result?.task ?? null;
-          actionLog.record(meituScope, {
-            kind: 'meitu', taskId: task?.taskId ?? null, status: task?.status ?? 'failed',
-            originText: task?.originText ?? String(message.content ?? '').slice(0, 40),
-            resolved: task?.resolved ?? null, requested: task?.requested ?? null,
-            sent: task?.sent ?? 0, failed: task?.failed ?? 0, reason: task?.reason ?? null,
-            text: describeMeituTask(task) ?? `搬图结束（${result?.reason ?? 'unknown'}）`,
-          });
-        }).catch((err) => {
-          // 2026-10-27 P1 兜底:处理管道意外 reject 时大声落日志,不许走
-          // unhandledRejection 把整个进程带崩(crash-log 是 unhandledRejection→exit(1))。
-          // 正常失败路径在 handleMeituCommand 内部已经 try/catch 收口,这里只防装配层意外。
-          log.error('美图：处理管道意外失败', err);
-        });
-        return;
-      }
-      if (looksLikeMeituAttempt(message.content)) {
-        await sendChunked(message, '格式：<发/来/找><N>张<角色名或「随机」><美图/涩图>，要<足控/胸控/单人/多人等>的');
-        return;
-      }
-      // 没匹配上也要留痕(1.179.1):@ 消息进了 hook 但解析失败 —— 下次现场日志能直接看到正文形状。
-      log.debug(`美图：@ 消息未匹配指令（正文=${JSON.stringify(String(message.content ?? '')).slice(0, 80)}）`);
+    // 搜本/搜图统一入口（2026-11-24）：路由 + 目标名词闸 + 歧义澄清全在
+    // `src/command-router.js`；旧的「美图在前、JM 在后」两段独立分支已合并 ——
+    // 「来点本子」不会再被美图的残缺指令吃掉（那会随机发图）。
+    if (message.scene === 'group' && message.isMention) {
+      if (await tryHandleSearchCommand(message)) return;
     }
 
-    // 「搜本/找本 <关键词>」「下本 <编号/序号>」—— 代码层 JM 搜本/下本，默认关闭（QQBOT_JM）。
-    // 与搬图分支并列：只认群里的 @，解析失败但确实像这条指令时回一句格式提示（别当闲聊丢掉）。
-    // 网络只在 `scripts/jm-fetch-one.mjs` 子进程里发生，它调的是部署者自己运行的 JM 边车服务；
-    // 群白名单空 = 谁都不给（服务层 fail closed），失败只回固定话术、不调模型。
-    if (message.scene === 'group' && message.isMention && config.jm?.enabled) {
-      // 目录收藏是 JM 搬本的子功能（2026-11-17）：父组件关闭时整段不进入；
-      // 父组件开启时不要求再开子开关，群授权沿用 config.jm.groups。
-      const parsedCatalog = parseCatalogCommand(message.content, { defaultSource: 'jm' });
-      const parsedJm = parsedCatalog.ok ? null : parseJmCommand(message.content, { max: config.jm.max });
-      // 模糊搜本只在未识别严格指令/收藏时兜底；已明确拒绝的条件或编号列表不能重新当关键词搜。
-      const explicitJmRejection = ['unsupported', 'page', 'tooMany', 'useDownload'].includes(parsedJm?.reason);
-      const parsedFuzzy = !parsedCatalog.ok && parsedJm?.ok !== true && !explicitJmRejection
-        ? parseJmFuzzyCommand(message.content, { max: config.jm.max })
-        : null;
-      const parsed = parsedCatalog.ok ? parsedCatalog : (parsedJm?.ok ? parsedJm : parsedFuzzy);
-      if (parsed?.ok) {
-        // 2026-11-20 入口审计：只记形状与长度，不把群里正文写进日志。
-        // 作用：以后出现"指令处理了但用户什么都没收到"时，日志至少能证明它进来过、解析成了什么。
-        const fields = parsed.mode === 'structured' ? Object.keys(parsed.conditions ?? {}) : [];
-        log.info(`JM：收到 ${parsed.action}`
-          + `${parsed.mode === 'structured' ? `（结构化 ${fields.join('/') || '无'}）` : ''}`
-          + `${parsed.keyword ? `（关键词 ${Array.from(parsed.keyword).length} 字）` : ''}`);
-        void handleJmCommand({
-          message,
-          parsed,
-          deps: {
-            config,
-            log,
-            // 上传/发送复用主循环里那一个 QqApi 实例；回话复用现成的 sendChunked，
-            // 并透传 `{startSeq, active}` 让文本接着图片的被动回复序列往下数。
-            uploadFile: (args) => api.uploadFile(args),
-            sendMedia: (args) => api.sendMedia(args),
-            reply: (text, opts) => sendChunked(message, text, opts),
-          },
-        }).then((result) => {
-          if (result?.ok !== true && result?.reason !== 'cooldown') {
-            log.info(`JM：${parsed.action} 没成（${result?.reason ?? 'unknown'}）`);
-          }
-        }).catch((err) => {
-          // 正常失败路径在 handleJmCommand 内部已经 try/catch 收口，这里只防装配层意外
-          // 走 unhandledRejection 把整个进程带崩。
-          log.error('JM：处理管道意外失败', err);
-        });
-        return;
-      }
-      if (looksLikeCatalogAttempt(message.content)) {
-        const line = parsedCatalog?.reason === 'unsupported'
-          ? DEFAULT_CATALOG_LINES.unsupported
-          : parsedCatalog?.reason === 'page'
-            ? DEFAULT_CATALOG_LINES.pageFormat
-            : parsedCatalog?.reason === 'tag'
-              ? DEFAULT_CATALOG_LINES.tagFormat
-              : DEFAULT_CATALOG_LINES.format;
-        await sendChunked(message, line);
-        return;
-      }
-      if (looksLikeJmAttempt(message.content)) {
-        await sendChunked(message, buildJmParseFailureReply(message.content, parsedJm?.reason));
-        return;
-      }
-      const content = String(message.content ?? '');
-      if (/^(?:搜|找|求|来|要|看|搬)/u.test(content) && /(?:本|本子)/u.test(content)) {
-        // 2026-11-20：像"想搜本"但没命中指令 —— 用 info 级留一条痕（只记长度，不记正文）。
-        log.info(`JM：@ 消息像在搜本但没命中指令（${Array.from(content).length} 字）`);
-      } else {
-        log.debug(`JM：@ 消息未匹配指令（${Array.from(content).length} 字）`);
-      }
-    }
 
     // Bridge-level commands are handled here and never reach the agent.
     if (RESET_COMMANDS.has(message.content.trim())) {
@@ -8331,11 +8657,16 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       const referenceMedia = resolveReferenceMedia(message);
       if (referenceMedia?.block) imageBlocks.push(referenceMedia.block);
       if (referenceMedia?.fact) turnFactList.push(referenceMedia.fact);
+      // 2026-11-24：这一轮给模型带多功能组件工具（搜本/发图）。工具会先把结果发出去，
+      // 最终回复必须从同一个被动槽位账接着数，否则两段都挤在 seq=1（`initialSeq`）。
+      const outbound = makeOutboundBudget();
+      const toolContext = buildToolContext(message, conversationKey, makeToolRuntime(message, outbound));
       const turnNoteList = await turnNotes(mood, message, ledger, null, {
         hasImage: turnHasImage && !turnHasBackgroundImages,
         backgroundImages: turnHasBackgroundImages,
         // **F2**:入口那份冻结决策;turnNotes 只消费,不再自己判 mode。
         decision: turnDecision,
+        searchTools: Boolean(toolContext),
       });
       if (copypastaHit) {
         turnFactList.push(copypastaHit.fact);
@@ -8355,7 +8686,7 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         config.policy.replyTimeoutMs,
         imageBlocks,
         // **P3-b**:主答话 = chat 用途,按实例装配决定是否带工具(默认 null = 行为一字不变)。
-        buildToolContext(message, conversationKey),
+        toolContext,
       );
 
       const body = composeReply(result, message, {
@@ -8368,7 +8699,8 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       // 判据仍是"除标点/空白外一个字不丢"(D171 那笔账是截断欠的,分段不欠)。
       // F2:保真开关只读入口决策(不再用 turnModeFor 重判一次)。
       const replyLines = planSpokenLines(body, mood, { label: '答话', decision: turnDecision });
-      await sendSpokenLines(message, replyLines, { typing: true });
+      // 工具若已经用掉被动槽位，最终回复从 `outbound.seq` 接着数（2026-11-24）。
+      await sendFinalReplyAfterTools(message, replyLines, { typing: true, initialSeq: outbound.seq });
       groupReplied = message.scene === 'group';
       // 参与状态机(D277):被叫后回了话 = 她在场说了话(连击清零;自发开口才计数)。
       if (message.scene === 'group') socialState.noteSpoke(message.targetId, { selfInitiated: false });
@@ -8470,11 +8802,15 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       // 连发合并这条路同样吃梗库(有人一句话分三段发,"我已经坐好了"常常在最后一段)。
       const copypastaHit = copypastaFor(merged);
       const turnFactList = turnFacts(merged);
+      // 2026-11-24：合并轮也有搜本/发图工具；被动槽位账与最终回复共用（同 @ 路）。
+      const outbound = makeOutboundBudget();
+      const toolContext = buildToolContext(merged, conversationKey, makeToolRuntime(merged, outbound));
       const turnNoteList = await turnNotes(mood, merged, ledger, null, {
         // 注入与结算同口径(2026-10-23,同答话路):窗内旧图只作背景,不灌"图=投喂"教学。
         hasImage: turnHasImage && !turnHasBackgroundImages,
         backgroundImages: turnHasBackgroundImages,
         decision: turnDecision,
+        searchTools: Boolean(toolContext),
       });
       if (copypastaHit) {
         turnFactList.push(copypastaHit.fact);
@@ -8494,7 +8830,7 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         config.policy.replyTimeoutMs,
         imageBlocks,
         // **P3-b**:合并答话同主答话口径(merged 带 senderId,身份可信)。
-        buildToolContext(merged, conversationKey),
+        toolContext,
       );
 
       const body = composeReply(result, merged, {
@@ -8508,7 +8844,8 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         label: `合并答话(${bursts.length}条)`,
         decision: turnDecision,
       });
-      await sendSpokenLines(merged, replyLines, { typing: true });
+      // 工具若已经用掉被动槽位，最终回复从 `outbound.seq` 接着数（2026-11-24）。
+      await sendFinalReplyAfterTools(merged, replyLines, { typing: true, initialSeq: outbound.seq });
       groupReplied = merged.scene === 'group';
       // 参与状态机(D277):合并路径也是被叫后的回复(同上,连击清零)。
       if (merged.scene === 'group') socialState.noteSpoke(merged.targetId, { selfInitiated: false });
@@ -8950,6 +9287,11 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       const ledger = rollEconomy({ scene: 'group', proactive: true });
       const turnHasImage = imageBlocks.length > 0;
       const turnHasBackgroundImages = selfCarried.length > 0;
+      // 2026-11-24：自发接话轮也给模型带搜本/发图工具。自发路径发的是**主动消息**
+      // （`messageId: undefined`），工具与最终回复都走主动；被动槽位账此时不会增长。
+      const outbound = makeOutboundBudget();
+      const selfSynthetic = { scene: 'group', targetId: groupId, messageId: undefined, content: source?.content ?? '' };
+      const toolContext = buildToolContext(source, conversationKey, makeToolRuntime(selfSynthetic, outbound));
       const result = await runner.runTurn(
         conversationKey,
         withStyleNudge(prompt, await turnNotes(mood, source, ledger, null, {
@@ -8958,9 +9300,11 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
           backgroundImages: turnHasBackgroundImages,
           // F2:群自发消费的是入口那份**反射轮决策**(不继承用户任务,不写继承表)。
           decision: turnDecision,
+          searchTools: Boolean(toolContext),
         })),
         config.policy.replyTimeoutMs,
         imageBlocks,
+        toolContext,
       );
 
       // The model call happened either way, so the gates reset either way —
@@ -9005,13 +9349,14 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
         // F2:群自发固定口径(不继承用户任务),保真开关只读入口决策。
         { label: '自发发言', decision: turnDecision },
       );
-      const synthetic = { scene: 'group', targetId: groupId, messageId: undefined, content: '' };
+      const synthetic = selfSynthetic;
       // 只用本轮点名的原消息，不借群里最新一条；泛插话和窗口内「你」仍照旧。
       const passiveFallback = addressed && named && message?.scene === 'group'
         && !message.isMention && message.targetId === groupId && message.messageId
         ? { trigger: message, seq: 0, delivered: 0 }
         : undefined;
-      await sendSpokenLines(synthetic, lines, { typing: true, passiveFallback });
+      // 工具在自发轮走主动消息，`outbound.seq` 通常仍是 0；带上它只是保持同一口径。
+      await sendFinalReplyAfterTools(synthetic, lines, { typing: true, passiveFallback, initialSeq: outbound.seq });
       if (passiveFallback && passiveFallback.delivered === 0) return;
       // 参与状态机(D277):这轮算不算"她找话"——判据只用本轮**真实被叫**(`addressed`:
       // @ / 关键词 / 私聊 / 读空气重试),不拿 `answering`(它还含"正文像在对她说"的宽判据,

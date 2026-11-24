@@ -104,8 +104,10 @@ export function registerToolBudgetTests({ test, assert: a }) {
       '能力必须过 withBudget(成功才记账)');
     const fnStart = indexSource.indexOf('function buildToolContext(');
     const fnBody = indexSource.slice(fnStart, fnStart + 1600);
-    const budgetAt = fnBody.indexOf('!toolBudget.canSpend()');
-    a.ok(budgetAt > 0, 'buildToolContext 要有预算闸(花完当日不发)');
+    const budgetAt = fnBody.indexOf('toolBudget.canSpend()');
+    a.ok(budgetAt > 0, 'buildToolContext 要有预算闸(花完当日不发改费工具)');
+    // 2026-11-24：组件工具 costCny=0，不该被搜索日额度连坐；额度闸只筛计费能力。
+    a.match(fnBody, /cap\.costCny > 0 \? spendable : true/, '预算闸只筛计费工具(组件工具不受搜索额度连坐)');
     const configSource = fs.readFileSync(path.resolve('src', 'config.js'), 'utf8');
     a.match(configSource, /asNonNegativeInt\('QQBOT_SEARCH_DAILY_LIMIT_CNY', 1\)/, '日额度默认 1¥(2026-10-28 拍板)');
     a.match(configSource, /QQBOT_SEARCH_PER_CALL_CNY/, '单价刻度可调');

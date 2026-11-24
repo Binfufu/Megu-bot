@@ -1263,6 +1263,31 @@ test('jm-service:关键词单命中(total=1) → 先解析单单元,再下载+PD
   });
 });
 
+test('jm-service:listOnly(模型工具)唯一命中 → 只回清单，不自动下载(审查 P1-2)', async () => {
+  await withTemp(async (dir) => {
+    const group = 'g-jm-listonly';
+    const { deps, calls } = makeDeps({
+      dir,
+      groups: [group],
+      payloads: [
+        searchPayload({ results: [{ id: '101', title: '合成本甲' }] }),
+        // 后面这些如果被调用就说明"只给清单"没守住。
+        resolvePayload({ album: albumPayload({ id: '101', title: '合成本甲' }) }),
+        downloadPayload({ id: '101', title: '合成本甲' }),
+      ],
+    });
+    const parsed = { ...parseJmCommand('搜本 全彩'), listOnly: true };
+    const result = await handleJmCommand({ message: message(group), parsed, deps });
+    assert.equal(result.ok, true);
+    assert.ok(!result.sent, '只给清单，不该有文件数');
+    assert.equal(calls.fetch.length, 1, '只发 search，不进 resolve/download/pdf');
+    assert.ok(calls.fetch[0].args.includes('search'));
+    assert.equal(calls.upload.length, 0);
+    assert.equal(calls.send.length, 0);
+    assert.match(calls.reply.at(-1), /JM101|合成本甲/u, '清单里要有候选');
+  });
+});
+
 test('jm-service:数字搜本=编号精确解析,不走站内搜索;单单元直接下', async () => {
   await withTemp(async (dir) => {
     const group = 'g-jm-num-single';
@@ -2064,11 +2089,16 @@ test('jm-service 接线哨兵:index.js 按配置开启接入、命令表与生�
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const indexSource = fs.readFileSync(path.join(root, 'src', 'index.js'), 'utf8');
   assert.ok(indexSource.includes('config.jm?.enabled'), 'index.js 必须按 QQBOT_JM 总开关接入');
-  assert.ok(indexSource.includes('parseJmCommand(message.content, { max: config.jm.max })'), 'index.js 必须调纯解析器');
-  assert.ok(indexSource.includes('parseJmFuzzyCommand(message.content'), 'index.js 必须接模糊搜本兜底');
+  // 2026-11-24：搜本/搜图的「该谁处理」收口到 command-router；index 只做入口接线。
+  // 纯解析器改由 router 调用（一份实现），这里钉住"链路上真的还在用纯解析器"。
+  assert.ok(indexSource.includes('routeSearchCommand('), 'index.js 必须接统一路由');
+  assert.ok(indexSource.includes('tryHandleSearchCommand'), 'index.js 必须有唯一的搜本/搜图入口');
+  const routerSource = fs.readFileSync(path.join(root, 'src', 'command-router.js'), 'utf8');
+  assert.ok(routerSource.includes('parseJmCommand('), '路由必须调 JM 纯解析器');
+  assert.ok(routerSource.includes('parseJmFuzzyCommand('), '路由必须接模糊搜本兜底');
+  assert.ok(routerSource.includes('looksLikeJmAttempt('), '路由必须保留格式提示判定');
   assert.ok(indexSource.includes('handleJmCommand({'), 'index.js 必须调服务层');
-  assert.ok(indexSource.includes('looksLikeJmAttempt(message.content)'), 'index.js 必须有格式提示分支');
-  assert.ok(indexSource.includes('buildJmParseFailureReply(message.content, parsedJm?.reason)'),
+  assert.ok(indexSource.includes('buildJmParseFailureReply(content, route.reason)'),
     'index.js 必须将真实解析的失败原因交给近失/格式提示函数');
   assert.ok(indexSource.includes('JM：收到 ${parsed.action}'), 'index.js 必须有入口审计日志');
 
