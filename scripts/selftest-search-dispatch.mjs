@@ -239,6 +239,21 @@ test('dispatch:非@ 下本 1 → 允许执行(序号) ；非@ 收藏 → 不执�
   assert.equal(calls.jm.length, 0);
 });
 
+test('dispatch:非@ 下一页/上一页 → 执行翻页（2026-11-25）；@ 同样执行', async () => {
+  for (const [content, delta] of [['下一页', 1], ['上一页', -1]]) {
+    const { calls, deps } = scenario();
+    const dispatch = load(DISPATCH_CODE, { deps, expose: 'tryHandleSearchCommand' });
+    assert.equal(await dispatch(message({ content, isMention: false }), { allowNonMention: true }), true, content);
+    assert.equal(calls.jm.length, 1, content);
+    assert.equal(calls.jm[0].parsed.action, 'page', content);
+    assert.equal(calls.jm[0].parsed.delta, delta, content);
+    const at = scenario();
+    const dispatchAt = load(DISPATCH_CODE, { deps: at.deps, expose: 'tryHandleSearchCommand' });
+    assert.equal(await dispatchAt(message({ content, isMention: true })), true, `@ ${content}`);
+    assert.equal(at.calls.jm[0].parsed.action, 'page');
+  }
+});
+
 test('dispatch:非@ 追问/格式提示一律不回(只静默跳过)', async () => {
   for (const content of ['来点本子', '来点本子图', '来点乐子', '搜本 作都:甲']) {
     const { calls, deps } = scenario();

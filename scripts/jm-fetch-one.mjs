@@ -37,6 +37,11 @@
  *                                结构化模式/细节模式最多 10（边车契约上限）
  *   --mode site|work|author|tag|actor  search 可选：站点/原作/作者/标签/角色模式
  *   --page N                     search 可选：页码，默认 1
+ *   --order mr|mv                search 可选：排序，mr=最新、mv=观看数/热门；
+ *                                不传 = 不发 order 参数（边车缺省 mr；bot 默认显式传 mv）
+ *   --window 1|0                 search 可选：1 = 逻辑翻页（第 page 页 = 第
+ *                                (page-1)*limit+1 .. page*limit 条，边车映射到上游分页，
+ *                                只回文字清单，须配合 --images 0）；默认 0 = 旧口径（page 是上游页）
  *   --details 1|0                search 可选：1 = 只取文字详情（作者/标签/页数），
  *                                不取封面/拼图；默认 0
  *   --id <编号>                  resolve/download/pdf 必填，纯数字（作品或单元编号）
@@ -54,8 +59,8 @@
  *
  *   health   → {"ok":true,"op":"health","service":"jm-service","version":"1.0.0",
  *               "viewerBase":"http://127.0.0.1:8088","downloadedAlbums":12}
- *   search   → {"ok":true,"op":"search","query":"全彩","mode":"author","page":1,
- *               "details":true,"total":10000,"cached":false,"text":"1.…",
+ *   search   → {"ok":true,"op":"search","query":"全彩","mode":"author","page":1,"order":"mr",
+ *               "window":false,"details":true,"total":10000,"cached":false,"text":"1.…",
  *               "results":[{rank,id,title,authors,tags,pageCount,detailOk}]}
  *   resolve  → {"ok":true,"op":"resolve","requested":"1205081","kind":"album"|"photo",
  *               "album":{id,title,authors,tags,pageCount,unitCount,
@@ -87,6 +92,9 @@ const DEFAULT_LIMIT = 5;
 const MAX_LIMIT = 5; // QQ 侧普通搜索一次最多看 5 本（边车契约允许 10）
 const MAX_LIMIT_DETAILS = 10; // 结构化检索需要多取候选做 AND 复核；边车上限就是 10
 const SEARCH_MODES = new Set(['site', 'work', 'author', 'tag', 'actor']);
+// 排序（边车契约 v4）：mr=最新、mv=观看数/热门；与边车 SEARCH_ORDERS 同一口径。
+// 不传 = 不发 order（边车缺省 mr）；bot 的「默认热门」由服务层显式传 --order mv。
+const SEARCH_ORDERS = new Set(['mr', 'mv']);
 const MAX_SEARCH_PAGE = 100_000; // 与边车 /search 的 page 上界一致
 const DEFAULT_REQUEST_TIMEOUT_MS = 45_000; // 单次请求上限（2026-11-20：旧版硬编码 15s）
 const POLL_MS = 1_500; // 下载任务轮询间隔
@@ -129,6 +137,10 @@ export function parseJmArgs(argv) {
     limit: DEFAULT_LIMIT,
     mode: 'site',
     page: 1,
+    // '' = 未传（不发 order 参数，边车默认 mr）；显式值只收 mr/mv。
+    order: '',
+    // false = 旧口径（page 是上游站内页）；true = 逻辑翻页窗口（见文件头）。
+    window: false,
     details: false,
     api: DEFAULT_API,
     outDir: '',
@@ -152,6 +164,12 @@ export function parseJmArgs(argv) {
       case '--limit': options.limit = Number.parseInt(next(), 10); break;
       case '--mode': options.mode = next().trim().toLowerCase(); break;
       case '--page': options.page = Number.parseInt(next(), 10); break;
+      case '--order': options.order = next().trim().toLowerCase(); break;
+      case '--window': {
+        const raw = next().trim().toLowerCase();
+        options.window = raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+        break;
+      }
       case '--details': {
         const raw = next().trim().toLowerCase();
         options.details = raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
@@ -400,13 +418,20 @@ export async function runJmFetch(options, deps = {}) {
     if (!Number.isSafeInteger(page) || page < 1 || page > MAX_SEARCH_PAGE) {
       return { ...fail('bad_args', `search 的 --page 需在 1..${MAX_SEARCH_PAGE}`), op };
     }
+    const order = String(options?.order ?? '').trim().toLowerCase();
+    if (order && !SEARCH_ORDERS.has(order)) {
+      return { ...fail('bad_args', `search 的 --order 只能是 mr/mv，收到 ${JSON.stringify(order)}`), op };
+    }
     const limit = Number.isSafeInteger(options?.limit) && options.limit > 0
       ? Math.min(options.limit, options?.details || mode !== 'site' ? MAX_LIMIT_DETAILS : MAX_LIMIT)
       : DEFAULT_LIMIT;
     const images = options?.images !== false;
     const details = options?.details === true;
+    const window = options?.window === true;
     const params = new URLSearchParams({ q: query, limit: String(limit), page: String(page) });
     if (mode !== 'site') params.set('mode', mode);
+    if (order) params.set('order', order);
+    if (window) params.set('window', '1');
     if (!images) params.set('images', '0');
     if (details) params.set('details', '1');
     const url = apiUrl(apiBase, `/search?${params.toString()}`);
@@ -426,13 +451,15 @@ export async function runJmFetch(options, deps = {}) {
       detailOk: item?.detail_ok !== false,
     })).filter((item) => item.id !== '');
 
-    emit(`搜索结果:${results.length} 本（mode=${mode} page=${page} images=${images ? 'on' : 'off'} details=${details ? 'on' : 'off'}）`);
+    emit(`搜索结果:${results.length} 本（mode=${mode} page=${page} order=${order || 'mr'} window=${window ? 'on' : 'off'} images=${images ? 'on' : 'off'} details=${details ? 'on' : 'off'}）`);
     return {
       ok: true,
       op,
       query,
       mode,
       page,
+      order: String(data.order ?? order ?? '') || 'mr',
+      window: data.window === true || window,
       details,
       total: Number(data.total ?? 0),
       cached: data.cached === true,

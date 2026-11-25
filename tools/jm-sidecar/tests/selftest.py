@@ -1171,9 +1171,10 @@ class TestAppContract(TempDirTest):
                     "capabilities"):
             self.assertIn(key, payload)
         self.assertEqual(payload["service"], "jm-service")
-        # Node 合并打包/结构化检索都靠能力声明 fail closed：旧边车不认 ?units=，
-        # images=0 也不会返回文字详情；不能让 Node 猜成支持。
-        self.assertEqual(payload["capabilities"], ["units", "details"])
+        # Node 合并打包/结构化检索/排序/逻辑翻页都靠能力声明 fail closed：旧边车不认
+        # ?units=，images=0 也不会返回文字详情，order 会被静默忽略，window 更会把逻辑页
+        # 当上游页；不能让 Node 猜成支持。
+        self.assertEqual(payload["capabilities"], ["units", "details", "sort", "paging"])
         self.assertEqual(payload["downloaded_albums"], 0)
         self.assertEqual(payload["search_cache_entries"], 0)
 
@@ -1181,6 +1182,67 @@ class TestAppContract(TempDirTest):
         status, payload = self._get("/search?q=abc&mode=bogus")
         self.assertEqual(status, 400)
         self.assertEqual(payload["error"], "invalid_mode")
+
+    def test_search_order_validation_fixed_message(self):
+        # 非法排序明确拒绝（400 invalid_order），固定说明不回显原始输入。
+        for raw in ("bogus", "tf", "mv%00", "MR MV"):
+            status, payload = self._get("/search?q=abc&order=" + raw)
+            self.assertEqual(status, 400)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["error"], "invalid_order")
+            self.assertNotIn("bogus", payload["message"])
+            self.assertNotIn("ValueError", payload["message"])
+
+    def test_search_order_passthrough_and_default(self):
+        fake = {"total": 0, "items": []}
+        with patch.object(self.service.gateway, "search", return_value=fake) as mocked:
+            status, payload = self._get("/search?q=龙&order=mv")
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["order"], "mv")
+            self.assertEqual(mocked.call_args.kwargs.get("order_by"), "mv")
+            # 不写 order → 默认 mr（最新），与旧行为一致。
+            status2, payload2 = self._get("/search?q=凤")
+            self.assertEqual(status2, 200)
+            self.assertEqual(payload2["order"], "mr")
+            self.assertEqual(mocked.call_args.kwargs.get("order_by"), "mr")
+
+    def test_search_order_cache_key_includes_order(self):
+        fake = {"total": 0, "items": []}
+        with patch.object(self.service.gateway, "search", return_value=fake) as mocked:
+            status_mr, payload_mr = self._get("/search?q=龙&order=mr")
+            status_mv, payload_mv = self._get("/search?q=龙&order=mv")
+            self.assertEqual((status_mr, status_mv), (200, 200))
+            self.assertFalse(payload_mr.get("cached"))
+            self.assertFalse(payload_mv.get("cached"))
+            self.assertEqual(mocked.call_count, 2)
+            # 同 order 再查 → 命中缓存；不同 order 不共用缓存。
+            status_hot, payload_hot = self._get("/search?q=龙&order=mv")
+            self.assertEqual(status_hot, 200)
+            self.assertTrue(payload_hot.get("cached"))
+            self.assertEqual(mocked.call_count, 2)
+
+    def test_gateway_do_search_passes_order_by_to_client(self):
+        from types import SimpleNamespace
+        calls = []
+
+        class FakeClient:
+            def search_site(self, query, page=1, order_by="mr"):
+                calls.append(("site", query, page, order_by))
+                return SimpleNamespace(content=[], total=0)
+
+            def search_author(self, query, page=1, order_by="mr"):
+                calls.append(("author", query, page, order_by))
+                return SimpleNamespace(content=[], total=0)
+
+        gateway = self.service.gateway
+        with patch.object(gateway, "_get_client", return_value=FakeClient()):
+            gateway.search("龙", page=2, mode="site", order_by="mv")
+            gateway.search("甲", page=1, mode="author", order_by="mr")
+        self.assertEqual(calls, [("site", "龙", 2, "mv"), ("author", "甲", 1, "mr")])
+        # 上游另有 tf/mp/tr/md，本契约只开放 mr/mv；网关层也明确拒绝。
+        with self.assertRaises(JmError) as ctx:
+            gateway.search("龙", order_by="tf")
+        self.assertEqual(ctx.exception.code, "invalid_order")
 
     def test_search_mode_cache_key_includes_mode(self):
         fake = {"total": 0, "items": []}
@@ -1199,12 +1261,69 @@ class TestAppContract(TempDirTest):
             self.assertTrue(payload_hot.get("cached"))
             self.assertEqual(mocked.call_count, 2)
 
+    @staticmethod
+    def _fake_search_pages():
+        """假上游：每页 3 条、共 7 条；page=2 就只有 4/5/6，与逻辑每页 2 条不同。"""
+        pages = {
+            1: {"total": 7, "items": [{"id": "1"}, {"id": "2"}, {"id": "3"}]},
+            2: {"total": 7, "items": [{"id": "4"}, {"id": "5"}, {"id": "6"}]},
+            3: {"total": 7, "items": [{"id": "7"}]},
+        }
+        calls = []
+
+        def fake_search(query, page=1, mode="site", order_by="mr"):
+            calls.append((query, page, mode, order_by))
+            return pages[page]
+
+        return fake_search, calls
+
+    def test_search_window_maps_logical_page_to_upstream_pages(self):
+        # window=1：第 page 页 = 第 (page-1)*limit+1 .. 条，由边车映射到上游分页。
+        # 上游每页 3 条（假）：逻辑第 2 页（每页 2 条）= 第 3、4 条，不是上游第 2 页。
+        fake_search, calls = self._fake_search_pages()
+        with patch.object(self.service.gateway, "search", side_effect=fake_search):
+            status, payload = self._get("/search?q=逻辑页甲&limit=2&page=2&window=1&images=0")
+            self.assertEqual(status, 200)
+            self.assertTrue(payload["window"])
+            self.assertEqual(payload["total"], 7)
+            self.assertEqual([item["id"] for item in payload["results"]], ["3", "4"])
+            self.assertEqual([page for _q, page, _m, _o in calls], [1, 2],
+                             "取第 1 页定步长 + 第 2 页切片，不顺序拉中间页")
+            # 同窗口再查走响应缓存；同一次解析出的上游页也不再重复请求。
+            status_first, payload_first = self._get("/search?q=逻辑页甲&limit=2&page=1&window=1&images=0")
+            self.assertEqual([item["id"] for item in payload_first["results"]], ["1", "2"])
+            status_last, payload_last = self._get("/search?q=逻辑页甲&limit=2&page=4&window=1&images=0")
+            self.assertEqual((status_first, status_last), (200, 200))
+            self.assertEqual([item["id"] for item in payload_last["results"]], ["7"])
+            self.assertEqual(len(calls), 3, "第 1/2/3 上游页各取一次，翻页不重复请求")
+
+    def test_search_window_does_not_share_cache_with_upstream_page(self):
+        # 旧口径 page=2 是上游第 2 页；window 是逻辑第 2 页；两者缓存键不能混。
+        fake_search, _calls = self._fake_search_pages()
+        with patch.object(self.service.gateway, "search", side_effect=fake_search):
+            status_up, payload_up = self._get("/search?q=缓存键乙&limit=2&page=2&images=0")
+            status_win, payload_win = self._get("/search?q=缓存键乙&limit=2&page=2&window=1&images=0")
+            self.assertEqual((status_up, status_win), (200, 200))
+            self.assertFalse(payload_up["window"])
+            self.assertTrue(payload_win["window"])
+            self.assertEqual([item["id"] for item in payload_up["results"]], ["4", "5"])
+            self.assertEqual([item["id"] for item in payload_win["results"]], ["3", "4"])
+
+    def test_search_window_rejects_images_and_details(self):
+        # 窗口只做文字清单；带图/详情明确 400，固定说明不回显输入。
+        for query in ("/search?q=丙丙&window=1",
+                      "/search?q=丙丙&window=1&images=0&details=1"):
+            status, payload = self._get(query)
+            self.assertEqual(status, 400, query)
+            self.assertEqual(payload["error"], "invalid_param")
+            self.assertIn("window=1", payload["message"])
+            self.assertNotIn("丙丙", payload["message"])
+
     def test_search_param_errors(self):
         status, payload = self._get("/search?q=")
         self.assertEqual(status, 400)
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error"], "invalid_query")
-
         status, payload = self._get("/search?q=abc&limit=99")
         self.assertEqual(status, 400)
         self.assertFalse(payload["ok"])

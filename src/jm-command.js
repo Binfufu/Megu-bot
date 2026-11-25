@@ -18,6 +18,9 @@
  *     搜本 标签:丁                ← 结构化检索：站点标签（上游 tag 模式）；也认「标签 丁 / tag 丁」
  *     搜本 标题:戊                ← 标题文字检索（站点候选后按标题复核）
  *     搜本 作者:甲 标签:丁 2       ← 多条件 AND + 页码；只回本次检查范围内的清单
+ *     搜本 全彩 排序:最新           ← 排序（2026-11-25）：默认热门；写 排序:最新 换回；结构化也能写
+ *     搜本 全彩 页码:2              ← 关键词检索跳页（2026-11-25）
+ *     下一页 / 上一页               ← 沿用本群最近一次搜索清单翻页（独立词）
  *     搜原神的本子               ← 模糊搜本：请求动词 + 句尾“本子/本”，关键词=原神
  *     搜齁的本 / 来个齁的本       ← 单字关键词也认（裸「本」不再强制≥2 字，2026-11-20）
  *     来个莉音的本               ← 同上；只给清单，不自动下载
@@ -101,9 +104,22 @@ const STRUCTURED_FIELDS = new Map([
 /** 页码键（`页码:2` 与「页码 2」都认）。 */
 const PAGE_KEYS = new Set(['页码', '页', 'page']);
 
+/**
+ * 排序键（2026-11-25，主人拍板：最新+热门两种；默认热门，写 排序:最新 换回）。
+ * 值只收上游已证实的 order_by：mr=最新、mv=观看数/热门（JMComic v2.7.12
+ * JmMagicConstants）；不臆造热度字段，未知值明确拒绝。
+ */
+const SORT_KEYS = new Set(['排序', '顺序', 'order', 'sort']);
+const SORT_VALUES = new Map([
+  ['最新', 'mr'],
+  ['热门', 'mv'],
+  ['mr', 'mr'],
+  ['mv', 'mv'],
+]);
+
 /** 字段规范名 → 中文标签（近失提示用）。 */
 const FIELD_LABELS = Object.freeze({
-  creator: '作者', original: '原作', character: '角色', tag: '标签', title: '标题', page: '页码',
+  creator: '作者', original: '原作', character: '角色', tag: '标签', title: '标题', page: '页码', sort: '排序',
 });
 
 /** 取条件键的规范字段名；不是条件键返回 null（英文键大小写不敏感）。 */
@@ -117,6 +133,18 @@ function structuredField(key) {
 function isPageKey(key) {
   const raw = String(key ?? '').normalize('NFKC').trim();
   return PAGE_KEYS.has(raw) || PAGE_KEYS.has(raw.toLowerCase());
+}
+
+/** 是不是排序键（英文 order/sort 大小写不敏感）。 */
+function isSortKey(key) {
+  const raw = String(key ?? '').normalize('NFKC').trim();
+  return SORT_KEYS.has(raw) || SORT_KEYS.has(raw.toLowerCase());
+}
+
+/** 排序值归一（NFKC + 小写）；不认识返回 null。 */
+function sortValue(raw) {
+  const text = String(raw ?? '').normalize('NFKC').trim().toLowerCase();
+  return SORT_VALUES.get(text) ?? null;
 }
 
 /** 结构化检索的值/页码上限；页码与列表页码同一口径。 */
@@ -141,13 +169,14 @@ function splitGluedCondition(token) {
   const raw = String(token ?? '').normalize('NFKC').trim();
   if (!raw) return null;
   // 长键先试：「作者名」先于「作者」、「tags」先于「tag」。
-  const candidates = [...STRUCTURED_FIELDS.keys(), ...PAGE_KEYS].sort((a, b) => b.length - a.length);
+  const candidates = [...STRUCTURED_FIELDS.keys(), ...PAGE_KEYS, ...SORT_KEYS].sort((a, b) => b.length - a.length);
   for (const key of candidates) {
     if (!raw.startsWith(key) || raw.length === key.length) continue;
     const value = raw.slice(key.length).trim();
     if (!value) continue;
     const field = structuredField(key);
-    return field ? { field, key, value } : { field: 'page', key, value };
+    if (field) return { field, key, value };
+    return { field: isSortKey(key) ? 'sort' : 'page', key, value };
   }
   return null;
 }
@@ -166,6 +195,8 @@ function parseStructuredSearchRest(body) {
   const numericPages = [];
   let page = 1;
   let pageGiven = false;
+  let sort = null;
+  let sortGiven = false;
   let hasCondition = false;
 
   const setPage = (raw) => {
@@ -177,12 +208,25 @@ function parseStructuredSearchRest(body) {
     return true;
   };
 
+  const setSort = (raw) => {
+    if (sortGiven) return false;
+    const value = sortValue(raw);
+    if (!value) return false;
+    sort = value;
+    sortGiven = true;
+    return true;
+  };
+
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i];
     const pair = splitKeyValue(token);
     if (pair) {
       if (isPageKey(pair.key)) {
         if (!/^\d+$/u.test(pair.value) || !setPage(pair.value)) return { ok: false, reason: 'page' };
+        continue;
+      }
+      if (isSortKey(pair.key)) {
+        if (!setSort(pair.value)) return { ok: false, reason: 'sort', field: pair.value };
         continue;
       }
       const field = structuredField(pair.key);
@@ -205,7 +249,7 @@ function parseStructuredSearchRest(body) {
     if (bareField) {
       const next = tokens[i + 1];
       const nextIsKey = next !== undefined && (
-        splitKeyValue(next) !== null || structuredField(next) !== null || isPageKey(next));
+        splitKeyValue(next) !== null || structuredField(next) !== null || isPageKey(next) || isSortKey(next));
       if (next === undefined || nextIsKey) return { ok: false, reason: 'format', field: token };
       const value = String(next).normalize('NFKC').trim();
       if (!value || Array.from(value).length > MAX_STRUCTURED_VALUE_CHARS) {
@@ -230,12 +274,26 @@ function parseStructuredSearchRest(body) {
       continue;
     }
 
+    // 排序的空格写法：「搜本 全彩 排序 热门」。
+    if (isSortKey(token)) {
+      const next = tokens[i + 1];
+      if (next === undefined || !setSort(next)) {
+        return { ok: false, reason: 'sort', field: next ?? '' };
+      }
+      i += 1;
+      continue;
+    }
+
     // 粘连键（2026-11-24）：「搜本 标签全彩」「搜本作者甲」—— 键和值之间没写冒号/空格。
     // 必须排在“裸条件键”和页码之后：单独一个「标签」仍是明确的格式错误。
     const glued = splitGluedCondition(token);
     if (glued) {
       if (glued.field === 'page') {
         if (!/^\d+$/u.test(glued.value) || !setPage(glued.value)) return { ok: false, reason: 'page' };
+        continue;
+      }
+      if (glued.field === 'sort') {
+        if (!setSort(glued.value)) return { ok: false, reason: 'sort', field: glued.value };
         continue;
       }
       const value = glued.value.normalize('NFKC').trim();
@@ -262,9 +320,11 @@ function parseStructuredSearchRest(body) {
   }
 
   if (!hasCondition) {
-    // 没有条件键：交回普通关键词路径；页码词/数字由原解析器处理（或当关键词）。
-    // 但只写了页码没写条件键（`搜本 页码 2`）不是一次有意义的检索，明确回格式错误。
-    return pageGiven ? { ok: false, reason: 'format' } : null;
+    // 没有条件键：纯关键词交回原解析器（数量词由它处理）。
+    // 写了页码/排序但没有条件键 = **关键词检索 + 页码/排序**（2026-11-25）：
+    // 自由词是关键词而不是标题条件；裸数字交回关键词路径当数量词。
+    if (!pageGiven && !sortGiven) return null;
+    return { keywordMode: true, free, numericPages, page, pageGiven, sort, sortGiven };
   }
 
   if (numericPages.length > 0) {
@@ -293,6 +353,7 @@ function parseStructuredSearchRest(body) {
     mode: 'structured',
     conditions,
     page,
+    sort,
     keyword: null,
     countGiven: false,
   };
@@ -595,11 +656,24 @@ function parseSearchRest(rest, max) {
   const body = rest.split(/[\r\n\u2028\u2029]+/u).map((line) => line.trim()).filter(Boolean).join(' ');
   if (!body) return { ok: false, reason: 'format' };
 
-  // 结构化条件（作者/原作/IP/角色/标签/标题/页码）优先；没有条件键时回到普通关键词。
+  // 结构化条件（作者/原作/IP/角色/标签/标题/页码/排序）优先；没有条件键时回到普通关键词。
   const structured = parseStructuredSearchRest(body);
-  if (structured) return structured;
+  if (structured) {
+    if (!structured.keywordMode) return structured;
+    // 关键词 + 页码/排序（2026-11-25）：自由词是关键词；裸数字放回末尾当数量词，
+    // 数量夹取/长度上限仍走同一份关键词实现，不另算字段。
+    const rebuilt = [...structured.free, ...structured.numericPages].join(' ').trim();
+    if (!rebuilt) return { ok: false, reason: 'format' };
+    const base = parseKeywordRest(rebuilt, max);
+    if (!base.ok) return base;
+    return { ...base, page: structured.page, sort: structured.sort };
+  }
 
-  // 末尾单独一个数量词（必须**以空白分隔**，见文件头 ① 的宁窄勿宽口径）。
+  return parseKeywordRest(body, max);
+}
+
+/** 普通关键词段：「关键词 [数量]」；末尾数量词必须以空白分隔（宁窄勿宽）。 */
+function parseKeywordRest(body, max) {
   let keyword = body;
   let count = null;
   const spaced = /\s([0-9一二两三四五六七八九十]+)$/u.exec(body);
@@ -639,7 +713,13 @@ function parseDownloadTargets(rest) {
   const targets = [];
   const seen = new Set();
   for (const chunk of chunks) {
-    const token = String(chunk)
+    const rawChunk = String(chunk).trim();
+    // 2026-11-25：`序号N` 是**显式序号**写法（全局连续序号可超过 9，如 下本 序号12）。
+    // `#`/`第`/`JM` 仍是编号前缀（旧文档写法不破坏）；裸数字仍按旧口径：
+    // 一位 1..9 = 序号，两位及以上 = 编号（下本 1490076 不变）。
+    const explicitOrdinal = /^序号/u.test(rawChunk);
+    const token = rawChunk
+      .replace(/^序号/u, '')
       .replace(/^[#＃]+/u, '')
       .replace(/^jm/iu, '')
       .replace(/^[#＃]+/u, '')
@@ -647,6 +727,15 @@ function parseDownloadTargets(rest) {
       .replace(/[本号个.。]+$/u, '')
       .trim();
     if (!/^\d+$/u.test(token)) return null;
+
+    if (explicitOrdinal) {
+      const rank = Number(token);
+      if (!Number.isSafeInteger(rank) || rank < 1) return null;
+      if (seen.has(`rank:${rank}`)) continue;
+      seen.add(`rank:${rank}`);
+      targets.push({ kind: 'ordinal', ordinal: rank });
+      continue;
+    }
 
     // 序号只有一位 1..9；两位及以上一律当作品编号（JM 的 id 是六位数级别）。
     if (token.length === 1) {
@@ -690,11 +779,12 @@ function parseDownloadRest(rest) {
  * @param {{max?: number}} [options] `max` = 一次最多搜几本（来自 `config.jm.max`）
  * @returns {{ok: true, action: 'search', keyword: string, count: number, countGiven: boolean}
  *   | {ok: true, action: 'search', mode: 'structured', conditions: object, page: number,
- *      keyword: null, countGiven: false}
+ *      sort: string|null, keyword: null, countGiven: false}
+ *   | {ok: true, action: 'page', delta: 1|-1}
  *   | {ok: true, action: 'download',
  *      targets: Array<{kind:'id', target:string}|{kind:'ordinal', ordinal:number}>, raw: string}
  *   | {ok: true, action: 'pack', all: boolean, ordinals: number[]}
- *   | {ok: false, reason: 'format'|'count'|'keyword'|'page'|'unsupported'|'tooMany'|'useDownload', field?: string}}
+ *   | {ok: false, reason: 'format'|'count'|'keyword'|'page'|'sort'|'unsupported'|'tooMany'|'useDownload', field?: string}}
  */
 export function parseJmCommand(text, { max = DEFAULT_JM_MAX } = {}) {
   const normalized = normalizeCommandText(text);
@@ -702,6 +792,11 @@ export function parseJmCommand(text, { max = DEFAULT_JM_MAX } = {}) {
 
   // 「搜本子」「找本子」没有关键词：不能把动词后面的「子」当关键词搜出去。
   if (/^(?:搜本|找本)子\s*$/u.test(normalized)) return { ok: false, reason: 'format' };
+
+  // 翻页（2026-11-25，主人拍板独立词）：沿用本群最近一次搜索清单；
+  // 有没有清单、页码边界由服务层判（解析器不持有状态）。
+  if (/^下一页$/u.test(normalized)) return { ok: true, action: 'page', delta: 1 };
+  if (/^上一页$/u.test(normalized)) return { ok: true, action: 'page', delta: -1 };
 
   const pack = parsePackCommand(normalized);
   if (pack) return pack;
@@ -778,10 +873,10 @@ function withinOneEdit(a, b) {
 function nearestFieldKey(key) {
   const raw = String(key ?? '').normalize('NFKC').trim();
   if (Array.from(raw).length < 2) return null;
-  for (const candidate of [...STRUCTURED_FIELDS.keys(), ...PAGE_KEYS]) {
+  for (const candidate of [...STRUCTURED_FIELDS.keys(), ...PAGE_KEYS, ...SORT_KEYS]) {
     if (Array.from(candidate).length < 2) continue;
     if (withinOneEdit(raw, candidate)) {
-      return { alias: candidate, field: structuredField(candidate) ?? 'page' };
+      return { alias: candidate, field: structuredField(candidate) ?? (isSortKey(candidate) ? 'sort' : 'page') };
     }
   }
   return null;
@@ -804,18 +899,19 @@ export function suggestJmSyntax(text) {
   for (let i = 0; i < tokens.length; i += 1) {
     const pair = splitKeyValue(tokens[i]);
     if (pair) {
-      if (structuredField(pair.key) || isPageKey(pair.key)) continue;
+      if (structuredField(pair.key) || isPageKey(pair.key) || isSortKey(pair.key)) continue;
       const near = nearestFieldKey(pair.key);
       if (near) return { kind: 'field', field: near.field, alias: near.alias, value: pair.value };
       continue;
     }
     // 本身已经是合法条件键的 token 不参与"近失"猜测（否则「标题」会被猜成「标签」）。
-    if (structuredField(tokens[i]) || isPageKey(tokens[i])) continue;
+    if (structuredField(tokens[i]) || isPageKey(tokens[i]) || isSortKey(tokens[i])) continue;
     const near = nearestFieldKey(tokens[i]);
     if (near && tokens[i + 1] !== undefined
       && splitKeyValue(tokens[i + 1]) === null
       && structuredField(tokens[i + 1]) === null
-      && !isPageKey(tokens[i + 1])) {
+      && !isPageKey(tokens[i + 1])
+      && !isSortKey(tokens[i + 1])) {
       return { kind: 'field', field: near.field, alias: near.alias, value: tokens[i + 1] };
     }
   }

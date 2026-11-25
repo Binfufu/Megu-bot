@@ -44,6 +44,11 @@ const MAX_JM_CONDITION_VALUES = 5;
 /** 页码上限(与解析器 `MAX_STRUCTURED_PAGE` 同口径)。 */
 const MAX_JM_PAGE = 9999;
 
+/** 排序工具值 → 边车 order(2026-11-25 主人拍板:最新+热门;与解析器 SORT_VALUES 同口径)。 */
+const JM_SORT_TOOL_VALUES = new Map([
+  ['latest', 'mr'], ['popular', 'mv'], ['mr', 'mr'], ['mv', 'mv'],
+]);
+
 /** 每张图最多带几个修饰 tag(与 `meitu-command.js` 的 `MAX_TAGS` 同口径)。 */
 const MAX_MEITU_TAGS = 2;
 
@@ -117,7 +122,8 @@ function normalizeJmValues(value, field) {
  *   · `original` + `character` 同时出现 → 拒(现有服务不能同时用两种上游模式复核);
  *   · `original`/`character` 多值 → 拒(多值无法逐条复核,与解析器同一约束);
  *   · `count` 只用于关键词检索(1..`DEFAULT_JM_MAX`);结构化清单按配置上限,给 count 明确拒;
- *   · `page` 只用于结构化检索(1..9999);关键词检索没有页码。
+ *   · `page` 两种检索都可用(1..9999;2026-11-25 起关键词检索也有页码);
+ *   · `sort` 两种检索都可用(latest=最新/popular=热门;缺省=主人当前口径「热门」)。
  *
  * ⚠️ 纯数字的 `query` 按关键词原样交给服务 —— 服务自己会把它当编号解析(既有 `搜本 <编号>`
  * 语义)。工具层不复制这条判定,以免命令入口与模型入口分叉。
@@ -157,16 +163,25 @@ export function normalizeJmSearchArgs(args) {
     return invalid('原作/角色只接受单值(多值无法逐条复核)');
   }
 
+  let sort = null;
+  if (args.sort !== undefined && args.sort !== null) {
+    if (typeof args.sort !== 'string') return invalid('sort 必须是字符串');
+    const mapped = JM_SORT_TOOL_VALUES.get(args.sort.normalize('NFKC').trim().toLowerCase());
+    if (!mapped) return invalid('sort 只许 latest(最新)/popular(热门)');
+    sort = mapped;
+  }
+
+  let page = 1;
+  if (args.page !== undefined && args.page !== null) {
+    if (!Number.isSafeInteger(args.page) || args.page < 1 || args.page > MAX_JM_PAGE) {
+      return invalid(`page 只许 1..${MAX_JM_PAGE} 的整数`);
+    }
+    page = args.page;
+  }
+
   if (hasStructured) {
     if (args.count !== undefined && args.count !== null) {
       return invalid('结构化检索不接受 count(清单数量跟服务配置上限)');
-    }
-    let page = 1;
-    if (args.page !== undefined && args.page !== null) {
-      if (!Number.isSafeInteger(args.page) || args.page < 1 || args.page > MAX_JM_PAGE) {
-        return invalid(`page 只许 1..${MAX_JM_PAGE} 的整数`);
-      }
-      page = args.page;
     }
     return {
       ok: true,
@@ -174,6 +189,7 @@ export function normalizeJmSearchArgs(args) {
       mode: 'structured',
       conditions,
       page,
+      sort,
       keyword: null,
       countGiven: false,
       // 2026-11-24 审查 P1-2：工具承诺"只给清单"，绝不复用命令入口"唯一命中自动下载"。
@@ -181,9 +197,6 @@ export function normalizeJmSearchArgs(args) {
     };
   }
 
-  if (args.page !== undefined && args.page !== null) {
-    return invalid('关键词检索没有页码(page 只用于结构化检索)');
-  }
   // 2026-11-24 审查 P1-2：纯数字在服务层会被当编号精确解析并直接下载；
   // 工具不承诺"按编号下本"，明确让模型改用用户的下本指令，避免意外发文件。
   if (/^\d+$/u.test(keyword)) {
@@ -198,7 +211,7 @@ export function normalizeJmSearchArgs(args) {
     count = args.count;
     countGiven = true;
   }
-  return { ok: true, action: 'search', keyword, count, countGiven, listOnly: true };
+  return { ok: true, action: 'search', keyword, count, countGiven, page, sort, listOnly: true };
 }
 
 /**
@@ -308,7 +321,8 @@ export function buildSearchTools({ defineCapability, handlers } = {}) {
           character: { description: '角色;字符串(不能与 original 同时用)' },
           tag: { description: '站点标签;字符串或字符串数组(多值按 AND)' },
           title: { description: '标题文字;字符串或字符串数组(多值按 AND)' },
-          page: { type: 'integer', description: '页码 1..9999,仅结构化检索' },
+          page: { type: 'integer', description: '页码 1..9999,关键词与结构化检索都可用' },
+          sort: { type: 'string', description: '排序:latest=最新/popular=热门(默认)' },
           count: { type: 'integer', description: '一次搜几本 1..5,仅关键词检索' },
         },
       },

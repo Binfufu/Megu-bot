@@ -20,7 +20,7 @@
  *               `parseMeituCommand` 对原句直接解析成功）；fuzzy = 靠既有模糊解析器或本轮新增
  *               的自然句式/「搜」系形状接住。ambiguous / none 一律记 fuzzy（没有严格解析器接住）。
  *   · component 'jm' | 'meitu' | null —— 该谁执行；ambiguous/none 为 null
- *   · action    'search' | 'download' | 'pack' | 'send' | null
+ *   · action    'search' | 'download' | 'pack' | 'page' | 'send' | null
  *               JM 侧沿用解析器给的 action；美图侧发图记 'send'；没解析出命令形状为 null
  *   · parsed    对应解析器的结果对象（成功才有；失败/澄清/不认都是 null）
  *   · hint      'clarify' | 'format' | 'keyword' | null
@@ -361,6 +361,13 @@ export function routeSearchCommand(text, { maxJm = DEFAULT_JM_MAX, maxMeitu = DE
   const normalized = normalizeCommandText(text);
   if (!normalized) return baseResult({ reason: 'empty' });
 
+  // 翻页独立词（2026-11-25）：没有目标名词，但是明确的 JM 命令；与简写一样先走严格解析器。
+  // 有没有清单/页码边界由服务层判（路由不持有状态）。
+  if (/^(?:下一页|上一页)$/u.test(normalized)) {
+    const direct = parseJmCommand(normalized, { max: maxJm });
+    if (direct.ok) return bookResult('strict', direct);
+  }
+
   // 2026-11-24 c106 语料：省掉「本」的 JM 简写（`下这个JM1485799`、`搜作者kusui`）——
   // 没有书/媒体目标名词，目标名词闸会把它当闲聊；但它是明确的 JM 命令，先走严格解析器。
   const jmShorthand = /^(?:下|下载)\s*(?:这个|那张|这条|这个本子|这本|这一本|那个)\s*\S/u.test(normalized)
@@ -418,7 +425,9 @@ export function allowsNonMentionTrigger(route, text) {
     return hasImageTarget(normalized) || /^(?:搜图|找图|来图|发图)/u.test(normalized);
   }
 
-  if (!['search', 'download', 'pack'].includes(route.action)) return false;
+  if (!['search', 'download', 'pack', 'page'].includes(route.action)) return false;
+  // 翻页独立词（2026-11-25）：显式命令且只作用于本群已有清单，非 @ 也放行。
+  if (route.action === 'page' && /^(?:下一页|上一页)$/u.test(normalized)) return true;
   // 省掉「本」的结构化搜索（`搜作者kusui`）：显式「搜/找/查 + 条件键」，放行。
   if (/^(?:搜|找|查)\s*(?:作者名|作者|画师|原作|作品|角色|人物|标签名|标签|标题)(?=\S)/u.test(normalized)) return true;
   // 裸「X本子」**只放行真 @**（2026-11-24 c106 语料是 @ 场景；水群里「作业本子」这类
