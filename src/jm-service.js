@@ -20,6 +20,8 @@
  *   · 下本 <编号 编号> / <序号 序号> → 逐一处理（最多 5 个）；任一目标要先选单元或失败就当场收口。
  *   · 多单元作品默认**先清单、后下载**，不无提示自动整本。
  *   · 整本打包 / 打包1 3 5 7 → 显式选择本群最近单元清单全部/部分，逐单元下载后只发一个合并 PDF。
+ *   · 排序:热门 / 页码:N / 下一页 / 上一页（2026-11-25）→ 排序透传边车 order（旧边车无 sort
+ *     能力时明确报旧版）；翻页沿用本群最近搜索快照，序号全局连续，自动下载只在第 1 页。
  *
  * 为什么 1.210.3 要改（2026-11-12 现场）：
  *   1.210.2 把「纯数字」当关键词丢给站内搜索，JM 对某些编号会回一个**无关作品**（搜 1205081
@@ -97,6 +99,20 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 45_000;
 /** 搜索超过这么久还没回来就先回一句"在搜了"（【暂定】6s；Nielsen 10s 反馈线之内）。 */
 const JM_WORKING_ACK_MS = 6_000;
 
+/**
+ * 默认排序（2026-11-25 主人拍板【暂定】：默认热门）。
+ * 显式「排序:最新」仍可换回最新；QQ 指令热更改默认排序以后再做（主人明确说麻烦、先不做）。
+ * 只在这里改默认值；调用方缺省一律走它，别在别处另写一份。
+ */
+const DEFAULT_SEARCH_SORT = 'mv';
+
+/** 请求排序归一：显式 最新/热门 优先，缺省按当前默认（热门）。 */
+function resolveSearchSort(parsedSearch) {
+  if (parsedSearch?.sort === 'mv') return 'mv';
+  if (parsedSearch?.sort === 'mr') return 'mr';
+  return DEFAULT_SEARCH_SORT;
+}
+
 /** QQ 群文件（file_type=4）硬限 200MB；边车自己的 PDF 目标体积更小，这里只做最后一道闸。 */
 const JM_PDF_HARD_MAX = 200 * 1024 * 1024;
 
@@ -137,6 +153,19 @@ export const DEFAULT_JM_LINES = Object.freeze({
   useDownload: ['要下多个编号，请用「下本 <编号1> <编号2>」，每次最多 5 个。'],
   /** 页码写错。 */
   pageFormat: ['页码要是 1..9999 的整数。'],
+  /** 排序写错（2026-11-25：只收 最新/热门；默认热门）。 */
+  sortFormat: ['排序只支持 最新/热门（默认热门），写法：搜本 关键词 排序:最新。'],
+  /** 边车未声明 sort 能力：旧边车会忽略 order 静默按最新回，不能冒充排序成功。 */
+  sortUnsupported: ['JM 边车还是旧版，暂时不能按热门排序；先让管理员升级边车。'],
+  /** 边车未声明 paging 能力（契约 v5 window）：旧边车把逻辑页当上游页，第 2 页会跳到
+   *  第 81 条起；不能静默翻错页，必须明确报旧版。 */
+  pagingUnsupported: ['JM 边车还是旧版，暂时不能翻页；先让管理员升级边车。'],
+  /** 翻页但没有可翻的清单。 */
+  noSearchPage: ['先搜本，再用「下一页/上一页」翻页。'],
+  /** 已经在第一页还发上一页。 */
+  firstPage: ['已经是第一页了。'],
+  /** 已经在最后一页还发下一页。 */
+  lastPage: ['已经是最后一页了。'],
   /** 打包只能针对本群最近展示的单元清单，不能借用别群或搜索结果。 */
   noUnits: ['先搜本或下本查看单元清单，再发「整本打包」或「打包1 3 5 7」。'],
   packInvalid: ['打包序号不对：请只填当前单元清单内的正整数序号，用空格分隔。'],
@@ -192,6 +221,7 @@ function buildJmNearMissHint(text) {
   const label = JM_FIELD_LABELS[suggestion.field] ?? '这个条件';
   const value = suggestion.value || '关键词';
   if (suggestion.field === 'page') return `页码写成「页码:${/^\d+$/u.test(value) ? value : '2'}」就行（1..9999）。`;
+  if (suggestion.field === 'sort') return '排序写成「排序:热门」就行（最新/热门）。';
   return `想按${label}搜？发「搜本 ${suggestion.alias}:${value}」。只写「搜本 ${value}」是按关键词搜。`;
 }
 
@@ -199,6 +229,7 @@ function buildJmNearMissHint(text) {
 export function buildJmParseFailureReply(text, reason) {
   if (reason === 'unsupported') return buildJmNearMissHint(text) ?? DEFAULT_JM_LINES.unsupportedCondition[0];
   if (reason === 'page') return DEFAULT_JM_LINES.pageFormat[0];
+  if (reason === 'sort') return DEFAULT_JM_LINES.sortFormat[0];
   if (reason === 'tooMany') return DEFAULT_JM_LINES.tooMany[0];
   if (reason === 'useDownload') return DEFAULT_JM_LINES.useDownload[0];
   return buildJmFormatHint(text);
@@ -220,6 +251,12 @@ function queueStateFor(groupId) {
       lastResults: [],
       /** 最近一次展示给用户的**单元清单**：`{kind:'units', albumId, albumTitle, units:[{index, unitId, title}]}`。 */
       lastChoices: null,
+      /**
+       * 最近一次可翻页的搜索快照（2026-11-25）：
+       * `{kind:'keyword'|'structured', parsed, page, total, pageSize}`。
+       * 「下一页/上一页」只认本群这份快照；单元清单/收藏清单不可翻页（置 null）。
+       */
+      lastSearch: null,
     };
     GROUP_QUEUES.set(groupId, state);
   }
@@ -315,19 +352,32 @@ function shortTitle(title, max = 20) {
 /**
  * 多本搜索结果 → 群里的文字清单：序号 + JM 编号 + 作品标题。
  *
+ * 2026-11-25：序号**全局连续**（第 2 页从 6 开始，pageSize=5 时）；page>1 时头部标页码；
+ * 还有更多页时尾部给翻页提示。序号超过 9 用「下本 序号N」或编号选（裸两位数字仍是编号）。
+ *
  * @param {Array<{id:string|number, title?:string}>} results
- * @param {{total?: number}} [extra] 站点总命中数（比列表多时在开头写「共 N 本」）
+ * @param {{total?: number, page?: number, pageSize?: number}} [extra]
+ *   total = 站点总命中数；page/pageSize 用于全局序号与页码标注（缺省 = 第 1 页、无翻页）。
  * @returns {string}
  */
-export function buildSearchListText(results, { total = 0 } = {}) {
+export function buildSearchListText(results, { total = 0, page = 1, pageSize = 0 } = {}) {
   const list = Array.isArray(results) ? results : [];
-  const lines = buildSearchListRows(list);
+  const size = Number.isSafeInteger(pageSize) && pageSize > 0 ? pageSize : list.length;
+  const startRank = (Math.max(1, page) - 1) * size + 1;
+  const lines = buildSearchListRows(list, startRank);
   const siteTotal = Number(total);
+  const hasTotal = Number.isFinite(siteTotal) && siteTotal > list.length;
   // 清单头写明可以一次多个（2026-11-17 现场：用户自然就会回「下本1 2」，提示要跟上）。
-  const head = Number.isFinite(siteTotal) && siteTotal > list.length
-    ? `搜到${list.length}本（共${siteTotal}本），回复 下本 <编号或序号> 打包整本 PDF（可一次多个，空格隔开）：`
-    : `搜到${list.length}本，回复 下本 <编号或序号> 打包整本 PDF（可一次多个，空格隔开）：`;
-  return `${head}\n${lines.join('\n')}`;
+  const pageNote = page > 1 ? `，第${page}页` : '';
+  const head = hasTotal
+    ? `搜到${list.length}本（共${siteTotal}本${pageNote}），回复 下本 <编号或序号> 打包整本 PDF（可一次多个，空格隔开）：`
+    : `搜到${list.length}本${page > 1 ? `（第${page}页）` : ''}，回复 下本 <编号或序号> 打包整本 PDF（可一次多个，空格隔开）：`;
+  // 尾部提示按「当前页之后还有没有」判，不在末页继续提示下一页（审查 P2 修）。
+  const tail = [];
+  if (Number.isFinite(siteTotal) && siteTotal > page * size) tail.push('回复 下一页 翻页。');
+  if (page > 1) tail.push('回复 上一页 返回上一页。');
+  if (Number.isFinite(siteTotal) && siteTotal > 9) tail.push('序号超过 9 用 下本 序号N 或 下本 <编号>。');
+  return [head, ...lines, ...tail].join('\n');
 }
 
 /** 结构化检索条件的中文摘要（只用于回执，不参与匹配）。 */
@@ -347,11 +397,12 @@ export function buildStructuredConditionText(conditions = {}) {
  * 明确写“本次检查范围内”，不把一页候选的过滤结果冒充全站总数。
  */
 export function buildStructuredSearchListText({
-  results = [], page = 1, scanned = 0, matched = 0, conditions = {}, unknownDetails = 0,
+  results = [], page = 1, scanned = 0, matched = 0, conditions = {}, unknownDetails = 0, sort = null,
 } = {}) {
   const list = Array.isArray(results) ? results : [];
   const conditionText = buildStructuredConditionText(conditions);
-  const scope = `扫描 ${scanned} 本、第 ${page} 页${unknownDetails > 0 ? `，其中 ${unknownDetails} 本缺文字详情` : ''}`;
+  const sortNote = sort === 'mr' ? '，按最新排序' : sort === 'mv' ? '，按热门排序' : '';
+  const scope = `扫描 ${scanned} 本、第 ${page} 页${sortNote}${unknownDetails > 0 ? `，其中 ${unknownDetails} 本缺文字详情` : ''}`;
   const head = conditionText
     ? `本次检查范围内找到 ${matched} 本（条件：${conditionText}；${scope}）。回复 下本 <编号或序号> 或 收藏 <编号>：`
     : `本次检查范围内找到 ${matched} 本（${scope}）。回复 下本 <编号或序号> 或 收藏 <编号>：`;
@@ -361,12 +412,12 @@ export function buildStructuredSearchListText({
   return [head, ...buildSearchListRows(list), ...tail].join('\n');
 }
 
-/** 作者与标签只用于复核，不拼进清单行。 */
-function buildSearchListRows(list) {
+/** 作者与标签只用于复核，不拼进清单行。startRank 起算全局序号（缺省从 1 起）。 */
+function buildSearchListRows(list, startRank = 1) {
   return list.map((item, index) => {
     const id = String(item?.id ?? '').trim();
     const title = shortTitle(item?.title, SEARCH_LIST_TITLE_CHARS);
-    return `${index + 1}. JM${id}${title ? ` ${title}` : ''}`;
+    return `${startRank + index}. JM${id}${title ? ` ${title}` : ''}`;
   });
 }
 
@@ -671,13 +722,24 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
       ]);
 
       /** 只有完整清单送达才允许按序号选；失败时也清掉旧清单，避免歧义。 */
-      const showList = async (text, { results = [], choices = null, startedAt, reason = 'ok', action = 'search', sent = 0 }) => {
+      const showList = async (text, { results = [], choices = null, search = null, startedAt, reason = 'ok', action = 'search', sent = 0 }) => {
         const failure = await replyList(text);
         state.lastResults = failure ? [] : results;
         state.lastChoices = failure ? null : choices;
+        state.lastSearch = failure ? null : search;
         if (failure) return { ok: false, reason: failure, sent, action };
         if (startedAt !== undefined) state.lastSearchAt = startedAt;
         return { ok: true, reason, sent, action };
+      };
+
+      /**
+       * 新搜索（非翻页）失败/0 命中时清掉旧清单与翻页快照：否则「下一页」会拿上一次
+       * 搜索的快照重搜，用户看到的和以为的不是同一份（复审 P1 修）。
+       */
+      const clearSearchState = () => {
+        state.lastResults = [];
+        state.lastChoices = null;
+        state.lastSearch = null;
       };
 
       /** 展示单元清单（后续「下本 <序号/单元编号>」用）。 */
@@ -799,7 +861,7 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
        * 原作/角色详情当前边车不提供，只能作为主要条件信任上游模式；若两者同时出现，
        * 解析器已明确拒绝，不静默丢一个。
        */
-      const runStructuredSearch = async (parsedSearch, startedAt) => {
+      const runStructuredSearch = async (parsedSearch, startedAt, { viaPage = false } = {}) => {
         const conditions = parsedSearch.conditions && typeof parsedSearch.conditions === 'object'
           ? parsedSearch.conditions
           : {};
@@ -825,6 +887,7 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
           '--timeout', String(timeoutMs),
         ]);
         if (!health.payload || health.payload.ok !== true) {
+          if (!viaPage) clearSearchState();
           return await replyFetchFailure(health.payload, health.fetched);
         }
         const capabilities = Array.isArray(health.payload.capabilities) ? health.payload.capabilities : [];
@@ -833,6 +896,15 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
           await reply(pickLine('detailsUnsupported'));
           return { ok: false, reason: 'details_unsupported', action: 'search' };
         }
+        // 排序（2026-11-25 默认热门；显式「排序:最新」换回最新）：
+        // · 显式要热门 + 旧边车没有 sort 能力 → 明确报旧版，不拿最新冒充热门；
+        // · 缺省热门 + 旧边车没有 sort 能力 → 退回边车缺省（最新），不传 order、不冒充。
+        if (parsedSearch.sort === 'mv' && !capabilities.includes('sort')) {
+          log.warn(`JM：边车不支持排序（capabilities=${JSON.stringify(capabilities)}），拒绝热门排序`);
+          await reply(pickLine('sortUnsupported'));
+          return { ok: false, reason: 'sort_unsupported', action: 'search' };
+        }
+        const sort = capabilities.includes('sort') ? resolveSearchSort(parsedSearch) : null;
 
         const mode = {
           original: 'work',
@@ -850,7 +922,7 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
           ? Number(parsedSearch.page) : 1;
         // 结构化最多取 10 个候选（边车上限）；展示仍受 QQBOT_JM_MAX 限制。
         const fetchLimit = 10;
-        const { fetched, payload } = await callFetch([
+        const searchArgs = [
           '--op', 'search',
           '--q', primaryValue,
           '--limit', String(fetchLimit),
@@ -860,8 +932,13 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
           '--images', '0',
           '--api', apiBase,
           '--timeout', String(timeoutMs),
-        ], { slowAck: true });
-        if (!payload || payload.ok !== true) return await replyFetchFailure(payload, fetched);
+        ];
+        if (sort) searchArgs.push('--order', sort);
+        const { fetched, payload } = await callFetch(searchArgs, { slowAck: true });
+        if (!payload || payload.ok !== true) {
+          if (!viaPage) clearSearchState();
+          return await replyFetchFailure(payload, fetched);
+        }
 
         let results = Array.isArray(payload.results)
           ? payload.results.filter((item) => item && String(item.id ?? '').trim() !== '')
@@ -911,6 +988,11 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
         if (matched.length === 0) {
           state.lastResults = [];
           state.lastChoices = null;
+          // 翻页翻到空页时保留快照并推进页码，让用户还能「上一页」回去；新搜索 0 命中才清。
+          if (!viaPage) state.lastSearch = null;
+          else if (state.lastSearch) {
+            state.lastSearch = { ...state.lastSearch, page, parsed: { ...state.lastSearch.parsed, page } };
+          }
           log.info(`JM：结构化检索 0 命中（mode=${mode} page=${page} 扫描=${scanned} 缺详情=${unknownDetails}）`);
           await reply(buildStructuredSearchEmptyText({ scanned, conditions, unknownDetails }));
           return { ok: false, reason: 'no_result', action: 'search' };
@@ -924,11 +1006,165 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
           matched: matched.length,
           conditions,
           unknownDetails,
+          sort,
         }), {
           results: shown.map((item, index) => ({ rank: index + 1, id: String(item.id), title: String(item.title ?? '') })),
+          search: { kind: 'structured', parsed: { ...parsedSearch, page }, page, total: Number(payload.total) || 0, pageSize: shown.length },
           startedAt,
         });
       };
+
+      /**
+       * 关键词搜索（2026-11-25 抽成函数：新搜索与「下一页/上一页」重搜共用一份实现）。
+       * viaPage=true = 翻页重搜：不吃冷却（startedAt 不传）、唯一命中也不自动下载。
+       */
+      const runKeywordSearch = async (parsedSearch, startedAt, { viaPage = false } = {}) => {
+        const keyword = String(parsedSearch.keyword ?? '').trim();
+        const page = Number.isSafeInteger(Number(parsedSearch.page)) && Number(parsedSearch.page) > 0
+          ? Number(parsedSearch.page) : 1;
+        // 排序（2026-11-25 默认热门；显式「排序:最新」换回最新）。
+        // 能力闸只在**显式要热门**或翻页时核：缺 sort 能力时显式热门明确报旧版；
+        // 缺省热门在旧边车退回缺省（最新），不传 order、不冒充。
+        let sort = resolveSearchSort(parsedSearch);
+        const needHealth = parsedSearch.sort === 'mv' || page > 1;
+        if (needHealth) {
+          const health = await callFetch([
+            '--op', 'health', '--api', apiBase, '--timeout', String(timeoutMs),
+          ]);
+          if (!health.payload || health.payload.ok !== true) {
+            if (!viaPage) clearSearchState();
+            return await replyFetchFailure(health.payload, health.fetched);
+          }
+          const caps = Array.isArray(health.payload.capabilities) ? health.payload.capabilities : [];
+          if (parsedSearch.sort === 'mv' && !caps.includes('sort')) {
+            log.warn(`JM：边车不支持排序（capabilities=${JSON.stringify(caps)}），拒绝热门排序`);
+            await reply(pickLine('sortUnsupported'));
+            return { ok: false, reason: 'sort_unsupported', action: 'search' };
+          }
+          if (page > 1 && !caps.includes('paging')) {
+            log.warn(`JM：边车不支持逻辑翻页（capabilities=${JSON.stringify(caps)}），拒绝翻页`);
+            await reply(pickLine('pagingUnsupported'));
+            return { ok: false, reason: 'paging_unsupported', action: 'search' };
+          }
+          if (!caps.includes('sort')) sort = null;
+        }
+        const count = Math.min(Number.isSafeInteger(parsedSearch.count) && parsedSearch.count > 0 ? parsedSearch.count : maxCount, maxCount);
+        const searchArgs = [
+          '--op', 'search',
+          '--q', keyword,
+          '--limit', String(count),
+          '--page', String(page),
+          '--api', apiBase,
+          '--images', '0',
+          '--timeout', String(timeoutMs),
+        ];
+        // 第 2 页起用逻辑翻页窗口（契约 v5）：每页 count 条，由边车映射到上游分页。
+        if (page > 1) searchArgs.push('--window', '1');
+        if (sort) searchArgs.push('--order', sort);
+        const { fetched, payload } = await callFetch(searchArgs, { slowAck: true });
+        if (!payload || payload.ok !== true) {
+          if (!viaPage) clearSearchState();
+          return await replyFetchFailure(payload, fetched);
+        }
+
+        const results = Array.isArray(payload.results)
+          ? payload.results.filter((item) => item && String(item.id ?? '').trim() !== '')
+          : [];
+        const siteTotal = Number.isFinite(Number(payload.total)) ? Number(payload.total) : 0;
+        // total=0 却有结果：多半是边车把「0 结果页」的推荐位当成了结果（1.210.2 现场同类），按 0 本收口。
+        if (results.length === 0 || siteTotal === 0) {
+          if (results.length > 0) {
+            log.warn(`JM：搜索 total=0 但有 ${results.length} 条结果，按 0 本处理（疑似推荐位冒充）`);
+          }
+          state.lastResults = [];
+          state.lastChoices = null;
+          // 翻页翻到空页（站点总数变了）保留快照并推进页码，让用户还能「上一页」回去。
+          if (!viaPage) state.lastSearch = null;
+          else if (state.lastSearch) {
+            state.lastSearch = { ...state.lastSearch, page, parsed: { ...state.lastSearch.parsed, page } };
+          }
+          log.info('JM：搜索成功但 0 本');
+          await reply(pickLine('noResult'));
+          return { ok: false, reason: 'no_result', action: 'search' };
+        }
+
+        // 模糊搜本（「搜原神的本子」「来个莉音的本」）是新入口：只给清单，
+        // 不沿用普通搜索“唯一命中自动下载”的旧行为，避免用户还没选就发文件。
+        // 2026-11-24 审查 P1-2：模型工具 `jm_search` 也承诺“只给清单”，用 `listOnly:true`
+        // 走同一个闸 —— 否则唯一命中会在模型只想要候选时直接发 PDF。
+        // 2026-11-25 主人拍板：自动下载**只在第 1 页**启用；翻页重搜一律只给清单。
+        const autoSingle = results.length === 1 && siteTotal === 1
+          && !parsedSearch.countGiven && parsedSearch.fuzzy !== true && parsedSearch.listOnly !== true
+          && page === 1 && !viaPage;
+        if (autoSingle) {
+          const hit = results[0];
+          // 单本也要先解析单元：多单元作品不能整本下。
+          const resolved = await resolveNumber(hit.id);
+          if (!resolved.payload || resolved.payload.ok !== true) {
+            return await replyFetchFailure(resolved.payload, resolved.fetched);
+          }
+          const album = resolved.payload.album && typeof resolved.payload.album === 'object' ? resolved.payload.album : {};
+          const units = Array.isArray(album.units) ? album.units : [];
+          if (units.length > 1) {
+            return await showUnitList({
+              albumId: album.id || hit.id,
+              albumTitle: album.title || hit.title || '',
+              units,
+              matchedUnitId: null,
+              startedAt,
+            });
+          }
+          const title = String(album.title || hit.title || '');
+          const targetId = String(album.id || hit.id);
+          await reply(buildDownloadAck(title, targetId));
+          const sent = await sendAlbumPdf(targetId, { unitId: null, titleHint: title, idForName: targetId });
+          if (sent.ok !== true) return { ok: false, reason: sent.reason ?? 'download_failed', action: 'search' };
+          state.lastSearchAt = startedAt;
+          // 这次新搜索没有展示清单（直接发了文件）：旧清单快照不再代表「最近一次搜索」。
+          clearSearchState();
+          return { ok: true, reason: 'ok', sent: 1, action: 'search' };
+        }
+
+        // ⑤ 多本（或「单本但不是唯一命中」）→ 只回文字清单，送达后记住选择状态。
+        // 序号全局连续：第 2 页从 pageSize+1 起（主人 2026-11-25 拍板）。
+        return showList(buildSearchListText(results, { total: siteTotal, page, pageSize: count }), {
+          results: results.map((item, index) => ({
+            rank: (page - 1) * count + index + 1,
+            id: String(item.id),
+            title: String(item.title ?? ''),
+          })),
+          search: { kind: 'keyword', parsed: { ...parsedSearch, page }, page, total: siteTotal, pageSize: count },
+          startedAt,
+        });
+      };
+
+      // —— 翻页（2026-11-25，独立词「下一页/上一页」）：只认本群最近一次搜索快照 ——
+      // 【暂定】翻页不吃搜本冷却（与「下本不吃冷却」同口径）；成功也不刷新冷却时间。
+      if (parsed.action === 'page') {
+        const snap = state.lastSearch;
+        if (!snap || !snap.parsed) {
+          await reply(pickLine('noSearchPage'));
+          return { ok: false, reason: 'no_search', action: 'page' };
+        }
+        const delta = parsed.delta === -1 ? -1 : 1;
+        const newPage = (Number(snap.page) || 1) + delta;
+        if (newPage < 1) {
+          await reply(pickLine('firstPage'));
+          return { ok: false, reason: 'first_page', action: 'page' };
+        }
+        if (snap.kind === 'keyword') {
+          const size = Number(snap.pageSize) > 0 ? Number(snap.pageSize) : 1;
+          const lastPage = Math.max(1, Math.ceil((Number(snap.total) || 0) / size));
+          if (newPage > lastPage) {
+            await reply(pickLine('lastPage'));
+            return { ok: false, reason: 'last_page', action: 'page' };
+          }
+          return await runKeywordSearch({ ...snap.parsed, page: newPage }, undefined, { viaPage: true });
+        }
+        // 结构化检索没有可靠的「末页」（total 是上游模式总数，逐页复核命中数不定）：
+        // 向前翻到空页回既有「本次检查范围内 0 命中」话术，快照保留可「上一页」回去。
+        return await runStructuredSearch({ ...snap.parsed, page: newPage }, undefined, { viaPage: true });
+      }
 
       if (parsed.action === 'search') {
         // ② 冷却只在**搜本**上拦、只在**成功**时记（见文件头 ②）。
@@ -950,7 +1186,10 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
         // 模糊入口（「搜123的本子」）不适用：它承诺只给清单，不能按编号直接下载。
         if (parsed.fuzzy !== true && NUMERIC_ID_RE.test(keyword)) {
           const { fetched, payload } = await resolveNumber(keyword);
-          if (!payload || payload.ok !== true) return await replyFetchFailure(payload, fetched);
+          if (!payload || payload.ok !== true) {
+            clearSearchState();
+            return await replyFetchFailure(payload, fetched);
+          }
           const album = payload.album && typeof payload.album === 'object' ? payload.album : {};
           const units = Array.isArray(album.units) ? album.units : [];
           const matched = payload.matchedUnit && typeof payload.matchedUnit === 'object' ? payload.matchedUnit : null;
@@ -977,76 +1216,8 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
           return { ok: true, reason: 'ok', sent: 1, action: 'search' };
         }
 
-        // ④ 关键词搜索：不再要图（--images 0），也不发拼图/封面。
-        const count = Math.min(Number.isSafeInteger(parsed.count) && parsed.count > 0 ? parsed.count : maxCount, maxCount);
-        const { fetched, payload } = await callFetch([
-          '--op', 'search',
-          '--q', keyword,
-          '--limit', String(count),
-          '--api', apiBase,
-          '--images', '0',
-          '--timeout', String(timeoutMs),
-        ], { slowAck: true });
-        if (!payload || payload.ok !== true) return await replyFetchFailure(payload, fetched);
-
-        const results = Array.isArray(payload.results)
-          ? payload.results.filter((item) => item && String(item.id ?? '').trim() !== '')
-          : [];
-        const siteTotal = Number.isFinite(Number(payload.total)) ? Number(payload.total) : 0;
-        // total=0 却有结果：多半是边车把「0 结果页」的推荐位当成了结果（1.210.2 现场同类），按 0 本收口。
-        if (results.length === 0 || siteTotal === 0) {
-          if (results.length > 0) {
-            log.warn(`JM：搜索 total=0 但有 ${results.length} 条结果，按 0 本处理（疑似推荐位冒充）`);
-          }
-          state.lastResults = [];
-          state.lastChoices = null;
-          log.info('JM：搜索成功但 0 本');
-          await reply(pickLine('noResult'));
-          return { ok: false, reason: 'no_result', action: 'search' };
-        }
-
-        // 模糊搜本（「搜原神的本子」「来个莉音的本」）是新入口：只给清单，
-        // 不沿用普通搜索“唯一命中自动下载”的旧行为，避免用户还没选就发文件。
-        // 2026-11-24 审查 P1-2：模型工具 `jm_search` 也承诺“只给清单”，用 `listOnly:true`
-        // 走同一个闸 —— 否则唯一命中会在模型只想要候选时直接发 PDF。
-        const autoSingle = results.length === 1 && siteTotal === 1
-          && !parsed.countGiven && parsed.fuzzy !== true && parsed.listOnly !== true;
-        if (autoSingle) {
-          const hit = results[0];
-          // 单本也要先解析单元：多单元作品不能整本下。
-          const resolved = await resolveNumber(hit.id);
-          if (!resolved.payload || resolved.payload.ok !== true) {
-            return await replyFetchFailure(resolved.payload, resolved.fetched);
-          }
-          const album = resolved.payload.album && typeof resolved.payload.album === 'object' ? resolved.payload.album : {};
-          const units = Array.isArray(album.units) ? album.units : [];
-          if (units.length > 1) {
-            return await showUnitList({
-              albumId: album.id || hit.id,
-              albumTitle: album.title || hit.title || '',
-              units,
-              matchedUnitId: null,
-              startedAt,
-            });
-          }
-          const title = String(album.title || hit.title || '');
-          const targetId = String(album.id || hit.id);
-          await reply(buildDownloadAck(title, targetId));
-          const sent = await sendAlbumPdf(targetId, { unitId: null, titleHint: title, idForName: targetId });
-          if (sent.ok !== true) return { ok: false, reason: sent.reason ?? 'download_failed', action: 'search' };
-          state.lastSearchAt = startedAt;
-          return { ok: true, reason: 'ok', sent: 1, action: 'search' };
-        }
-
-        // ⑤ 多本（或「单本但不是唯一命中」）→ 只回文字清单，送达后记住选择状态。
-        return showList(buildSearchListText(results, { total: siteTotal }), {
-          results: results.map((item, index) => ({
-            rank: index + 1,
-            id: String(item.id),
-            title: String(item.title ?? ''),
-          })),
-          startedAt,
-        });
+        // ④ 关键词搜索（含排序/页码）：不再要图（--images 0），也不发拼图/封面。
+        return await runKeywordSearch(parsed, startedAt);
       }
 
       if (parsed.action === 'pack') {
@@ -1149,7 +1320,10 @@ export async function handleJmCommand({ message, parsed, deps = {} }) {
             titleHint = String(unit.title || choice.albumTitle || '');
             ackId = unitId;
           } else {
-            const entry = Number.isSafeInteger(ordinal) ? state.lastResults[ordinal - 1] : null;
+            // 2026-11-25：序号全局连续（第 2 页从 6 起），按 rank 找而不是按数组下标。
+            const entry = Number.isSafeInteger(ordinal)
+              ? state.lastResults.find((item) => Number(item?.rank) === ordinal) ?? null
+              : null;
             if (!entry) {
               log.info(`JM：下本序号 ${ordinal} 没有对应的搜索结果`);
               await reply(state.lastResults.length === 0 ? pickLine('noSearch') : pickLine('ordinalMissing'));

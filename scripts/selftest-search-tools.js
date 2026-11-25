@@ -77,14 +77,20 @@ export function registerSearchToolTests({ test: testFn, assert: a }) {
 
 test('normalizeJmSearchArgs 关键词:trim/NFKC、count 缺省与显式、countGiven 正确、只给清单', () => {
   assert.deepEqual(normalizeJmSearchArgs({ query: ' 全彩 ' }), {
-    ok: true, action: 'search', keyword: '全彩', count: DEFAULT_JM_MAX, countGiven: false, listOnly: true,
+    ok: true, action: 'search', keyword: '全彩', count: DEFAULT_JM_MAX, countGiven: false, page: 1, sort: null, listOnly: true,
   });
   assert.deepEqual(normalizeJmSearchArgs({ query: '　全彩　' }), {
-    ok: true, action: 'search', keyword: '全彩', count: DEFAULT_JM_MAX, countGiven: false, listOnly: true,
+    ok: true, action: 'search', keyword: '全彩', count: DEFAULT_JM_MAX, countGiven: false, page: 1, sort: null, listOnly: true,
   }, 'NFKC + trim 后应只剩关键词');
   assert.deepEqual(normalizeJmSearchArgs({ query: '全彩', count: 3 }), {
-    ok: true, action: 'search', keyword: '全彩', count: 3, countGiven: true, listOnly: true,
+    ok: true, action: 'search', keyword: '全彩', count: 3, countGiven: true, page: 1, sort: null, listOnly: true,
   });
+  // 2026-11-25：关键词检索也认 page/sort（主人拍板排序两种都要）。
+  assert.deepEqual(normalizeJmSearchArgs({ query: '全彩', page: 2, sort: 'popular' }), {
+    ok: true, action: 'search', keyword: '全彩', count: DEFAULT_JM_MAX, countGiven: false, page: 2, sort: 'mv', listOnly: true,
+  });
+  assert.equal(normalizeJmSearchArgs({ query: '全彩', sort: 'latest' }).sort, 'mr');
+  assert.equal(normalizeJmSearchArgs({ creator: '甲', sort: 'popular' }).sort, 'mv');
   // 边界:长度 60 刚好收、count 1/5 收。
   assert.equal(normalizeJmSearchArgs({ query: '本'.repeat(MAX_JM_KEYWORD_CHARS) }).ok, true);
   assert.equal(normalizeJmSearchArgs({ query: '本', count: 1 }).count, 1);
@@ -97,11 +103,11 @@ test('normalizeJmSearchArgs 关键词:trim/NFKC、count 缺省与显式、countG
 test('normalizeJmSearchArgs 结构化:单值数组/多值 AND/page、keyword 置空', () => {
   assert.deepEqual(normalizeJmSearchArgs({ creator: '甲' }), {
     ok: true, action: 'search', mode: 'structured',
-    conditions: { creator: ['甲'] }, page: 1, keyword: null, countGiven: false, listOnly: true,
+    conditions: { creator: ['甲'] }, page: 1, sort: null, keyword: null, countGiven: false, listOnly: true,
   });
   assert.deepEqual(normalizeJmSearchArgs({ creator: ['甲', '乙'], tag: ['丁'], page: 3 }), {
     ok: true, action: 'search', mode: 'structured',
-    conditions: { creator: ['甲', '乙'], tag: ['丁'] }, page: 3, keyword: null, countGiven: false, listOnly: true,
+    conditions: { creator: ['甲', '乙'], tag: ['丁'] }, page: 3, sort: null, keyword: null, countGiven: false, listOnly: true,
   }, '多值按 AND 原样传给服务(数组),页码原样');
   for (const [field, value] of [
     ['original', '原作甲'], ['character', '角色乙'], ['title', '标题丙'], ['tag', '标签丁'],
@@ -147,7 +153,11 @@ test('normalizeJmSearchArgs 反例:空/非法/混用/越界全部 INVALID_ARGUME
     [{ query: '甲', count: DEFAULT_JM_MAX + 1 }, 'count 超上限'],
     [{ query: '甲', count: 2.5 }, 'count 小数'],
     [{ query: '甲', count: '2' }, 'count 字符串'],
-    [{ query: '甲', page: 1 }, '关键词检索给页码'],
+    [{ query: '甲', page: 0 }, '关键词 page=0'],
+    [{ query: '甲', page: 10000 }, '关键词 page 超上限'],
+    [{ query: '甲', sort: 'hot' }, '未知排序值'],
+    [{ query: '甲', sort: 123 }, 'sort 不是字符串'],
+    [{ creator: '甲', sort: 'tr' }, '上游未开放排序值'],
     [{ creator: '甲', page: 0 }, 'page=0'],
     [{ creator: '甲', page: 10000 }, 'page 超上限'],
     [{ creator: '甲', page: 1.5 }, 'page 小数'],
@@ -239,7 +249,7 @@ test('buildSearchTools:两个 mutating 能力、id 钉字面值、costCny 0、�
   assert.match(tools[1].description, /美图/);
   // jm_search schema 覆盖要求里的字段。
   assert.deepEqual(Object.keys(tools[0].inputSchema.properties).sort(),
-    ['character', 'count', 'creator', 'original', 'page', 'query', 'tag', 'title'].sort());
+    ['character', 'count', 'creator', 'original', 'page', 'query', 'sort', 'tag', 'title'].sort());
   assert.deepEqual(Object.keys(tools[1].inputSchema.properties).sort(),
     ['character', 'count', 'tags', 'tier'].sort());
   // 构造期 fail loud(拼错装配不许静默上线)。
@@ -261,7 +271,7 @@ test('execute:合法参数透传 parsed 与 ctx,结果原样;非法参数回 INV
   assert.deepEqual(jmResult, { ok: true, data: { action: 'search' } });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].kind, 'jm');
-  assert.deepEqual(calls[0].parsed, { ok: true, action: 'search', keyword: '全彩', count: 2, countGiven: true, listOnly: true });
+  assert.deepEqual(calls[0].parsed, { ok: true, action: 'search', keyword: '全彩', count: 2, countGiven: true, page: 1, sort: null, listOnly: true });
   assert.equal(calls[0].ctx, ctx, 'ctx 必须原样透传(同一个对象)');
 
   const meituResult = await meituTool.execute({ count: 2, character: '示例甲', tags: ['swimsuit'] }, ctx);

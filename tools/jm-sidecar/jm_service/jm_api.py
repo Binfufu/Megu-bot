@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from pathlib import Path
 
@@ -23,6 +24,18 @@ SEARCH_MODES = {
     "tag": "search_tag",
     "actor": "search_actor",
 }
+
+# /search?order=xxx → 上游 search_* 的 order_by 实参（JMComic-Crawler-Python v2.7.12
+# JmMagicConstants：mr=最新、mv=观看数/热门）。上游另有 tf/mp/tr/md，本契约只开放
+# 这两种（主人 2026-11-25 拍板）；未知值明确拒绝，不静默按默认排序。
+SEARCH_ORDERS = ("mr", "mv")
+
+# 逻辑翻页（契约 v5 window=1，2026-11-25）：Node 的每页条数（默认 5）**不等于**
+# 上游 /search 的站内分页条数（JM 每页几十条，见 jmcomic jm_config.PAGE_SIZE_SEARCH）。
+# 把逻辑页当上游页会错位（第 2 页实际是第 81 条起），所以这里以第 1 页实际条数
+# 作为上游分页步长、直接取覆盖目标区间的上游页再切片 —— **不写死上游每页条数**。
+# 上游页结果按 (mode, order, query, page) 内存缓存（TTL 跟随 search_ttl_sec）。
+WINDOW_PAGE_CACHE_MAX = 64
 
 
 class JmError(RuntimeError):
@@ -48,6 +61,9 @@ class JmGateway:
         self._detail_pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix="jm-detail")
         self._cover_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="jm-cover")
         self._download_lock = threading.Lock()  # 下载由单 worker 调用，这里只防御并发调用
+        # 逻辑翻页用的上游页缓存（见 WINDOW_PAGE_CACHE_MAX 注释）；值 = (fetched_at, search dict)
+        self._window_pages = OrderedDict()
+        self._window_lock = threading.Lock()
 
     # ------------------------------------------------------------------ #
     # 初始化
@@ -160,15 +176,18 @@ class JmGateway:
     # ------------------------------------------------------------------ #
     # 搜索
     # ------------------------------------------------------------------ #
-    def search(self, query: str, page: int = 1, mode: str = "site") -> dict:
+    def search(self, query: str, page: int = 1, mode: str = "site", order_by: str = "mr") -> dict:
         """站内搜索，返回 {total, items:[{id,title,tags,author,image}]}。
 
         mode: site(默认)/work/author/tag/actor，分别对应 jmcomic 的 search_*。
+        order_by: mr(最新，默认)/mv(观看数/热门)；上游五种模式都接受 order_by。
         """
         if mode not in SEARCH_MODES:
             raise JmError("invalid_mode", f"mode 仅支持 {'/'.join(SEARCH_MODES)}")
+        if order_by not in SEARCH_ORDERS:
+            raise JmError("invalid_order", f"order 仅支持 {'/'.join(SEARCH_ORDERS)}")
         timeout = max(5.0, float(self.cfg.jm_timeout_sec))
-        future = self._submit(self._search_pool, self._do_search, query, page, mode)
+        future = self._submit(self._search_pool, self._do_search, query, page, mode, order_by)
         page_obj = self._wait_one(future, timeout, "jm_search_timeout", "JM 搜索超时，请稍后重试")
         items = []
         for aid, info in getattr(page_obj, "content", []) or []:
@@ -182,10 +201,64 @@ class JmGateway:
             })
         return {"total": int(getattr(page_obj, "total", 0) or 0), "items": items}
 
-    def _do_search(self, query: str, page: int, mode: str = "site"):
+    def search_window(self, query: str, page: int = 1, limit: int = 5,
+                      mode: str = "site", order_by: str = "mr") -> dict:
+        """逻辑翻页（window=1）：取第 page 个「每页 limit 条」窗口，返回 {total, items}。
+
+        上游 /search 的 page 是**站内分页**（JM 每页几十条），不是「每页 limit 条」：
+        直接把逻辑页当上游页会让第 2 页从第 81 条起。这里用第 1 页实际条数作为
+        上游分页步长（第 1 页必然是满页，除非总共只有一页），直接跳到覆盖目标
+        区间的上游页再切片，不写死上游每页条数，也不顺序拉所有中间页。
+        """
+        page = max(1, int(page))
+        limit = max(1, int(limit))
+        offset = (page - 1) * limit
+        need = offset + limit
+        first = self._cached_search_page(query, 1, mode, order_by)
+        total = int(first.get("total") or 0)
+        first_items = list(first.get("items") or [])
+        if not first_items:
+            return {"total": total, "items": []}
+        if total <= len(first_items):
+            # 上游只有一页，没有分页步长可言，直接按逻辑序号切片。
+            return {"total": total, "items": first_items[offset:need]}
+        page_size = len(first_items)  # 满页条数 = 上游分页步长
+        total_pages = (total + page_size - 1) // page_size
+        first_page = offset // page_size + 1
+        if first_page > total_pages:
+            return {"total": total, "items": []}
+        last_page = min(total_pages, (need - 1) // page_size + 1)
+        merged = list(first_items) if first_page == 1 else []
+        for upstream_page in range(2 if first_page == 1 else first_page, last_page + 1):
+            chunk = list(self._cached_search_page(query, upstream_page, mode, order_by).get("items") or [])
+            if not chunk:
+                break
+            merged.extend(chunk)
+        start = offset - (first_page - 1) * page_size
+        return {"total": total, "items": merged[start:start + limit]}
+
+    def _cached_search_page(self, query: str, page: int, mode: str, order_by: str) -> dict:
+        """按上游页缓存 search 结果；缓存命中不重复请求上游（翻页/回翻都受益）。"""
+        key = (mode, order_by, str(query), int(page))
+        ttl = max(0.0, float(getattr(self.cfg, "search_ttl_sec", 0) or 0))
+        now = time.time()
+        with self._window_lock:
+            entry = self._window_pages.get(key)
+            if entry is not None and (ttl <= 0 or now - entry[0] <= ttl):
+                self._window_pages.move_to_end(key)
+                return entry[1]
+        result = self.search(query, page=page, mode=mode, order_by=order_by)
+        with self._window_lock:
+            self._window_pages[key] = (now, result)
+            self._window_pages.move_to_end(key)
+            while len(self._window_pages) > WINDOW_PAGE_CACHE_MAX:
+                self._window_pages.popitem(last=False)
+        return result
+
+    def _do_search(self, query: str, page: int, mode: str = "site", order_by: str = "mr"):
         try:
             method = getattr(self._get_client(), SEARCH_MODES.get(mode, "search_site"))
-            return method(query, page=int(page))
+            return method(query, page=int(page), order_by=order_by)
         except JmError:
             raise
         except Exception as exc:  # noqa: BLE001

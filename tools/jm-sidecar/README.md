@@ -92,12 +92,12 @@ sudo systemctl enable --now jm-sidecar
 - 数据目录：`data/comics/`（漫画）、`data/pdfs/`（PDF）、`data/covers|previews/`（封面/拼图）、
   `data/cache/`（SQLite 缓存）、`logs/`（日志）。全部留在本机，不进 Git。
 
-## 5. API v3（兼容 v2/v1）
+## 5. API v5（兼容 v4/v3/v2/v1）
 
 | 方法/路径 | 说明 |
 |---|---|
-| `GET /health` | 健康检查、viewer base、库/缓存计数、`capabilities`（本版含 `units`、`details`；Node 打包/结构化检索前核它） |
-| `GET /search?q=&limit=&page=&mode=&refresh=&images=&details=` | 搜索（`mode=site/work/author/tag/actor`）+ 拼图；`limit` 1~10；`images=0/false` 跳过封面/拼图；`details=1` 只取文字详情（作者/标签/页数），不取封面/拼图，可与 `images=0` 同用 |
+| `GET /health` | 健康检查、viewer base、库/缓存计数、`capabilities`（本版含 `units`、`details`、`sort`、`paging`；Node 打包/结构化检索/热门排序/翻页前核它） |
+| `GET /search?q=&limit=&page=&mode=&order=&window=&refresh=&images=&details=` | 搜索（`mode=site/work/author/tag/actor`）+ 拼图；`limit` 1~10；`order=mr/mv` 排序（最新/热门，默认 mr；非法值 400 `invalid_order`）；`window=1` 逻辑翻页（第 `page` 页 = 第 `(page-1)*limit+1` 条起，映射到上游分页，只回文字清单，须 `images=0` 且不带 `details`）；`images=0/false` 跳过封面/拼图；`details=1` 只取文字详情（作者/标签/页数），不取封面/拼图，可与 `images=0` 同用 |
 | `GET /cover/<id>.jpg` | 封面 |
 | `GET /preview/<name>.jpg` | 搜索结果拼图 |
 | `GET /resolve/<number>` | 按编号精确解析（不走向站内搜索）：`kind=album` 或 `kind=photo`（章节/单元号 → 父作品，附 `matched_unit`）；404 `not_found`、400 `invalid_id` |

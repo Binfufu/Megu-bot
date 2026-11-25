@@ -345,6 +345,29 @@ test('router:c106 真实语料 —— 裸「X本子」/省「本」简写/大吊
   }
 });
 
+test('router:翻页独立词与排序/页码写法（2026-11-25）', () => {
+  // 翻页独立词：没有目标名词也认（明确的 JM 命令），@ 与非 @ 都放行。
+  for (const [text, delta] of [['下一页', 1], ['上一页', -1]]) {
+    const route = expectRoute(text, { kind: 'book', component: 'jm', action: 'page' });
+    assert.equal(route.parsed?.delta, delta, text);
+    assert.equal(allowsNonMentionTrigger(route, text), true, `${text} 非 @ 放行`);
+  }
+  // 带尾巴/闲聊不算翻页命令。
+  for (const text of ['下一页啊', '翻下一页', '上一页是什么']) {
+    const route = routeSearchCommand(text);
+    assert.notEqual(route.action, 'page', `${text} 不该当翻页`);
+  }
+  // 排序/关键词页码走既有 search 动作。
+  const hot = expectRoute('搜本 全彩 排序:热门', { kind: 'book', component: 'jm', action: 'search' });
+  assert.equal(hot.parsed?.sort, 'mv');
+  const p2 = expectRoute('搜本 全彩 页码:2', { action: 'search' });
+  assert.equal(p2.parsed?.page, 2);
+  assert.equal(p2.parsed?.keyword, '全彩');
+  const structHot = expectRoute('搜本 作者:甲 排序:热门', { action: 'search' });
+  assert.equal(structHot.parsed?.mode, 'structured');
+  assert.equal(structHot.parsed?.sort, 'mv');
+});
+
 export function registerCommandRouterTests(register) {
   const testFn = typeof register === 'function' ? register : register?.test;
   if (typeof testFn !== 'function') throw new TypeError('registerCommandRouterTests 需要 test');

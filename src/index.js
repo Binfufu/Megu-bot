@@ -7855,7 +7855,7 @@ const NAMING_HINT = /叫|名字|大名|称呼/;
       if (!groupAllowed) return false;
       // 非 @ 不做"追问/格式提示"这类对话动作；只执行确定性动作。
       if (route.hint) return false;
-      if (!['search', 'download', 'send'].includes(route.action)) return false;
+      if (!['search', 'download', 'send', 'page'].includes(route.action)) return false;
       // **意图闸**（2026-11-24 审查 P1-1）：路由的宽形状（`来张纸`、`找本工作`、`看本小说`）
       // 不能直接当非 @ 命令；必须是显式搜索/请求句式或带图像名词，否则水群闲聊会被执行。
       if (!allowsNonMentionTrigger(route, content)) return false;

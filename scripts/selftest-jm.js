@@ -201,7 +201,7 @@ test('jm-command:下本非法输入不认(不猜)', () => {
 test('jm-command:作者/原作(IP)/角色/标签/标题/页码结构化条件可解析,普通关键词语义不变', () => {
   assert.deepEqual(parseJmCommand('搜本 作者:甲'), {
     ok: true, action: 'search', mode: 'structured',
-    conditions: { creator: ['甲'] }, page: 1, keyword: null, countGiven: false,
+    conditions: { creator: ['甲'] }, page: 1, sort: null, keyword: null, countGiven: false,
   });
   assert.deepEqual(parseJmCommand('搜本 原作:乙').conditions, { original: ['乙'] });
   assert.deepEqual(parseJmCommand('搜本 IP:丙').conditions, { original: ['丙'] });
@@ -222,7 +222,7 @@ test('jm-command:作者/原作(IP)/角色/标签/标题/页码结构化条件可
 
 test('jm-command:字段别名与「键 值」空格写法(2026-11-20 现场:搜本 tag 齁)', () => {
   const structured = (conditions, page = 1) => ({
-    ok: true, action: 'search', mode: 'structured', conditions, page, keyword: null, countGiven: false,
+    ok: true, action: 'search', mode: 'structured', conditions, page, sort: null, keyword: null, countGiven: false,
   });
   assert.deepEqual(parseJmCommand('搜本 tag 齁'), structured({ tag: ['齁'] }));
   assert.deepEqual(parseJmCommand('搜本 标签 齁'), structured({ tag: ['齁'] }));
@@ -2078,6 +2078,445 @@ test('jm-service:搜索超过等待线先回「在搜了」,最终结果按序�
     const at = calls.reply.indexOf(DEFAULT_JM_LINES.working[0]);
     assert.ok(at >= 0, '慢搜索要先回「在搜了」');
     assert.ok(at < calls.reply.length - 1, '最终结果必须在提示之后（回话串行链）');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ③-b 排序 + 翻页（2026-11-25 主人拍板：最新+热门、每页 5、下一页/上一页、
+//     全局连续序号、仅第 1 页自动下载、排序两种检索都要）
+// ---------------------------------------------------------------------------
+
+test('jm-command:排序键 —— 冒号/空格/粘连写法,最新/热门,非法值明确拒绝', () => {
+  for (const text of ['搜本 全彩 排序:热门', '搜本 全彩 排序 热门', '搜本 全彩 排序热门', '搜本 全彩 order:mv']) {
+    const parsed = parseJmCommand(text);
+    assert.equal(parsed.ok, true, text);
+    assert.equal(parsed.keyword, '全彩', text);
+    assert.equal(parsed.sort, 'mv', text);
+    assert.equal(parsed.page, 1, text);
+  }
+  assert.equal(parseJmCommand('搜本 全彩 排序:最新').sort, 'mr');
+  assert.equal(parseJmCommand('搜本 全彩').sort, undefined, '不写排序 = 不带 sort 字段（旧形状不变）');
+  // 结构化也要排序（主人拍板）。
+  const structured = parseJmCommand('搜本 作者:甲 排序:热门');
+  assert.equal(structured.ok, true);
+  assert.equal(structured.mode, 'structured');
+  assert.equal(structured.sort, 'mv');
+  assert.deepEqual(structured.conditions, { creator: ['甲'] });
+  assert.equal(parseJmCommand('搜本 标签:全彩 排序 热门 页码:2').sort, 'mv');
+  // 非法/重复/缺值明确拒绝，不静默按默认排序。
+  assert.equal(parseJmCommand('搜本 全彩 排序:年份').reason, 'sort');
+  assert.equal(parseJmCommand('搜本 全彩 排序:热门 排序:最新').reason, 'sort');
+  assert.equal(parseJmCommand('搜本 全彩 排序').reason, 'sort');
+  assert.equal(parseJmCommand('搜本 排序:热门').reason, 'format', '只有排序没有关键词不是检索');
+  assert.equal(parseJmCommand('搜本 作者:甲 排序:tf').reason, 'sort', '上游未开放的值不收');
+});
+
+test('jm-command:关键词页码与翻页独立词、显式序号 序号N', () => {
+  const p2 = parseJmCommand('搜本 全彩 页码:2');
+  assert.equal(p2.ok, true);
+  assert.equal(p2.keyword, '全彩');
+  assert.equal(p2.page, 2);
+  assert.equal(p2.countGiven, false);
+  const p2c3 = parseJmCommand('搜本 全彩 3 页码:2');
+  assert.equal(p2c3.count, 3, '裸数字仍是数量词');
+  assert.equal(p2c3.page, 2);
+  assert.equal(parseJmCommand('搜本 全彩 页码 2').page, 2, '空格写法');
+  assert.equal(parseJmCommand('搜本 页码:2').reason, 'format', '只有页码没有关键词');
+  assert.equal(parseJmCommand('搜本 全彩 页码:0').reason, 'page');
+  assert.equal(parseJmCommand('搜本 全彩 页码:10000').reason, 'page');
+  // 翻页独立词。
+  assert.deepEqual(parseJmCommand('下一页'), { ok: true, action: 'page', delta: 1 });
+  assert.deepEqual(parseJmCommand('上一页'), { ok: true, action: 'page', delta: -1 });
+  assert.deepEqual(parseJmCommand('@爱丽丝 下一页'), { ok: true, action: 'page', delta: 1 });
+  assert.equal(parseJmCommand('下一页啊').ok, false, '带尾巴不算独立词');
+  // 显式序号（全局序号可超 9）；# / 第 / 裸两位数字的旧语义不破坏。
+  assert.deepEqual(parseJmCommand('下本 序号12').targets, [{ kind: 'ordinal', ordinal: 12 }]);
+  assert.deepEqual(parseJmCommand('下本 序号12 序号13').targets, [
+    { kind: 'ordinal', ordinal: 12 }, { kind: 'ordinal', ordinal: 13 },
+  ]);
+  assert.equal(parseJmCommand('下本 序号0').ok, false);
+  assert.equal(parseJmCommand('下本 #1490076').targets[0].target, '1490076', '# 仍是编号前缀');
+  assert.equal(parseJmCommand('下本 10').targets[0].target, '10', '裸两位数字仍是编号');
+});
+
+test('jm-fetch:--order 校验与传参,缺省不发 order（旧边车兼容）', async () => {
+  assert.equal(parseJmArgs(['--order', 'mv']).order, 'mv');
+  assert.equal(parseJmArgs(['--order', 'MR']).order, 'mr', '大小写归一');
+  assert.equal(parseJmArgs([]).order, '');
+  const urls = [];
+  const run = (options) => runJmFetch(
+    { op: 'search', q: '全彩', api: 'http://127.0.0.1:8790', timeoutMs: 5000, ...options },
+    {
+      log: noopLog,
+      fetchImpl: async (url) => {
+        urls.push(url);
+        return jsonRes({ ok: true, total: 0, results: [], order: options.order || 'mr' });
+      },
+    },
+  );
+  const hot = await run({ order: 'mv', page: 2 });
+  assert.equal(hot.ok, true);
+  assert.equal(hot.order, 'mv');
+  assert.ok(urls.at(-1).includes('order=mv'), urls.at(-1));
+  assert.ok(urls.at(-1).includes('page=2'), urls.at(-1));
+  const plain = await run({});
+  assert.equal(plain.order, 'mr');
+  assert.ok(!urls.at(-1).includes('order='), '缺省不发 order，旧边车按最新回');
+  const bad = await run({ order: 'tf' });
+  assert.equal(bad.ok, false);
+  assert.equal(bad.reason, 'bad_args');
+});
+
+test('jm-fetch:--window 逻辑翻页参数,缺省不发 window（旧边车兼容）', async () => {
+  assert.equal(parseJmArgs(['--window', '1']).window, true);
+  assert.equal(parseJmArgs(['--window', 'true']).window, true);
+  assert.equal(parseJmArgs(['--window', '0']).window, false);
+  assert.equal(parseJmArgs([]).window, false);
+  const urls = [];
+  const run = (options) => runJmFetch(
+    { op: 'search', q: '全彩', api: 'http://127.0.0.1:8790', timeoutMs: 5000, ...options },
+    {
+      log: noopLog,
+      fetchImpl: async (url) => {
+        urls.push(url);
+        return jsonRes({ ok: true, total: 12, results: [{ id: '106', title: '己' }] });
+      },
+    },
+  );
+  const paged = await run({ page: 2, limit: 5, window: true, images: false });
+  assert.equal(paged.ok, true);
+  assert.equal(paged.window, true);
+  assert.ok(urls.at(-1).includes('window=1'), urls.at(-1));
+  assert.ok(urls.at(-1).includes('page=2'), urls.at(-1));
+  assert.ok(urls.at(-1).includes('images=0'), 'window 只回文字清单，不取图');
+  const plain = await run({ page: 1, limit: 5, images: false });
+  assert.equal(plain.window, false);
+  assert.ok(!urls.at(-1).includes('window='), '缺省不发 window，旧边车按上游页回');
+});
+
+/** 翻页夹具：search 按 --page 回不同结果；翻页窗口（--window 1）按逻辑页切片。 */
+function makePagingFixture(dir, group, { pages, total, healthCaps = ['units', 'details', 'sort', 'paging'], cooldownMs = 0, now, groups } = {}) {
+  const calls = { fetch: [] };
+  const flatPages = () => Object.keys(pages).map(Number).sort((a, b) => a - b)
+    .flatMap((page) => pages[page] ?? []);
+  const runFetch = async ({ args }) => {
+    calls.fetch.push(args);
+    const op = args[args.indexOf('--op') + 1];
+    if (op === 'health') {
+      return { code: 0, stderr: '', timedOut: false, stdout: JSON.stringify({ ok: true, capabilities: healthCaps }) };
+    }
+    if (op === 'search') {
+      const page = Number(args[args.indexOf('--page') + 1] ?? 1);
+      const limit = Number(args[args.indexOf('--limit') + 1] ?? 5);
+      // window=1 是逻辑翻页：第 page 页 = 扁平结果流里第 (page-1)*limit 起的 limit 条。
+      const results = args.includes('--window')
+        ? flatPages().slice((page - 1) * limit, page * limit)
+        : (pages[page] ?? []);
+      return { code: 0, stderr: '', timedOut: false, stdout: JSON.stringify(searchPayload({ results, total })) };
+    }
+    if (op === 'resolve') {
+      const id = args[args.indexOf('--id') + 1];
+      return { code: 0, stderr: '', timedOut: false, stdout: JSON.stringify(resolvePayload({ album: albumPayload({ id, title: `合成本${id}` }) })) };
+    }
+    if (op === 'download') {
+      const id = args[args.indexOf('--id') + 1];
+      return { code: 0, stderr: '', timedOut: false, stdout: JSON.stringify(downloadPayload({ id, title: `合成本${id}` })) };
+    }
+    if (op === 'pdf') {
+      const id = args[args.indexOf('--id') + 1];
+      return { code: 0, stderr: '', timedOut: false, stdout: JSON.stringify(pdfPayload({ id, file: makePdfFile(dir, id) })) };
+    }
+    throw new Error(`翻页夹具不允许操作 ${op}`);
+  };
+  const made = makeDeps({ dir, groups: groups ?? [group], runFetch, cooldownMs, ...(now ? { now } : {}) });
+  const run = (text, target = group) => handleJmCommand({
+    message: message(target),
+    parsed: parseJmCommand(text),
+    deps: made.deps,
+  });
+  const searchArgsList = () => calls.fetch.filter((args) => args.includes('search'));
+  return { ...made, run, calls: { ...made.calls, fetch: calls.fetch }, searchArgsList };
+}
+
+const PAGING_PAGES = {
+  1: [{ id: '101', title: '甲' }, { id: '102', title: '乙' }, { id: '103', title: '丙' }, { id: '104', title: '丁' }, { id: '105', title: '戊' }],
+  2: [{ id: '201', title: '己' }, { id: '202', title: '庚' }, { id: '203', title: '辛' }, { id: '204', title: '壬' }, { id: '205', title: '癸' }],
+  3: [{ id: '301', title: '子' }, { id: '302', title: '丑' }],
+};
+
+test('jm-service:排序参数传递 —— 默认热门带 --order mv,显式最新带 mr;旧边车只在显式热门时报旧版', async () => {
+  await withTemp(async (dir) => {
+    const results = PAGING_PAGES[1];
+    const hot = makePagingFixture(dir, 'g-sort', { pages: { 1: results }, total: 5 });
+    const ok = await hot.run('搜本 全彩 排序:热门');
+    assert.equal(ok.ok, true);
+    const args = hot.searchArgsList().at(-1);
+    assert.equal(args[args.indexOf('--order') + 1], 'mv');
+    assert.equal(args[args.indexOf('--page') + 1], '1');
+    // 缺省 = 热门（2026-11-25 主人拍板【暂定】）：显式发 mv，不再依赖边车缺省。
+    const plain = makePagingFixture(dir, 'g-sort-plain', { pages: { 1: results }, total: 5 });
+    await plain.run('搜本 全彩');
+    assert.equal(plain.searchArgsList().at(-1)[plain.searchArgsList().at(-1).indexOf('--order') + 1], 'mv', '默认排序=热门');
+    // 显式「排序:最新」换回最新。
+    const latest = makePagingFixture(dir, 'g-sort-latest', { pages: { 1: results }, total: 5 });
+    await latest.run('搜本 全彩 排序:最新');
+    assert.equal(latest.searchArgsList().at(-1)[latest.searchArgsList().at(-1).indexOf('--order') + 1], 'mr');
+    // 旧边车（无 sort 能力）+ 显式热门 → 固定话术，且不发起搜索。
+    const old = makePagingFixture(dir, 'g-sort-old', { pages: { 1: results }, total: 5, healthCaps: ['units', 'details'] });
+    const denied = await old.run('搜本 全彩 排序:热门');
+    assert.equal(denied.ok, false);
+    assert.equal(denied.reason, 'sort_unsupported');
+    assertReplyIn(old.calls, 'sortUnsupported');
+    assert.equal(old.searchArgsList().length, 0, '能力闸在搜索之前');
+    // 旧边车 + 缺省热门（第 1 页）：照常搜索，不报旧版（order 被旧边车忽略 → 最新）。
+    const oldPlain = await old.run('搜本 全彩');
+    assert.equal(oldPlain.ok, true, '缺省热门不因旧边车被拦');
+    // 旧边车（无 paging 能力）：第 2 页起必须明确报旧版，
+    // 不能把「每页 5 条」的逻辑页当上游页翻错（契约 v5 之前 page 是上游站内页）。
+    const oldPaging = makePagingFixture(dir, 'g-sort-old-page', {
+      pages: PAGING_PAGES, total: 12, healthCaps: ['units', 'details'],
+    });
+    const oldPagingPlain = await oldPaging.run('搜本 全彩');
+    assert.equal(oldPagingPlain.ok, true);
+    const searchedBefore = oldPaging.searchArgsList().length;
+    const oldPage = await oldPaging.run('下一页');
+    assert.equal(oldPage.ok, false);
+    assert.equal(oldPage.reason, 'paging_unsupported');
+    assertReplyIn(oldPaging.calls, 'pagingUnsupported');
+    assert.equal(oldPaging.searchArgsList().length, searchedBefore, '翻页能力闸在搜索之前');
+    const oldJump = await oldPaging.run('搜本 全彩 页码:2');
+    assert.equal(oldJump.reason, 'paging_unsupported', '显式跳页同样要能力闸');
+  });
+});
+
+test('jm-service:结构化检索排序 —— 默认热门带 --order mv,显式最新带 mr;旧边车闸与 details 闸并列', async () => {
+  await withTemp(async (dir) => {
+    const results = [{ id: '101', title: '全彩甲', authors: ['作者甲'], tags: ['全彩'], detailOk: true }];
+    const plain = makeStructuredFixture(dir, 'g-struct-default', { results, healthCaps: ['units', 'details', 'sort'] });
+    const ok = await plain.run('搜本 作者:作者甲');
+    assert.equal(ok.ok, true);
+    assert.equal(plain.searchArgs()[plain.searchArgs().indexOf('--order') + 1], 'mv', '默认排序=热门');
+    assert.match(plain.calls.reply.at(-1), /按热门排序/u);
+    const latest = makeStructuredFixture(dir, 'g-struct-latest', { results, healthCaps: ['units', 'details', 'sort'] });
+    const okLatest = await latest.run('搜本 作者:作者甲 排序:最新');
+    assert.equal(okLatest.ok, true);
+    assert.equal(latest.searchArgs()[latest.searchArgs().indexOf('--order') + 1], 'mr');
+    assert.match(latest.calls.reply.at(-1), /按最新排序/u);
+    const old = makeStructuredFixture(dir, 'g-struct-sort-old', { results, healthCaps: ['units', 'details'] });
+    const denied = await old.run('搜本 作者:作者甲 排序:热门');
+    assert.equal(denied.reason, 'sort_unsupported');
+    assertReplyIn(old.calls, 'sortUnsupported');
+    assert.equal(old.operations().filter((op) => op === 'search').length, 0);
+    // 旧边车 + 缺省热门：退回边车缺省（最新），不传 order、也不在清单上标「按热门」。
+    const oldDefault = makeStructuredFixture(dir, 'g-struct-default-old', { results, healthCaps: ['units', 'details'] });
+    const okOld = await oldDefault.run('搜本 作者:作者甲');
+    assert.equal(okOld.ok, true);
+    assert.ok(!oldDefault.searchArgs().includes('--order'), '旧边车不传 order');
+    assert.doesNotMatch(oldDefault.calls.reply.at(-1), /按热门排序/u, '不冒充热门');
+  });
+});
+
+test('jm-service:翻页全流程 —— 全局序号、首页/末页边界、序号映射、翻页不自动下载', async () => {
+  await withTemp(async (dir) => {
+    const fixture = makePagingFixture(dir, 'g-page', { pages: PAGING_PAGES, total: 12 });
+    const first = await fixture.run('搜本 全彩');
+    assert.equal(first.ok, true);
+    assert.ok(fixture.calls.reply.at(-1).includes('1. JM101'), '第 1 页从 1 起');
+    assert.ok(fixture.calls.reply.at(-1).includes('下一页'), '多页清单要给翻页提示');
+
+    const second = await fixture.run('下一页');
+    assert.equal(second.ok, true);
+    const text2 = fixture.calls.reply.at(-1);
+    assert.ok(text2.includes('第2页'), text2);
+    assert.ok(text2.includes('6. JM201'), '全局序号：第 2 页从 6 起');
+    assert.ok(text2.includes('10. JM205'), text2);
+    assert.equal(fixture.searchArgsList().at(-1)[fixture.searchArgsList().at(-1).indexOf('--page') + 1], '2');
+
+    // 序号映射：下本 6 = 第 2 页第 1 条；下本 序号10 = 第 2 页第 5 条。
+    const byRank = await fixture.run('下本 6');
+    assert.equal(byRank.ok, true);
+    assert.equal(fixture.calls.upload.length, 1);
+    assert.ok(fixture.calls.upload[0].fileName.includes('JM201'), fixture.calls.upload[0].fileName);
+    const byExplicit = await fixture.run('下本 序号10');
+    assert.equal(byExplicit.ok, true);
+    assert.ok(fixture.calls.upload[1].fileName.includes('JM205'), fixture.calls.upload[1].fileName);
+    // 第 2 页时「下本 3」（第 1 页的序号）不在当前清单 → 明确拒绝。
+    const stale = await fixture.run('下本 3');
+    assert.equal(stale.ok, false);
+    assert.equal(stale.reason, 'ordinal_missing');
+    assertReplyIn(fixture.calls, 'ordinalMissing');
+
+    // 末页：第 3 页只有 2 条（11/12）；再下一页 → 固定话术，不发起搜索。
+    await fixture.run('下一页');
+    assert.ok(fixture.calls.reply.at(-1).includes('11. JM301'), fixture.calls.reply.at(-1));
+    const fetchCountBefore = fixture.calls.fetch.length;
+    const beyond = await fixture.run('下一页');
+    assert.equal(beyond.ok, false);
+    assert.equal(beyond.reason, 'last_page');
+    assertReplyIn(fixture.calls, 'lastPage');
+    assert.equal(fixture.calls.fetch.length, fetchCountBefore, '越界翻页不发起搜索');
+
+    // 上一页回第 2 页、再回第 1 页；第一页再上一页 → 固定话术。
+    await fixture.run('上一页');
+    assert.ok(fixture.calls.reply.at(-1).includes('6. JM201'));
+    await fixture.run('上一页');
+    assert.ok(fixture.calls.reply.at(-1).includes('1. JM101'));
+    const beforeFirst = fixture.calls.fetch.length;
+    const beforeFirstResult = await fixture.run('上一页');
+    assert.equal(beforeFirstResult.reason, 'first_page');
+    assertReplyIn(fixture.calls, 'firstPage');
+    assert.equal(fixture.calls.fetch.length, beforeFirst);
+    // 翻页全程没有自动下载（只有上面两次显式下本）。
+    assert.equal(fixture.calls.upload.length, 2);
+  });
+});
+
+test('jm-service:翻页状态只认本群 —— 别群/没搜过/单元清单/清单被拒都不能翻', async () => {
+  await withTemp(async (dir) => {
+    const fixture = makePagingFixture(dir, 'g-page-iso', { pages: PAGING_PAGES, total: 12, groups: ['g-page-iso', 'g-page-other'] });
+    // 没搜过直接翻页。
+    const fresh = await fixture.run('下一页');
+    assert.equal(fresh.reason, 'no_search');
+    assertReplyIn(fixture.calls, 'noSearchPage');
+    // A 群搜了，B 群翻页拿不到 A 的清单。
+    await fixture.run('搜本 全彩', 'g-page-iso');
+    const other = await fixture.run('下一页', 'g-page-other');
+    assert.equal(other.reason, 'no_search');
+    // 单元清单不可翻页（快照被清）：多单元作品先给单元清单。
+    const multi = makeDeps({
+      dir, groups: ['g-page-multi'],
+      payloads: [resolvePayload({ album: albumPayload({ id: '900', units: [
+        { index: 1, unitId: '9001', title: '第1话' }, { index: 2, unitId: '9002', title: '第2话' },
+      ] }) })],
+    });
+    await handleJmCommand({ message: message('g-page-multi'), parsed: parseJmCommand('搜本 900'), deps: multi.deps });
+    assert.ok(multi.calls.reply.at(-1).includes('单元本'), '应先给单元清单');
+    const afterUnits = await handleJmCommand({ message: message('g-page-multi'), parsed: parseJmCommand('下一页'), deps: multi.deps });
+    assert.equal(afterUnits.reason, 'no_search', '单元清单不是可翻页的搜索');
+    // 清单被 QQ 拒绝（40034006）→ 快照清掉，不能按序号选也不能翻页。
+    const blocked = makePagingFixture(dir, 'g-page-blocked', { pages: PAGING_PAGES, total: 12 });
+    blocked.deps.reply = async (text) => {
+      blocked.calls.reply.push(text);
+      if (text.includes('搜到')) { const err = new Error('moderation'); err.code = 40034006; throw err; }
+      return 1;
+    };
+    const blockedResult = await blocked.run('搜本 全彩');
+    assert.equal(blockedResult.ok, false);
+    const afterBlocked = await blocked.run('下一页');
+    assert.equal(afterBlocked.reason, 'no_search');
+  });
+});
+
+test('jm-service:新搜索失败/0 命中清掉旧清单快照 —— 下一页不能翻到上一条搜索', async () => {
+  await withTemp(async (dir) => {
+    const calls = { fetch: [] };
+    // failMode: '' 正常；'fetch' 抓取器失败；'empty' 边车回 0 结果。
+    let failMode = '';
+    const flat = () => [...PAGING_PAGES[1], ...PAGING_PAGES[2], ...PAGING_PAGES[3]];
+    const runFetch = async ({ args }) => {
+      calls.fetch.push(args);
+      const op = args[args.indexOf('--op') + 1];
+      if (op === 'health') {
+        return { code: 0, stderr: '', timedOut: false, stdout: JSON.stringify({ ok: true, capabilities: ['units', 'details', 'sort', 'paging'] }) };
+      }
+      if (op !== 'search') throw new Error(`失败清快照夹具不允许操作 ${op}`);
+      if (failMode === 'fetch') {
+        failMode = '';
+        return { code: 1, stderr: 'boom', timedOut: false, stdout: '' };
+      }
+      const page = Number(args[args.indexOf('--page') + 1] ?? 1);
+      const limit = Number(args[args.indexOf('--limit') + 1] ?? 5);
+      if (failMode === 'empty') {
+        failMode = '';
+        return { code: 0, stderr: '', timedOut: false, stdout: JSON.stringify(searchPayload({ results: [], total: 0 })) };
+      }
+      const results = args.includes('--window') ? flat().slice((page - 1) * limit, page * limit) : (PAGING_PAGES[page] ?? []);
+      return { code: 0, stderr: '', timedOut: false, stdout: JSON.stringify(searchPayload({ results, total: 12 })) };
+    };
+    const made = makeDeps({ dir, groups: ['g-page-stale'], runFetch });
+    const run = (text) => handleJmCommand({ message: message('g-page-stale'), parsed: parseJmCommand(text), deps: made.deps });
+    await run('搜本 全彩');
+    assert.ok(made.calls.reply.at(-1).includes('1. JM101'), '先有一份可用清单');
+    // 新搜索抓取失败 → 快照清掉，下一页回「先搜本」而不是翻旧清单。
+    failMode = 'fetch';
+    const failed = await run('搜本 别的');
+    assert.equal(failed.ok, false);
+    const afterFail = await run('下一页');
+    assert.equal(afterFail.reason, 'no_search');
+    // 再建一份快照，然后新搜索 0 命中 → 同样清掉。
+    await run('搜本 全彩');
+    failMode = 'empty';
+    const empty = await run('搜本 别的');
+    assert.equal(empty.reason, 'no_result');
+    const afterEmpty = await run('下一页');
+    assert.equal(afterEmpty.reason, 'no_search');
+  });
+});
+
+test('jm-service:翻页不吃冷却【暂定】;新搜本仍吃冷却;仅第 1 页自动下载', async () => {
+  await withTemp(async (dir) => {
+    let clock = 1_700_000_000_000;
+    const fixture = makePagingFixture(dir, 'g-page-cd', {
+      pages: PAGING_PAGES, total: 12, cooldownMs: 30_000, now: () => clock,
+    });
+    await fixture.run('搜本 全彩');
+    clock += 1_000; // 1 秒后翻页：冷却 30s 内，但翻页不拦。
+    const paged = await fixture.run('下一页');
+    assert.equal(paged.ok, true, `翻页不吃搜本冷却（${JSON.stringify(paged)}）`);
+    clock += 1_000;
+    const fresh = await fixture.run('搜本 别的');
+    assert.equal(fresh.reason, 'cooldown', '新搜本仍吃冷却（翻页不刷新冷却时间）');
+    // 仅第 1 页自动下载：显式 页码:1 + total=1 仍自动下载；翻到第 2 页只剩 1 条也不自动下载。
+    const single = makePagingFixture(dir, 'g-page-single', {
+      pages: { 1: [{ id: '101', title: '独苗' }] }, total: 1,
+    });
+    const auto = await single.run('搜本 独苗 页码:1');
+    assert.equal(auto.ok, true);
+    assert.equal(single.calls.upload.length, 1, '第 1 页唯一命中仍自动下载');
+    const afterAuto = await single.run('下一页');
+    assert.equal(afterAuto.reason, 'no_search', '自动下载的新搜索没有清单，旧快照不能再翻');
+    const single2 = makePagingFixture(dir, 'g-page-single2', {
+      pages: {
+        1: [{ id: '101', title: '甲' }, { id: '102', title: '乙' }, { id: '103', title: '丙' },
+          { id: '104', title: '丁' }, { id: '105', title: '戊' }],
+        2: [{ id: '106', title: '己' }],
+      },
+      total: 6,
+    });
+    const noAuto = await single2.run('搜本 独苗 页码:2');
+    assert.equal(noAuto.ok, true);
+    assert.equal(single2.calls.upload.length, 0, '第 2 页即使只回 1 条也不自动下载');
+    assert.ok(single2.calls.reply.at(-1).includes('6. JM106'), '只给清单且序号全局连续');
+  });
+});
+
+test('jm-service:结构化翻页 —— 下一页推进扫描页,空页保留快照可上一页', async () => {
+  await withTemp(async (dir) => {
+    const page1 = [{ id: '101', title: '全彩甲', authors: ['作者甲'], tags: ['全彩'], detailOk: true }];
+    const calls = { fetch: [] };
+    const runFetch = async ({ args }) => {
+      calls.fetch.push(args);
+      const op = args[args.indexOf('--op') + 1];
+      if (op === 'health') {
+        return { code: 0, stderr: '', timedOut: false, stdout: JSON.stringify({ ok: true, capabilities: ['units', 'details', 'sort'] }) };
+      }
+      const page = Number(args[args.indexOf('--page') + 1] ?? 1);
+      return { code: 0, stderr: '', timedOut: false, stdout: JSON.stringify(searchPayload({ results: page === 1 ? page1 : [], total: 1 })) };
+    };
+    const made = makeDeps({ dir, groups: ['g-struct-page'], runFetch });
+    const run = (text) => handleJmCommand({ message: message('g-struct-page'), parsed: parseJmCommand(text), deps: made.deps });
+    const first = await run('搜本 作者:作者甲');
+    assert.equal(first.ok, true);
+    const next = await run('下一页');
+    assert.equal(next.ok, false);
+    assert.equal(next.reason, 'no_result');
+    assert.match(made.calls.reply.at(-1), /本次检查范围内没找到/u);
+    const searches = calls.fetch.filter((args) => args.includes('search'));
+    assert.equal(searches.at(-1)[searches.at(-1).indexOf('--page') + 1], '2');
+    // 空页后快照仍在 → 上一页回第 1 页。
+    const back = await run('上一页');
+    assert.equal(back.ok, true);
+    assert.match(made.calls.reply.at(-1), /本次检查范围内找到 1 本/u);
   });
 });
 

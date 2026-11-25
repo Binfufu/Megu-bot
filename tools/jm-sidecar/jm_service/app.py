@@ -11,7 +11,7 @@ from pathlib import Path
 from flask import Flask, jsonify, request, send_file
 
 from .config import Config
-from .jm_api import SEARCH_MODES, JmError, JmGateway
+from .jm_api import SEARCH_MODES, SEARCH_ORDERS, JmError, JmGateway
 from .pdf import PdfError, ensure_album_pdf, ensure_unit_pdf, ensure_units_pdf, pdf_status
 from .preview import build_preview, preview_name
 from .store import Store
@@ -29,6 +29,8 @@ _PREVIEW_RE = re.compile(r"^(p_[0-9a-f]{6}_\d+)\.jpg$")
 # 参数错误的固定对外说明：绝不回传 ValueError 原文（int() 的异常会回显原始输入）。
 SEARCH_PARAM_MESSAGE = "参数不合法：limit 需在 1~10、page 需在 1~100000 之间"
 LIBRARY_PARAM_MESSAGE = "参数不合法：limit 需在 1~200，offset 不能为负数"
+# window=1 只做逻辑翻页的文字清单，不取封面/详情（避免把窗口内前几条的封面冒充整页）。
+WINDOW_PARAM_MESSAGE = "window=1 只支持 images=0 且不带 details"
 
 
 def _json_error(code: str, message: str, status: int = 400):
@@ -39,7 +41,7 @@ def _error_status(code: str) -> int:
     if "timeout" in code:
         return 504
     if code in ("bad_request", "invalid_query", "invalid_param", "invalid_id", "invalid_json",
-                "invalid_unit", "multiple_units"):
+                "invalid_unit", "multiple_units", "invalid_mode", "invalid_order"):
         return 400
     if code in ("cover_not_found", "preview_not_found", "job_not_found", "not_found",
                 "unit_not_downloaded", "album_not_downloaded"):
@@ -150,7 +152,11 @@ class Service:
                 # 能力声明：Node 侧合并打包前先核它，旧边车不会被静默当成支持 ?units=。
                 # details：/search?images=0&details=1 只取文字详情、不取封面/拼图；
                 # 结构化检索（作者/原作/角色/标签）靠它核对候选，旧边车没有就明确报旧版。
-                "capabilities": ["units", "details"],
+                # sort：/search?order=mr|mv 排序；旧边车会忽略 order 静默按最新回，
+                # Node 显式要非默认排序时先核它，缺能力就明确报旧版。
+                # paging：/search?window=1 逻辑翻页（每页 limit 条）；旧边车会把逻辑页
+                # 当上游页，第 2 页直接跳到第 81 条起，Node 翻页前先核它。
+                "capabilities": ["units", "details", "sort", "paging"],
             })
 
         @app.get("/search")
@@ -208,6 +214,9 @@ class Service:
         mode = (request.args.get("mode") or "site").strip().lower()
         if mode not in SEARCH_MODES:
             return _json_error("invalid_mode", f"mode 仅支持 {'/'.join(SEARCH_MODES)}", 400)
+        order = (request.args.get("order") or "mr").strip().lower()
+        if order not in SEARCH_ORDERS:
+            return _json_error("invalid_order", f"order 仅支持 {'/'.join(SEARCH_ORDERS)}", 400)
         refresh = request.args.get("refresh", "0") in ("1", "true", "yes")
         # images=0：跳过封面/拼图；details=1：只取文字详情（作者/标签/页数），
         # 两者解耦 —— 结构化检索需要文字元数据，但不需要任何图片。
@@ -215,8 +224,14 @@ class Service:
                        not in ("0", "false", "no", "off"))
         with_details = (request.args.get("details", "0").strip().lower()
                         in ("1", "true", "yes", "on"))
+        # window=1（契约 v5，2026-11-25）：逻辑翻页 —— 第 page 页 = 第
+        # (page-1)*limit+1 .. page*limit 条，由 gateway.search_window 映射到上游分页。
+        # 只做文字清单（图片/详情与「每页 N 条窗口」语义冲突，明确拒绝而不是静默降级）。
+        window = request.args.get("window", "0").strip().lower() in ("1", "true", "yes", "on")
+        if window and (with_images or with_details):
+            return _json_error("invalid_param", WINDOW_PARAM_MESSAGE, 400)
 
-        cache_key = self._search_cache_key(query, page, limit, mode, with_images, with_details)
+        cache_key = self._search_cache_key(query, page, limit, mode, with_images, with_details, order, window)
         if not refresh:
             cached_payload = self.store.get_search(cache_key, self.cfg.search_ttl_sec)
             if cached_payload and self._cache_payload_ok(cached_payload, with_images):
@@ -225,12 +240,20 @@ class Service:
                 return jsonify({"ok": True, "cached": True, **cached_payload})
 
         try:
-            search_result = self.gateway.search(query, page=page, mode=mode)
+            if window:
+                search_result = self.gateway.search_window(
+                    query, page=page, limit=limit, mode=mode, order_by=order)
+            else:
+                search_result = self.gateway.search(query, page=page, mode=mode, order_by=order)
         except JmError as exc:
             self.log.warning("搜索失败 q=%r：%s", query, exc.message)
             return _json_error(exc.code, exc.message, _error_status(exc.code))
 
-        if with_images:
+        if window:
+            # 逻辑翻页窗口：只回文字清单，不取封面/详情/拼图。
+            results = self._build_results_without_images(search_result, limit)
+            preview_file = None
+        elif with_images:
             items = search_result["items"][:limit]
             album_ids = [item["id"] for item in items]
             details = self.gateway.fetch_details(album_ids, timeout_each=4.0) if album_ids else {}
@@ -285,6 +308,8 @@ class Service:
             "query": query,
             "page": page,
             "limit": limit,
+            "order": order,
+            "window": window,
             "total": search_result["total"],
             "results": results,
             "preview_file": preview_file,
@@ -292,23 +317,25 @@ class Service:
                             f"{preview_name_value}") if preview_name_value else None,
             "text": self._build_text(results),
         }
-        if preview_name_value or not with_images:
+        if window or preview_name_value or not with_images:
             try:
                 self.store.put_search(cache_key, query, page, limit, payload)
             except Exception as exc:  # noqa: BLE001 - 缓存失败不影响响应
                 self.log.warning("写搜索缓存失败：%s", exc)
         response = {"ok": True, "cached": False, **payload,
                     "elapsed_ms": int((time.time() - started) * 1000)}
-        self.log.info("搜索完成 q=%r mode=%s page=%s limit=%s images=%s details=%s 命中%s本 %dms cached=false",
-                      query, mode, page, limit, int(with_images), int(with_details), len(results),
-                      response["elapsed_ms"])
+        self.log.info("搜索完成 q=%r mode=%s page=%s limit=%s order=%s window=%s images=%s details=%s "
+                      "命中%s本 %dms cached=false",
+                      query, mode, page, limit, order, int(window), int(with_images), int(with_details),
+                      len(results), response["elapsed_ms"])
         return jsonify(response)
 
     @staticmethod
     def _search_cache_key(query: str, page: int, limit: int, mode: str = "site",
-                          with_images: bool = True, with_details: bool = False) -> str:
+                          with_images: bool = True, with_details: bool = False,
+                          order: str = "mr", window: bool = False) -> str:
         raw = (f"{mode}\x1f{query}\x1f{page}\x1f{limit}\x1f{int(bool(with_images))}"
-               f"\x1f{int(bool(with_details))}").encode("utf-8")
+               f"\x1f{int(bool(with_details))}\x1f{order}\x1f{int(bool(window))}").encode("utf-8")
         return hashlib.sha1(raw).hexdigest()
 
     def _cache_payload_ok(self, payload: dict, with_images: bool) -> bool:
